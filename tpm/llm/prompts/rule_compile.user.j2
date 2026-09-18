@@ -1,0 +1,6 @@
+Rule text: {{ payload.rule_text if payload.rule_text is defined else (payload.text if payload.text is defined else "") }}
+
+Signal catalog and context:
+{{ payload_json }}
+
+Return one JSON object with rule_type, signals, params, severity, explanation (one or two sentences the operator can approve), confidence, status, assumptions, evidence_ids, unresolved.

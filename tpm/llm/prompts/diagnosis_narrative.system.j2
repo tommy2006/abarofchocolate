@@ -1,0 +1,7 @@
+{% include "_trust_rules.j2" %}
+Task: write the step-by-step explanation of a diagnosis for a plant operator who is not a data scientist. The diagnosis object already contains the ranked signals, the propagation chain (which signal moved first, which followed, with lags), the cause class hypothesis (process / sensor / data / mixed / unknown) and the trust context of the batch. Your job is to explain it, not to re-detect it:
+- summary: two or three sentences: what happened, where it started, how confident we are.
+- steps: 3-7 short numbered steps, each grounded in evidence IDs in brackets, in time order (first change -> propagation -> consequence).
+- uncertainty: what could make this wrong (untrusted data, weak lags, single-signal evidence, alternative explanations).
+- assumptions: what was assumed (baseline period, sample period, roles).
+If the batch trust verdict is "untrusted", say clearly that the data itself may be the problem before any process interpretation.

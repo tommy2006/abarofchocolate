@@ -19,3 +19,15 @@ Pending (after agents finish):
 How to continue if the lead stops:
 - Read every docs/worklog/agent_*.md "How to continue" section; run the pytest commands listed there.
 - Integration order: ingest -> profile -> quality -> detect -> diagnose -> assess -> report; run `python -m tpm run samples/demo_process.csv` and fix the first failing stage (status.json in workspace/<run_id>/ has the traceback).
+
+## 2026-09-18 23:55 — All six agents delivered; integration pass
+Done:
+- Full suite before fixes: 203 passed, 1 xfail, 1 failed (test_e stream replay: per-batch LLM diagnosis made replay exceed the test's 10 s wait), 1 error (tests/test_c_common.py::test_settings was a helper named like a test).
+- Fixes: tpm/pipeline.process_batch now calls diagnose_flags(use_llm=False) (streaming path is template-only; LLM explanations on demand via chat); helper renamed make_settings; tpm/llm/agent.py rejects placeholder final answers ("answer the question") and nudges the model once; tpm/llm/ledger.data_flow_statement now names the local model actually used (fallback) not only the configured one; guard numeric budget raised 400 -> 4000 so a large signal catalog can go external in hybrid mode; autoencoder ConvergenceWarnings silenced (capped iterations are intentional).
+- Verified through the API on the real demo run: flags/diagnoses/steps/assessor verdict/chat/assessor.ask/ledger/log chain/FI report all good. Report "encoding bug" was a console display artifact (file is clean UTF-8).
+- Full 6 GB run started: `python -m tpm run te_process.csv --run-id te_full` (workspace/te_full/status.json shows progress).
+Pending:
+- Result of the 6 GB run (time budget 20 min) and any fixes it needs.
+- Commit + push to origin main; final launch instructions for the team (ollama pull gemma4:e4b-it-qat + nomic-embed-text).
+How to continue:
+- `.venv\Scripts\python.exe -m pytest tests -q` must be green; then `python -m tpm serve --open`.

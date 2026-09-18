@@ -1,0 +1,1381 @@
+"""FastAPI server for the Trustworthy Process Monitor.
+
+    uvicorn tpm.api.server:app --port 8765
+
+Every stage function that another agent owns is imported lazily; when it is missing the handler answers
+HTTP 501 ``{"unavailable": "module.function", "available": false}`` so the UI can render a clear notice
+instead of crashing. Artifact readers never raise on a missing file: they answer ``available: false``.
+"""
+from __future__ import annotations
+
+import asyncio
+import csv
+import importlib
+import io
+import json
+import shutil
+import threading
+import time
+import traceback
+from collections import deque
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from ..config import Settings, load_settings, save_settings_overrides
+from ..contracts import HumanDecision, Rule, RunStatus, StageStatus, now_iso
+from ..workspace import ARTIFACTS, Workspace, dumps
+from . import fallback
+
+STATIC = Path(__file__).resolve().parent / "static"
+VENDOR = STATIC / "vendor"
+STAGE_NAMES = ["ingest", "profile", "quality", "detect", "diagnose", "assess", "report"]
+ARTIFACT_JSON = {"schema", "signals", "relations", "domain", "batches", "rules", "patterns", "baseline", "detect_meta", "evaluation", "assessor"}
+ARTIFACT_JSONL = {"checks", "trust", "flags", "diagnoses", "egress_ledger", "chat"}
+
+
+# --------------------------------------------------------------------------------------- helpers
+def _lazy(dotted: str) -> Optional[Callable[..., Any]]:
+    mod_name, _, fn_name = dotted.partition(":")
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception:
+        return None
+    fn = getattr(mod, fn_name, None)
+    return fn if callable(fn) else None
+
+
+def _unavailable(dotted: str, message: str = "") -> JSONResponse:
+    name = dotted.replace(":", ".")
+    return JSONResponse({"unavailable": name, "available": False, "message": message or f"{name} is not implemented in this build yet."}, status_code=501)
+
+
+def _jsonable(obj: Any) -> Any:
+    return json.loads(dumps(obj))
+
+
+def _ensure_plotly() -> None:
+    """Serve plotly.min.js from the installed Python package (offline, no CDN)."""
+    try:
+        VENDOR.mkdir(parents=True, exist_ok=True)
+        target = VENDOR / "plotly.min.js"
+        if not target.exists() or target.stat().st_size < 1000:
+            import plotly.offline as po
+
+            target.write_text(po.get_plotlyjs(), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _rewrite_profile_line(settings_path: Optional[Path], profile: str) -> bool:
+    """Replace the top-level ``profile:`` line of settings.yaml in place (keeps comments). False if not found."""
+    import re
+
+    from ..config import DEFAULT_SETTINGS_PATH
+
+    p = Path(settings_path) if settings_path else DEFAULT_SETTINGS_PATH
+    if not p.exists():
+        return False
+    text = p.read_text(encoding="utf-8")
+    new, n = re.subn(r"(?m)^profile:\s*[^\s#]+", f"profile: {profile}", text, count=1)
+    if n != 1:
+        return False
+    p.write_text(new, encoding="utf-8")
+    return True
+
+
+class _State:
+    """Process-wide registry: settings, open workspaces, background jobs, event ring buffers."""
+
+    def __init__(self, settings: Settings, settings_path: Optional[Path]):
+        self.settings = settings
+        self.settings_path = settings_path
+        self.lock = threading.RLock()
+        self.workspaces: dict[str, Workspace] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.events: dict[str, deque] = {}
+        self.stream: dict[str, dict[str, Any]] = {}
+        self.event_seq = 0
+
+    def ws(self, run_id: str) -> Workspace:
+        if not run_id or "/" in run_id or "\\" in run_id or run_id.startswith("."):
+            raise HTTPException(404, f"unknown run {run_id!r}")
+        with self.lock:
+            w = self.workspaces.get(run_id)
+            if w is None:
+                d = self.settings.workspace_path / run_id
+                if not d.is_dir():
+                    raise HTTPException(404, f"unknown run {run_id!r}")
+                w = Workspace(run_id=run_id, settings=self.settings)
+                self.workspaces[run_id] = w
+            return w
+
+    def forget(self, run_id: str) -> None:
+        with self.lock:
+            w = self.workspaces.pop(run_id, None)
+            self.events.pop(run_id, None)
+            self.stream.pop(run_id, None)
+        if w is not None:
+            try:
+                w.close()
+            except Exception:
+                pass
+
+    def emit(self, run_id: str, event: str, data: dict[str, Any]) -> None:
+        with self.lock:
+            self.event_seq += 1
+            q = self.events.setdefault(run_id, deque(maxlen=500))
+            q.append({"seq": self.event_seq, "event": event, "data": data, "ts": now_iso()})
+
+    def events_since(self, run_id: str, seq: int) -> list[dict[str, Any]]:
+        with self.lock:
+            q = self.events.get(run_id)
+            if not q:
+                return []
+            return [e for e in q if e["seq"] > seq]
+
+    def reload_settings(self) -> Settings:
+        s = load_settings(self.settings_path)
+        s.workspace_dir = self.settings.workspace_dir
+        self.settings = s
+        with self.lock:
+            for w in self.workspaces.values():
+                w.settings = s
+        return s
+
+
+# --------------------------------------------------------------------------------------- app factory
+def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Optional[str | Path] = None) -> FastAPI:
+    settings = load_settings(settings_path)
+    if workspace_dir:
+        settings.workspace_dir = str(workspace_dir)
+    settings.workspace_path.mkdir(parents=True, exist_ok=True)
+    state = _State(settings, Path(settings_path) if settings_path else None)
+    _ensure_plotly()
+
+    app = FastAPI(title="Trustworthy Process Monitor", version="0.1.0", docs_url="/api/docs", redoc_url=None)
+    app.state.tpm = state
+    app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+    # ---------- basics ----------
+    @app.get("/", response_class=HTMLResponse)
+    def index() -> HTMLResponse:
+        return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        try:
+            from ..memory import memory_snapshot
+
+            mem = memory_snapshot()
+        except Exception:
+            mem = {}
+        return {"ok": True, "version": "0.1.0", "time": now_iso(), "memory": mem, "runs": len(Workspace.list_runs(state.settings)), "jobs": {k: v.get("state") for k, v in state.jobs.items()}}
+
+    @app.get("/api/settings")
+    def get_settings_() -> dict[str, Any]:
+        s = state.settings
+        try:
+            from ..llm import available
+
+            models = available()
+        except Exception as e:
+            models = {"local": False, "external": False, "error": str(e)}
+        ext_calls = 0
+        blocked = 0
+        try:
+            for d in s.workspace_path.iterdir():
+                p = d / ARTIFACTS["egress_ledger"]
+                if p.exists():
+                    for line in p.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        if rec.get("route") == "external":
+                            if rec.get("guard_result") == "allowed" and rec.get("ok", True):
+                                ext_calls += 1
+                            else:
+                                blocked += 1
+        except Exception:
+            pass
+        prof = s.active_profile
+        return {
+            "profile": s.profile,
+            "profiles": {k: {"description": v.description, "allow_external": v.allow_external, "guard_strict": v.guard_strict, "routing": v.routing} for k, v in s.profiles.items()},
+            "allow_external": prof.allow_external,
+            "guard_strict": prof.guard_strict,
+            "routing": prof.routing,
+            "models": models,
+            "local_model": s.local_llm.model,
+            "local_base_url": s.local_llm.base_url,
+            "external_model": s.external_llm.model,
+            "external_provider": s.external_llm.provider,
+            "external_base_url": s.external_llm.base_url,
+            "external_key_configured": bool(s.external_llm.api_key),
+            "external_route_exists": bool(prof.allow_external and s.external_llm.api_key),
+            "external_calls": ext_calls,
+            "external_blocked": blocked,
+            "languages": s.report.languages,
+            "default_language": s.report.default_language,
+            "workspace_dir": str(s.workspace_path),
+            "time_budget_s": s.time_budget_s,
+            "blind_mode": s.ingest.blind_mode,
+        }
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        allowed = {}
+        if "profile" in body:
+            if body["profile"] not in state.settings.profiles:
+                raise HTTPException(400, f"unknown profile {body['profile']!r}; choose one of {sorted(state.settings.profiles)}")
+            allowed["profile"] = body["profile"]
+        if "local_model" in body and body["local_model"]:
+            allowed["local_llm"] = {"model": str(body["local_model"])}
+        if not allowed:
+            raise HTTPException(400, "nothing to change (profile, local_model)")
+        old = state.settings.profile
+        try:
+            if list(allowed) == ["profile"] and _rewrite_profile_line(state.settings_path, allowed["profile"]):
+                pass  # in-place edit keeps the comments of settings.yaml
+            else:
+                save_settings_overrides(allowed, state.settings_path)
+        except Exception as e:
+            raise HTTPException(500, f"could not save settings: {e}")
+        import os
+
+        if "profile" in allowed and os.environ.get("TPM_PROFILE"):  # .env may pin the profile; the UI choice wins for this process
+            os.environ["TPM_PROFILE"] = allowed["profile"]
+        if "local_llm" in allowed and os.environ.get("TPM_LOCAL_MODEL"):
+            os.environ["TPM_LOCAL_MODEL"] = allowed["local_llm"]["model"]
+        s = state.reload_settings()
+        for rid, w in list(state.workspaces.items()):
+            try:
+                w.log.record("human:ui(reviewer)", "settings", "settings", "profile", {"from": old, "to": s.profile})
+            except Exception:
+                pass
+        return {"ok": True, "profile": s.profile, "allow_external": s.active_profile.allow_external, "changed": allowed}
+
+    # ---------- runs ----------
+    def _start_job(run_id: str, source_path: str, options: dict[str, Any], profile: Optional[str]) -> None:
+        def worker() -> None:
+            job = state.jobs[run_id]
+            job["state"] = "running"
+            job["started_at"] = now_iso()
+
+            def progress(stage: str, fraction: float, message: str) -> None:
+                state.emit(run_id, "progress", {"stage": stage, "progress": fraction, "message": message})
+
+            try:
+                from ..pipeline import run_pipeline
+
+                st = run_pipeline(source_path, run_id=run_id, profile=profile, options=options, progress_cb=progress, settings=state.settings)
+                job["state"] = st.state
+            except Exception as e:
+                job["state"] = "failed"
+                job["error"] = f"{e}\n{traceback.format_exc()[-2000:]}"
+                try:
+                    w = state.ws(run_id)
+                    st = w.status()
+                    st.state = "failed"
+                    w.set_status(st)
+                except Exception:
+                    pass
+            job["finished_at"] = now_iso()
+            import gc
+
+            gc.collect()  # run_pipeline's own Workspace holds a sqlite handle; release it so the run can be deleted on Windows
+            state.emit(run_id, "status", {"state": job["state"]})
+
+        state.jobs[run_id] = {"state": "pending", "run_id": run_id, "source_path": source_path, "created_at": now_iso()}
+        t = threading.Thread(target=worker, name=f"tpm-run-{run_id}", daemon=True)
+        state.jobs[run_id]["thread"] = t
+        t.start()
+
+    @app.post("/api/runs", status_code=202)
+    async def create_run(request: Request) -> dict[str, Any]:
+        ctype = request.headers.get("content-type", "")
+        options: dict[str, Any] = {}
+        source: Optional[str] = None
+        upload_name: Optional[str] = None
+        upload_bytes: Optional[bytes] = None
+        if ctype.startswith("multipart/form-data"):
+            form = await request.form()
+            for k, v in form.multi_items():
+                if hasattr(v, "filename") and v.filename:
+                    if k in ("file", "upload"):
+                        upload_name = v.filename
+                        upload_bytes = await v.read()
+                    elif k == "rules_file":
+                        options["rules_text"] = (await v.read()).decode("utf-8", errors="replace")
+                else:
+                    options[k] = v
+        else:
+            try:
+                options = await request.json()
+            except Exception:
+                options = {}
+            options = dict(options or {})
+        source = options.pop("path", None) or options.pop("source_path", None)
+        profile = options.pop("profile", None) or None
+        run_id = options.pop("run_id", None) or None
+        # normalise option types
+        for k in ("has_header", "transposed"):
+            if k in options and isinstance(options[k], str):
+                options[k] = options[k].lower() in ("1", "true", "yes", "on")
+        if isinstance(options.get("group_columns"), str):
+            options["group_columns"] = [c.strip() for c in options["group_columns"].split(",") if c.strip()]
+        options = {k: v for k, v in options.items() if v not in ("", None)}
+        if profile and profile not in state.settings.profiles:
+            raise HTTPException(400, f"unknown profile {profile!r}")
+        ws = Workspace(run_id=run_id, settings=state.settings)
+        run_id = ws.run_id
+        if upload_bytes is not None:
+            up = ws.dir / "uploads"
+            up.mkdir(parents=True, exist_ok=True)
+            safe = Path(upload_name or "upload.csv").name
+            p = up / safe
+            p.write_bytes(upload_bytes)
+            source = str(p)
+        if not source:
+            raise HTTPException(400, "provide a file (multipart field 'file') or a local path ('path')")
+        if not Path(source).exists():
+            raise HTTPException(400, f"path not found: {source}")
+        st = RunStatus(run_id=run_id, source_path=str(source), profile=profile or state.settings.profile, state="pending", options=options, stages=[StageStatus(stage=s, state="pending") for s in STAGE_NAMES])
+        ws.set_status(st)
+        with state.lock:
+            state.workspaces[run_id] = ws
+        _start_job(run_id, str(source), options, profile)
+        return {"run_id": run_id, "state": "pending", "source_path": str(source), "options": options, "profile": st.profile}
+
+    @app.get("/api/runs")
+    def list_runs() -> dict[str, Any]:
+        runs = Workspace.list_runs(state.settings)
+        for r in runs:
+            job = state.jobs.get(r.get("run_id", ""))
+            r["job"] = {k: v for k, v in job.items() if k != "thread"} if job else None
+            try:
+                d = state.settings.workspace_path / r["run_id"]
+                r["artifacts"] = sorted(p.name for p in d.iterdir() if p.is_file() and not p.name.endswith(".tmp"))
+                r["n_flags"] = sum(1 for _ in open(d / ARTIFACTS["flags"], "r", encoding="utf-8")) if (d / ARTIFACTS["flags"]).exists() else 0
+                if (d / ARTIFACTS["meta"]).exists():
+                    m = json.loads((d / ARTIFACTS["meta"]).read_text(encoding="utf-8"))
+                    r["meta"] = {"fake": m.get("fake", False), "created_at": m.get("created_at")}
+            except Exception:
+                r["artifacts"] = []
+        return {"runs": runs, "workspace_dir": str(state.settings.workspace_path)}
+
+    @app.get("/api/runs/{run_id}/status")
+    def run_status(run_id: str) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        st = _jsonable(ws.status())
+        job = state.jobs.get(run_id)
+        st["job"] = {k: v for k, v in job.items() if k != "thread"} if job else None
+        st["time_budget_s"] = state.settings.time_budget_s
+        st["artifacts"] = {k: ws.exists(k) for k in ARTIFACTS if k not in ("meta", "status")}
+        st["artifacts"]["understanding"] = (ws.dir / "understanding.json").exists()
+        st["artifacts"]["report_en"] = (ws.dir / "report_en.html").exists()
+        meta = ws.read_json("meta") or {}
+        st["meta"] = {k: meta.get(k) for k in ("created_at", "fake", "options")}
+        st["stream"] = state.stream.get(run_id)
+        return st
+
+    @app.delete("/api/runs/{run_id}")
+    def delete_run(run_id: str) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        job = state.jobs.get(run_id)
+        if job and job.get("state") in ("running", "pending"):
+            raise HTTPException(409, "run is still processing; wait for it to finish")
+        d = ws.dir
+        state.forget(run_id)
+        state.jobs.pop(run_id, None)
+        import gc
+
+        gc.collect()
+        last: Optional[Exception] = None
+        for _ in range(5):
+            try:
+                shutil.rmtree(d)
+                last = None
+                break
+            except Exception as e:  # Windows keeps sqlite/parquet handles open for a moment
+                last = e
+                gc.collect()
+                time.sleep(0.3)
+        if last is not None:
+            raise HTTPException(409, f"could not delete yet, files are still in use: {last}")
+        return {"ok": True, "deleted": run_id}
+
+    @app.get("/api/runs/{run_id}/events")
+    async def run_events(run_id: str, request: Request, max_events: int = Query(0, ge=0), since: int = Query(0, ge=0)) -> StreamingResponse:
+        ws = state.ws(run_id)
+
+        async def gen():
+            sent = 0
+            last_seq = since
+            status_path = ws.path("status")
+            flags_path = ws.path("flags")
+            chat_path = ws.path("chat")
+            last_status = -1.0
+            last_flags = flags_path.stat().st_size if flags_path.exists() else 0
+            last_chat = chat_path.stat().st_size if chat_path.exists() else 0
+            last_keepalive = time.time()
+
+            def sse(event: str, data: Any) -> str:
+                return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+            yield sse("status", _jsonable(ws.status()))
+            sent += 1
+            while True:
+                if max_events and sent >= max_events:
+                    break
+                if await request.is_disconnected():
+                    break
+                try:
+                    m = status_path.stat().st_mtime if status_path.exists() else 0
+                    if m != last_status and last_status >= 0:
+                        yield sse("status", _jsonable(ws.status()))
+                        sent += 1
+                    last_status = m
+                    fs = flags_path.stat().st_size if flags_path.exists() else 0
+                    if fs > last_flags:
+                        new = ws.read_jsonl("flags")[-5:]
+                        yield sse("flags", {"n": len(ws.read_jsonl("flags")), "latest": new})
+                        sent += 1
+                    last_flags = fs
+                    cs = chat_path.stat().st_size if chat_path.exists() else 0
+                    if cs > last_chat:
+                        yield sse("chat", {"latest": ws.read_jsonl("chat")[-2:]})
+                        sent += 1
+                    last_chat = cs
+                    for e in state.events_since(run_id, last_seq):
+                        last_seq = e["seq"]
+                        yield sse(e["event"], e["data"])
+                        sent += 1
+                    if time.time() - last_keepalive > 15:
+                        yield ": keepalive\n\n"
+                        last_keepalive = time.time()
+                except Exception as e:  # never kill the stream
+                    yield sse("error", {"error": str(e)})
+                    sent += 1
+                await asyncio.sleep(0.05 if max_events else 1.0)
+
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ---------- artifacts ----------
+    def _read_artifact(ws: Workspace, name: str) -> tuple[Any, bool]:
+        if name in ARTIFACT_JSONL:
+            if not ws.exists(name):
+                return [], False
+            return ws.read_jsonl(name), True
+        p = ws.dir / f"{name}.json" if name not in ARTIFACTS else ws.path(name)
+        if not p.exists():
+            return None, False
+        try:
+            return json.loads(p.read_text(encoding="utf-8")), True
+        except Exception:
+            return None, False
+
+    def _wrap(items: Any, available: bool, key: str = "items", **extra: Any) -> dict[str, Any]:
+        out: dict[str, Any] = {"available": available}
+        if isinstance(items, list):
+            out[key] = items
+            out["n"] = len(items)
+        elif isinstance(items, dict):
+            out.update(items)
+        elif items is not None:
+            out[key] = items
+        out.update(extra)
+        return out
+
+    @app.get("/api/runs/{run_id}/schema")
+    def get_schema(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "schema")
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/signals")
+    def get_signals(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "signals")
+        return _wrap(d or [], ok, "signals")
+
+    @app.get("/api/runs/{run_id}/relations")
+    def get_relations(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "relations")
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/domain")
+    def get_domain(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "domain")
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/understanding")
+    def get_understanding(run_id: str) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        d, ok = _read_artifact(ws, "understanding")
+        if not ok:
+            # derive a minimal understanding from schema + inferences so the view is never empty
+            sch, ok2 = _read_artifact(ws, "schema")
+            if ok2 and sch:
+                infs = [i for i in ws.inferences.all() if i.subject == "dataset"]
+                d = {"summary": f"{sch.get('n_rows')} rows, {len(sch.get('signal_columns', []))} signals, {sch.get('n_groups', 1)} groups.", "assumptions": sch.get("assumptions", []), "uncertain": [i.claim for i in infs if i.status == "uncertain"], "hypotheses": [{"inference_id": i.id, "subject": i.subject, "claim": i.claim, "confidence": i.confidence, "status": i.status} for i in infs], "inference_ids": [i.id for i in infs], "derived": True}
+                ok = True
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/evidence")
+    def get_evidence(run_id: str, ids: str = Query(""), signal: str = Query(""), kind: str = Query(""), limit: int = Query(200, ge=1, le=5000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        if ids:
+            wanted = [i.strip() for i in ids.split(",") if i.strip()]
+            found = [ws.evidence.get(i) for i in wanted]
+            items = [_jsonable(e) for e in found if e is not None]
+            return {"available": ws.exists("evidence"), "items": items, "n": len(items), "missing": [i for i, e in zip(wanted, found) if e is None]}
+        items = ws.evidence.all()
+        if signal:
+            items = [e for e in items if signal in e.signals]
+        if kind:
+            items = [e for e in items if e.kind == kind]
+        total = len(items)
+        return {"available": ws.exists("evidence"), "items": [_jsonable(e) for e in items[offset: offset + limit]], "n": total, "offset": offset, "limit": limit}
+
+    @app.get("/api/runs/{run_id}/inferences")
+    def get_inferences(run_id: str, subject: str = Query(""), status: str = Query(""), stage: str = Query(""), ids: str = Query("")) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        items = ws.inferences.all()
+        if ids:
+            wanted = {i.strip() for i in ids.split(",") if i.strip()}
+            items = [i for i in items if i.id in wanted]
+        if subject:
+            items = [i for i in items if i.subject == subject]
+        if status:
+            items = [i for i in items if i.status == status]
+        if stage:
+            items = [i for i in items if i.stage == stage]
+        return {"available": ws.exists("inferences"), "items": [_jsonable(i) for i in items], "n": len(items)}
+
+    @app.get("/api/runs/{run_id}/batches")
+    def get_batches(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "batches")
+        if isinstance(d, list):  # tpm.ingest.stream.build_batches writes a plain list (row_end exclusive)
+            d = {"batches": d, "row_end_exclusive": True}
+        return _wrap(d or {"batches": []}, ok)
+
+    @app.get("/api/runs/{run_id}/checks")
+    def get_checks(run_id: str, batch: str = Query(""), signal: str = Query(""), status: str = Query(""), category: str = Query(""), limit: int = Query(500, ge=1, le=20000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        items, ok = _read_artifact(state.ws(run_id), "checks")
+        if batch:
+            items = [c for c in items if c.get("batch_id") == batch]
+        if signal:
+            items = [c for c in items if signal in (c.get("signals") or [])]
+        if status:
+            items = [c for c in items if c.get("status") == status]
+        if category:
+            items = [c for c in items if c.get("category") == category]
+        summary: dict[str, dict[str, int]] = {}
+        for c in items:
+            s = summary.setdefault(c.get("category", "other"), {"pass": 0, "warn": 0, "fail": 0})
+            s[c.get("status", "pass")] = s.get(c.get("status", "pass"), 0) + 1
+        total = len(items)
+        return {"available": ok, "items": items[offset: offset + limit], "n": total, "offset": offset, "limit": limit, "summary": summary}
+
+    @app.get("/api/runs/{run_id}/trust")
+    def get_trust(run_id: str) -> dict[str, Any]:
+        items, ok = _read_artifact(state.ws(run_id), "trust")
+        untrusted = [t for t in items if not t.get("trusted", True)]
+        worst = min(items, key=lambda t: t.get("trust_score", 1.0)) if items else None
+        return {"available": ok, "items": items, "n": len(items), "n_untrusted": len(untrusted), "untrusted": untrusted, "worst": worst, "overall": (sum(t.get("trust_score", 0) for t in items) / len(items)) if items else None}
+
+    @app.get("/api/runs/{run_id}/rules")
+    def get_rules(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "rules")
+        return _wrap(d or [], ok, "rules")
+
+    @app.get("/api/runs/{run_id}/flags")
+    def get_flags(run_id: str, kind: str = Query(""), group: str = Query(""), batch: str = Query(""), min_severity: float = Query(0.0, ge=0, le=1), status: str = Query(""), limit: int = Query(1000, ge=1, le=100000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        items, ok = _read_artifact(state.ws(run_id), "flags")
+        if kind:
+            kinds = set(kind.split(","))
+            items = [f for f in items if f.get("kind") in kinds]
+        if group:
+            items = [f for f in items if str(f.get("group_id")) == group]
+        if batch:
+            items = [f for f in items if f.get("batch_id") == batch]
+        if min_severity:
+            items = [f for f in items if float(f.get("severity", 0)) >= min_severity]
+        if status:
+            items = [f for f in items if (f.get("human_status") or "open") == status]
+        kinds_count: dict[str, int] = {}
+        for f in items:
+            kinds_count[f.get("kind", "?")] = kinds_count.get(f.get("kind", "?"), 0) + 1
+        return {"available": ok, "items": items[offset: offset + limit], "n": len(items), "offset": offset, "limit": limit, "kinds": kinds_count, "groups": sorted({str(f.get("group_id")) for f in items if f.get("group_id") is not None}, key=lambda x: (len(x), x))}
+
+    @app.get("/api/runs/{run_id}/patterns")
+    def get_patterns(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "patterns")
+        return _wrap(d or [], ok, "patterns")
+
+    @app.get("/api/runs/{run_id}/baseline")
+    def get_baseline(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "baseline")
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/detect_meta")
+    def get_detect_meta(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "detect_meta")
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/evaluation")
+    def get_evaluation(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "evaluation")
+        return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/diagnoses")
+    def get_diagnoses(run_id: str, group: str = Query(""), cause: str = Query(""), pattern: str = Query("")) -> dict[str, Any]:
+        items, ok = _read_artifact(state.ws(run_id), "diagnoses")
+        if group:
+            items = [d for d in items if str(d.get("group_id")) == group]
+        if cause:
+            items = [d for d in items if d.get("cause_class") == cause]
+        if pattern:
+            items = [d for d in items if d.get("pattern_id") == pattern]
+        return {"available": ok, "items": items, "n": len(items)}
+
+    @app.get("/api/runs/{run_id}/assessor")
+    def get_assessor(run_id: str) -> dict[str, Any]:
+        d, ok = _read_artifact(state.ws(run_id), "assessor")
+        return _wrap(d or {}, ok)
+
+    # ---------- series / scores (DuckDB, downsampled; never leaves the machine) ----------
+    def _columns(con: Any, view: str) -> list[str]:
+        return [r[0] for r in con.execute(f"DESCRIBE {view}").fetchall()]
+
+    def _row_expr(cols: list[str]) -> str:
+        for c in ("__row__", "row", "row_id", "row_index"):
+            if c in cols:
+                return f'"{c}"'
+        return "(row_number() OVER () - 1)"
+
+    @app.get("/api/runs/{run_id}/scores")
+    def get_scores(run_id: str, signal: str = Query(""), group: str = Query(""), row_start: int = Query(0, ge=0), row_end: int = Query(-1), max_points: int = Query(600, ge=10, le=20000), detectors: bool = Query(False)) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        if not ws.exists("scores"):
+            return {"available": False, "rows": [], "score": [], "threshold": [], "contrib": {}, "signals": []}
+        try:
+            con = ws.duckdb().cursor()  # per-request cursor: the shared connection is not safe for concurrent queries
+            cols = _columns(con, "scores")
+            rexpr = _row_expr(cols)
+            score_col = next((c for c in ("ensemble", "score", "ensemble_score", "anomaly_score") if c in cols), None)
+            if not score_col:
+                return {"available": False, "reason": "no score column in scores.parquet", "columns": cols}
+            thr_col = next((c for c in ("threshold", "thr", "ens_threshold") if c in cols), None)
+            contrib_cols = [c for c in cols if c.startswith("c_") or c.startswith("contrib_")]
+            det_cols = [c for c in cols if c.startswith("d_") or c.startswith("det_") or c.startswith("score_")] if detectors else []
+            if signal:
+                wanted = {s.strip() for s in signal.split(",") if s.strip()}
+                contrib_cols = [c for c in contrib_cols if c.split("_", 1)[1] in wanted]
+            group_col = next((c for c in ("__group__", "group_id", "group") if c in cols), None)
+            batch_col = next((c for c in ("batch_id", "batch") if c in cols), None)
+            base = f'SELECT {rexpr} AS r, "{score_col}" AS score' + (f', "{thr_col}" AS thr' if thr_col else ", NULL AS thr") + (f', CAST("{group_col}" AS VARCHAR) AS grp' if group_col else ", NULL AS grp") + (f', CAST("{batch_col}" AS VARCHAR) AS bt' if batch_col else ", NULL AS bt")
+            for c in contrib_cols + det_cols:
+                base += f', "{c}"'
+            base += " FROM scores"
+            where = []
+            params: list[Any] = []
+            if group and group_col:
+                where.append("grp = ?")
+                params.append(group)
+            sub = f"({base}) s" + ((" WHERE " + " AND ".join(where)) if where else "")
+            n_rows, rmin, rmax = con.execute(f"SELECT COUNT(*), MIN(r), MAX(r) FROM {sub}", params).fetchone()
+            if not n_rows:
+                return {"available": True, "rows": [], "score": [], "threshold": [], "contrib": {}, "signals": [], "n_rows": 0}
+            lo = max(row_start, int(rmin))
+            hi = int(rmax) if row_end < 0 else min(row_end, int(rmax))
+            span = max(1, hi - lo + 1)
+            bucket = max(1, -(-span // max_points))
+            aggs = ", ".join([f'avg("{c}") AS "{c}"' for c in contrib_cols] + [f'max("{c}") AS "{c}"' for c in det_cols])
+            q = f"SELECT floor((r - {lo}) / {bucket}) AS b, min(r) AS r0, max(r) AS r1, max(score) AS score, avg(thr) AS thr, any_value(grp) AS grp, any_value(bt) AS bt" + (", " + aggs if aggs else "") + f" FROM {sub} {'AND' if where else 'WHERE'} r BETWEEN {lo} AND {hi} GROUP BY b ORDER BY b"
+            rows = con.execute(q, params).fetchall()
+            out: dict[str, Any] = {"available": True, "row_start": lo, "row_end": hi, "n_rows": int(n_rows), "bucket": bucket, "rows": [], "row_end_bucket": [], "score": [], "threshold": [], "group": [], "batch": [], "contrib": {}, "detectors": {}, "signals": [c.split("_", 1)[1] for c in contrib_cols]}
+            for c in contrib_cols:
+                out["contrib"][c.split("_", 1)[1]] = []
+            for c in det_cols:
+                out["detectors"][c.split("_", 1)[1]] = []
+            for rr in rows:
+                out["rows"].append(int(rr[1]))
+                out["row_end_bucket"].append(int(rr[2]))
+                out["score"].append(None if rr[3] is None else round(float(rr[3]), 4))
+                out["threshold"].append(None if rr[4] is None else round(float(rr[4]), 4))
+                out["group"].append(rr[5])
+                out["batch"].append(rr[6])
+                k = 7
+                for c in contrib_cols:
+                    out["contrib"][c.split("_", 1)[1]].append(None if rr[k] is None else round(float(rr[k]), 4))
+                    k += 1
+                for c in det_cols:
+                    out["detectors"][c.split("_", 1)[1]].append(None if rr[k] is None else round(float(rr[k]), 4))
+                    k += 1
+            out["threshold_value"] = next((t for t in out["threshold"] if t is not None), None)
+            if out["threshold_value"] is None and score_col == "ensemble":
+                out["threshold_value"] = 1.0  # detect.ensemble normalises so that 1.0 is the calibrated threshold
+                out["threshold"] = [1.0] * len(out["rows"])
+            out["score_column"] = score_col
+            con.close()
+            return out
+        except Exception as e:
+            return {"available": False, "error": str(e)}
+
+    @app.get("/api/runs/{run_id}/series")
+    def get_series(run_id: str, signals: str = Query(""), group: str = Query(""), row_start: int = Query(0, ge=0), row_end: int = Query(-1), max_points: int = Query(600, ge=10, le=20000)) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        if not ws.exists("dataset"):
+            return {"available": False, "rows": [], "series": {}}
+        try:
+            con = ws.duckdb().cursor()  # per-request cursor: the shared connection is not safe for concurrent queries
+            cols = _columns(con, "dataset")
+            sch = ws.read_json("schema") or {}
+            alias = sch.get("signal_alias", {}) or {}
+            inv = {v: k for k, v in alias.items()}
+            wanted = [s.strip() for s in signals.split(",") if s.strip()] or list(alias.values())[:6]
+            resolved: list[tuple[str, str]] = []
+            for s in wanted:
+                col = s if s in cols else inv.get(s) if inv.get(s) in cols else (alias.get(s) if alias.get(s) in cols else None)
+                if col:
+                    resolved.append((s, col))
+            if not resolved:
+                return {"available": True, "rows": [], "series": {}, "missing": wanted}
+            rexpr = _row_expr(cols)
+            group_col = next((c for c in ("__group__", sch.get("group_column") or "", "group_id") if c and c in cols), None)
+            time_col = sch.get("time_column") if sch.get("time_column") in cols else None
+            base = f"SELECT {rexpr} AS r" + (f', CAST("{group_col}" AS VARCHAR) AS grp' if group_col else ", NULL AS grp") + (f', CAST("{time_col}" AS VARCHAR) AS t' if time_col else ", NULL AS t")
+            for _, col in resolved:
+                base += f', TRY_CAST("{col}" AS DOUBLE) AS "{col}"'
+            base += " FROM dataset"
+            params: list[Any] = []
+            where = ""
+            if group and group_col:
+                where = " WHERE grp = ?"
+                params.append(group)
+            sub = f"({base}) s{where}"
+            n_rows, rmin, rmax = con.execute(f"SELECT COUNT(*), MIN(r), MAX(r) FROM {sub}", params).fetchone()
+            if not n_rows:
+                return {"available": True, "rows": [], "series": {}, "n_rows": 0}
+            lo = max(row_start, int(rmin))
+            hi = int(rmax) if row_end < 0 else min(row_end, int(rmax))
+            span = max(1, hi - lo + 1)
+            bucket = max(1, -(-span // max_points))
+            aggs = ", ".join(f'avg("{col}") AS "m_{i}", min("{col}") AS "lo_{i}", max("{col}") AS "hi_{i}"' for i, (_, col) in enumerate(resolved))
+            q = f"SELECT floor((r - {lo}) / {bucket}) AS b, min(r) AS r0, any_value(grp) AS grp, min(t) AS t, {aggs} FROM {sub} {'AND' if where else 'WHERE'} r BETWEEN {lo} AND {hi} GROUP BY b ORDER BY b"
+            rows = con.execute(q, params).fetchall()
+            out: dict[str, Any] = {"available": True, "row_start": lo, "row_end": hi, "n_rows": int(n_rows), "bucket": bucket, "rows": [], "group": [], "time": [], "series": {s: {"mean": [], "min": [], "max": [], "column": col} for s, col in resolved}}
+            for rr in rows:
+                out["rows"].append(int(rr[1]))
+                out["group"].append(rr[2])
+                out["time"].append(rr[3])
+                for i, (s, _) in enumerate(resolved):
+                    m, lo_, hi_ = rr[4 + 3 * i], rr[5 + 3 * i], rr[6 + 3 * i]
+                    out["series"][s]["mean"].append(None if m is None else round(float(m), 5))
+                    out["series"][s]["min"].append(None if lo_ is None else round(float(lo_), 5))
+                    out["series"][s]["max"].append(None if hi_ is None else round(float(hi_), 5))
+            con.close()
+            return out
+        except Exception as e:
+            return {"available": False, "error": str(e)}
+
+    # ---------- decisions / log ----------
+    def _apply(ws: Workspace, decision: HumanDecision) -> dict[str, Any]:
+        from ..pipeline import apply_decision
+
+        result = apply_decision(ws, state.settings, decision)
+        if "effect" not in result:
+            result["generic_effect"] = fallback.apply_generic_effect(ws, state.settings, decision)
+        state.emit(ws.run_id, "decision", {"action": decision.action, "object_type": decision.object_type, "object_id": decision.object_id, "actor": decision.actor_name, "role": decision.role})
+        return result
+
+    @app.post("/api/runs/{run_id}/decisions")
+    async def post_decision(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        body = await request.json()
+        try:
+            decision = HumanDecision(**body)
+        except Exception as e:
+            raise HTTPException(422, f"invalid decision: {e}")
+        if decision.role not in ("operator", "engineer", "reviewer"):
+            raise HTTPException(422, "role must be operator | engineer | reviewer")
+        try:
+            return {"ok": True, **_apply(ws, decision), "decision": _jsonable(decision)}
+        except Exception as e:
+            raise HTTPException(500, f"decision failed: {e}")
+
+    @app.get("/api/runs/{run_id}/log")
+    def get_log(run_id: str, object_type: str = Query(""), object_id: str = Query(""), action: str = Query(""), actor: str = Query(""), since: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=100000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        entries = ws.log.entries(object_type=object_type or None, object_id=object_id or None, action=action or None, actor_prefix=actor or None, since_seq=since, limit=1_000_000)
+        total = len(entries)
+        page = entries[offset: offset + limit]
+        return {"available": True, "items": [_jsonable(e) for e in page], "n": total, "offset": offset, "limit": limit, "count_total": ws.log.count(), "actions": sorted({e.action for e in entries}), "object_types": sorted({e.object_type for e in entries}), "actors": sorted({e.actor for e in entries})}
+
+    @app.get("/api/runs/{run_id}/log/verify")
+    def verify_log(run_id: str) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        res = ws.log.verify_chain()
+        res["verified_at"] = now_iso()
+        res["count"] = ws.log.count()
+        return res
+
+    @app.get("/api/runs/{run_id}/log/export")
+    def export_log(run_id: str) -> FileResponse:
+        ws = state.ws(run_id)
+        out = ws.dir / "decision_log_export.jsonl"
+        ws.log.export_jsonl(out)
+        return FileResponse(str(out), media_type="application/x-ndjson", filename=f"{run_id}_decision_log.jsonl")
+
+    # ---------- rules ----------
+    def _save_rule(ws: Workspace, rule: Any) -> dict[str, Any]:
+        rules = ws.read_json("rules", []) or []
+        rd = _jsonable(rule)
+        if not rd.get("id"):
+            rd["id"] = f"RULE-{len(rules) + 1:03d}"
+        for i, r in enumerate(rules):
+            if r.get("id") == rd["id"]:
+                rules[i] = rd
+                break
+        else:
+            rules.append(rd)
+        ws.write_json("rules", rules)
+        return rd
+
+    def _next_rule_id(ws: Workspace) -> str:
+        rules = ws.read_json("rules", []) or []
+        n = 0
+        for r in rules:
+            try:
+                n = max(n, int(str(r.get("id", "RULE-0")).split("-")[-1]))
+            except Exception:
+                pass
+        return f"RULE-{n + 1:03d}"
+
+    @app.post("/api/runs/{run_id}/rules")
+    async def compile_rule(run_id: str, request: Request):
+        ws = state.ws(run_id)
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "text is required")
+        author = body.get("actor") or "human"
+        fn = _lazy("tpm.quality:compile_rule")
+        if fn is None:
+            return _unavailable("tpm.quality:compile_rule", "The rule compiler is not available in this build; the rule was not saved.")
+        try:
+            try:
+                rule = fn(ws, state.settings, text, author=author)
+            except TypeError:
+                rule = fn(ws, state.settings, text)
+        except Exception as e:
+            raise HTTPException(500, f"rule compilation failed: {e}")
+        if isinstance(rule, dict):
+            rule.setdefault("id", _next_rule_id(ws))
+            rule.setdefault("text", text)
+            rule = Rule(**rule)
+        if not getattr(rule, "id", None):
+            rule.id = _next_rule_id(ws)
+        existing = {r.get("id") for r in (ws.read_json("rules", []) or [])}
+        rd = _jsonable(rule) if rule.id in existing else _save_rule(ws, rule)  # the compiler may persist itself
+        if rule.id not in existing:
+            ws.log.record(f"human:{author}", "rule", "rule", rd["id"], {"text": text, "status": rd.get("status"), "compile_source": rd.get("compile_source"), "confidence": rd.get("compile_confidence")})
+        return {"ok": True, "rule": rd}
+
+    @app.post("/api/runs/{run_id}/rules/{rule_id}/{verb}")
+    async def rule_decision(run_id: str, rule_id: str, verb: str, request: Request) -> dict[str, Any]:
+        if verb not in ("approve", "reject"):
+            raise HTTPException(404, "use approve or reject")
+        ws = state.ws(run_id)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        decision = HumanDecision(actor_name=body.get("actor_name") or "ui", role=body.get("role") or "engineer", action=f"{verb}_rule", object_type="rule", object_id=rule_id, note=body.get("note"))
+        res = _apply(ws, decision)
+        rule = next((r for r in (ws.read_json("rules", []) or []) if r.get("id") == rule_id), None)
+        return {"ok": True, "rule": rule, **res}
+
+    @app.post("/api/runs/{run_id}/rules/run")
+    async def run_rules(run_id: str):
+        ws = state.ws(run_id)
+        run_active = _lazy("tpm.quality:run_active_rules")
+        define_batches = _lazy("tpm.quality:define_batches")
+        fn = _lazy("tpm.quality:run_rules") or _lazy("tpm.quality:run_quality")
+        if run_active is None and fn is None:
+            return _unavailable("tpm.quality:run_active_rules")
+        try:
+            if run_active is not None:
+                b = ws.read_json("batches") or {}
+                batches = define_batches(ws, state.settings) if define_batches else (b.get("batches") if isinstance(b, dict) else b) or []
+                checks = run_active(ws, state.settings, batches)
+                res = {"n_checks": len(checks or []), "n_fail": sum(1 for c in checks or [] if getattr(c, "status", "") == "fail"), "batches": len(batches)}
+            else:
+                ctx = {"source_path": ws.status().source_path, "options": {"rules_only": True}, "progress": lambda *a, **k: None, "run_id": run_id}
+                res = fn(ws, state.settings, ctx) if fn.__name__ == "run_quality" else fn(ws, state.settings)
+        except Exception as e:
+            raise HTTPException(500, f"rules run failed: {e}")
+        state.emit(run_id, "rules", {"ran": True})
+        return {"ok": True, "result": _jsonable(res) if res is not None else {}}
+
+    @app.post("/api/runs/{run_id}/rules/upload")
+    async def upload_rules(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        form = await request.form()
+        f = form.get("file")
+        if f is None or not hasattr(f, "read"):
+            raise HTTPException(400, "multipart field 'file' required")
+        text = (await f.read()).decode("utf-8", errors="replace")
+        author = form.get("actor") or "human"
+        lines = [ln.strip() for ln in text.splitlines()]
+        lines = [ln for ln in lines if ln and not ln.startswith("#")]
+        fn = _lazy("tpm.quality:compile_rule")
+        saved = []
+        from_file = _lazy("tpm.quality:add_rules_from_file")
+        if from_file is not None:
+            up = ws.dir / "uploads"
+            up.mkdir(parents=True, exist_ok=True)
+            p = up / Path(getattr(f, "filename", "rules.md") or "rules.md").name
+            p.write_text(text, encoding="utf-8")
+            try:
+                rules = from_file(ws, state.settings, p, author=str(author))
+                ws.log.record(f"human:{author}", "rules_uploaded", "rule", "file", {"n": len(rules), "filename": p.name})
+                return {"ok": True, "rules": [_jsonable(r) for r in rules], "n": len(rules), "compiler_available": True}
+            except Exception as e:
+                ws.log.record(f"human:{author}", "rules_upload_failed", "rule", "file", {"error": str(e)[:300]})
+        for ln in lines:
+            rule = None
+            if fn is not None:
+                try:
+                    rule = fn(ws, state.settings, ln)
+                    if isinstance(rule, dict):
+                        rule.setdefault("id", _next_rule_id(ws))
+                        rule.setdefault("text", ln)
+                        rule = Rule(**rule)
+                    if not getattr(rule, "id", None):
+                        rule.id = _next_rule_id(ws)
+                except Exception as e:
+                    rule = Rule(id=_next_rule_id(ws), text=ln, status="draft", compile_source="template", compile_explanation=f"compile failed: {e}", compile_confidence=0.0)
+            if rule is None:
+                rule = Rule(id=_next_rule_id(ws), text=ln, status="draft", compile_source="human", compile_explanation="Stored as draft text; the rule compiler is not available in this build.", compile_confidence=0.0)
+            rule.author = str(author)
+            saved.append(_save_rule(ws, rule))
+        ws.log.record(f"human:{author}", "rules_uploaded", "rule", "file", {"n": len(saved), "filename": getattr(f, "filename", "")})
+        return {"ok": True, "rules": saved, "n": len(saved), "compiler_available": fn is not None}
+
+    # ---------- chat ----------
+    @app.post("/api/runs/{run_id}/chat")
+    async def post_chat(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        body = await request.json()
+        message = (body.get("message") or "").strip()
+        if not message:
+            raise HTTPException(400, "message is required")
+        context = body.get("context") or {}
+        history = body.get("history") or []
+        actor = body.get("actor") or "operator"
+        role = body.get("role") or "operator"
+        language = body.get("language") or "en"
+        answer: dict[str, Any]
+        fn = _lazy("tpm.llm.agent:chat")
+        persisted_by_agent = False
+        if fn is not None:
+            try:
+                task = "assessor_chat" if context.get("object_type") == "assessor" else "why_chat"
+                res = fn(ws, state.settings, message, context, history, f"human:{actor}({role})", task=task, language=language)
+                persisted_by_agent = True  # tpm.llm.agent.chat writes both turns to chat.jsonl and the decision log
+                answer = fallback.normalize_chat_result(res)
+                if not answer.get("text"):
+                    answer = fallback.template_chat_answer(ws, state.settings, message, context, language)
+                    answer["note"] = "model returned no text; template answer shown"
+            except Exception as e:
+                answer = fallback.template_chat_answer(ws, state.settings, message, context, language)
+                answer["note"] = f"model call failed ({e}); template answer shown"
+        else:
+            answer = fallback.template_chat_answer(ws, state.settings, message, context, language)
+        entry = {"ts": now_iso(), "role": "assistant", "actor": answer.get("source", "template"), "message": answer.get("text", ""), "source": answer.get("source", "template"), "route": answer.get("route", "none"), "model": answer.get("model", ""), "evidence_ids": answer.get("evidence_ids", []), "context": context, "note": answer.get("note"), "followups": answer.get("followups") or [], "confidence": answer.get("confidence")}
+        if not persisted_by_agent:
+            ws.append_jsonl("chat", {"ts": now_iso(), "role": "user", "actor": f"{actor}({role})", "message": message, "context": context})
+            ws.append_jsonl("chat", entry)
+            try:
+                ws.log.record(f"human:{actor}({role})", "chat", context.get("object_type") or "chat", context.get("object_id") or context.get("flag_id") or context.get("diagnosis_id") or "run", {"message": message[:500], "answer_source": entry["source"]}, entry["evidence_ids"])
+            except Exception:
+                pass
+        state.emit(run_id, "chat", {"role": "assistant", "source": entry["source"]})
+        return {"ok": True, "answer": entry}
+
+    @app.get("/api/runs/{run_id}/chat")
+    def get_chat(run_id: str, limit: int = Query(200, ge=1, le=5000)) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        items = ws.read_jsonl("chat") if ws.exists("chat") else []
+        out = []
+        for m in items[-limit:]:  # accept both the API's shape (message/evidence_ids) and tpm.llm.agent's (content/citations)
+            m = dict(m)
+            if "message" not in m:
+                m["message"] = m.get("content", "")
+            if "evidence_ids" not in m:
+                m["evidence_ids"] = m.get("citations", [])
+            out.append(m)
+        return {"available": True, "items": out, "n": len(items)}
+
+    # ---------- assessor ----------
+    @app.post("/api/runs/{run_id}/assessor/ask")
+    async def assessor_ask(run_id: str, request: Request):
+        ws = state.ws(run_id)
+        body = await request.json()
+        question = (body.get("question") or "").strip()
+        if not question:
+            raise HTTPException(400, "question is required")
+        actor = body.get("actor") or "operator"
+        fn = _lazy("tpm.assessor:ask")
+        if fn is not None:
+            try:
+                res = fn(ws, state.settings, question, actor)
+                ans = fallback.normalize_chat_result(res)
+                if ans.get("text"):
+                    ws.log.record(f"human:{actor}", "assessor_question", "assessor", "chat", {"question": question[:500], "source": ans.get("source")})
+                    return {"ok": True, "answer": ans}
+            except Exception as e:
+                ans = fallback.template_assessor_answer(ws, question)
+                ans["note"] = f"assessor call failed ({e}); template answer shown"
+                return {"ok": True, "answer": ans}
+        agent_chat = _lazy("tpm.llm.agent:chat")
+        if agent_chat is not None:  # the local tool agent answers assessor questions over the artifacts + raw data
+            try:
+                res = agent_chat(ws, state.settings, question, {"object_type": "assessor", "object_id": "assessor"}, [], f"human:{actor}", task="assessor_chat", language=body.get("language") or "en")
+                ans = fallback.normalize_chat_result(res)
+                if ans.get("text"):
+                    return {"ok": True, "answer": ans}
+            except Exception:
+                pass
+        if not ws.exists("assessor"):
+            return _unavailable("tpm.assessor:ask", "The assessor has not run for this file yet.")
+        ans = fallback.template_assessor_answer(ws, question)
+        ws.log.record(f"human:{actor}", "assessor_question", "assessor", "chat", {"question": question[:500], "source": "template"})
+        return {"ok": True, "answer": ans}
+
+    @app.post("/api/runs/{run_id}/assessor/upload")
+    async def assessor_upload(run_id: str, request: Request):
+        ws = state.ws(run_id)
+        form = await request.form()
+        f = form.get("file")
+        if f is None or not hasattr(f, "read"):
+            raise HTTPException(400, "multipart field 'file' required")
+        up = ws.dir / "uploads"
+        up.mkdir(parents=True, exist_ok=True)
+        p = up / Path(getattr(f, "filename", "candidate.csv") or "candidate.csv").name
+        p.write_bytes(await f.read())
+        fn = _lazy("tpm.assessor:assess_new_file")
+        if fn is None:
+            return _unavailable("tpm.assessor:assess_new_file", f"File stored at {p.name}; the assessor cannot evaluate it in this build.")
+        try:
+            res = fn(ws, state.settings, str(p))
+        except Exception as e:
+            raise HTTPException(500, f"assessment failed: {e}")
+        return {"ok": True, "path": str(p), "result": _jsonable(res) if res is not None else {}}
+
+    @app.post("/api/runs/{run_id}/assessor/apply")
+    async def assessor_apply(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        body = await request.json()
+        action = body.get("action")
+        if not action:
+            raise HTTPException(400, "action (recommendation id or text) is required")
+        decision = HumanDecision(actor_name=body.get("actor_name") or "ui", role=body.get("role") or "engineer", action="apply_assessor_action", object_type="assessor", object_id=str(action if isinstance(action, str) else action.get("id", "action")), note=body.get("note"), new_value=action if isinstance(action, dict) else {"action": action})
+        res = _apply(ws, decision)
+        return {"ok": True, **res}
+
+    # ---------- streaming ----------
+    def _df_from_rows(rows: list[dict[str, Any]]) -> Any:
+        import pandas as pd
+
+        return pd.DataFrame(rows)
+
+    def _df_from_csv_bytes(b: bytes) -> Any:
+        import pandas as pd
+
+        return pd.read_csv(io.BytesIO(b))
+
+    def _process(ws: Workspace, df: Any, batch_id: str, origin: str, aligned: bool = False) -> dict[str, Any]:
+        from ..pipeline import process_batch
+
+        align = _lazy("tpm.ingest.stream:align_incoming")
+        if aligned:
+            pass
+        elif align is not None:
+            try:
+                df = align(ws, state.settings, df, batch_id)
+                batch_id = str(getattr(df, "attrs", {}).get("batch_id") or batch_id)
+            except Exception as e:
+                df = fallback.align_incoming(ws, df)
+                origin += f" (align fallback: {e})"
+        else:
+            df = fallback.align_incoming(ws, df)
+        res = process_batch(ws, state.settings, df, batch_id)
+        res["n_rows"] = int(len(df))
+        res["origin"] = origin
+        st = state.stream.setdefault(ws.run_id, {"pushed": 0, "replay": None, "watch": None, "last": None})
+        st["pushed"] = st.get("pushed", 0) + 1
+        st["last"] = {"batch_id": batch_id, "n_rows": int(len(df)), "ts": now_iso(), "flags": res.get("flags", []), "origin": origin}
+        state.emit(ws.run_id, "batch", {k: v for k, v in res.items() if k != "trust"} | {"trust": res.get("trust")})
+        return res
+
+    @app.post("/api/runs/{run_id}/stream/push")
+    async def stream_push(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        ctype = request.headers.get("content-type", "")
+        batch_id = None
+        if ctype.startswith("multipart/form-data"):
+            form = await request.form()
+            f = form.get("file")
+            if f is None or not hasattr(f, "read"):
+                raise HTTPException(400, "multipart field 'file' required")
+            df = _df_from_csv_bytes(await f.read())
+            batch_id = form.get("batch_id")
+        else:
+            body = await request.json()
+            rows = body.get("rows")
+            if not isinstance(rows, list) or not rows:
+                raise HTTPException(400, "rows (list of objects) required")
+            df = _df_from_rows(rows)
+            batch_id = body.get("batch_id")
+        batch_id = str(batch_id or f"PUSH-{int(time.time())}")
+        try:
+            res = _process(ws, df, batch_id, "push")
+        except Exception as e:
+            raise HTTPException(500, f"batch processing failed: {e}")
+        return {"ok": True, **_jsonable(res)}
+
+    @app.post("/api/runs/{run_id}/stream/replay")
+    async def stream_replay(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        speed = float(body.get("speed") or 1.0)
+        max_batches = int(body.get("max_batches") or 10)
+        if not ws.exists("dataset"):
+            raise HTTPException(409, "dataset.parquet not present; run the pipeline first")
+        st = state.stream.setdefault(run_id, {"pushed": 0, "replay": None, "watch": None, "last": None})
+        if st.get("replay") and st["replay"].get("state") == "running":
+            raise HTTPException(409, "replay already running")
+        st["replay"] = {"state": "running", "done": 0, "max_batches": max_batches, "speed": speed, "started_at": now_iso(), "stop": False}
+
+        stop = threading.Event()
+        st["replay"]["stop_event"] = stop
+        their_replay = _lazy("tpm.ingest.stream:replay")
+
+        def worker() -> None:
+            ctl = st["replay"]
+            try:
+                if their_replay is not None:
+                    delay = 1.0 / max(0.01, speed)
+
+                    def cb(df: Any, bid: str, meta: dict[str, Any]) -> Any:
+                        r = _process(ws, df, f"REPLAY-{bid}", "replay", aligned=True)
+                        ctl["done"] = ctl.get("done", 0) + 1
+                        ctl["last_batch"] = bid
+                        if not stop.is_set():
+                            stop.wait(delay)
+                        return r
+
+                    their_replay(ws, state.settings, callback=cb, speed=0.0, max_batches=max_batches, stop_event=stop)
+                else:
+                    fallback.replay(ws, state.settings, ctl, lambda df, bid: _process(ws, df, bid, "replay"))
+                ctl["state"] = "stopped" if stop.is_set() else "done"
+            except Exception as e:
+                ctl["state"] = "failed"
+                ctl["error"] = str(e)
+            ctl["finished_at"] = now_iso()
+            state.emit(run_id, "replay", {"state": ctl["state"], "done": ctl.get("done", 0)})
+
+        threading.Thread(target=worker, name=f"tpm-replay-{run_id}", daemon=True).start()
+        return {"ok": True, "replay": {k: v for k, v in st["replay"].items() if k not in ("stop", "stop_event")}}
+
+    @app.post("/api/runs/{run_id}/stream/stop")
+    async def stream_stop(run_id: str) -> dict[str, Any]:
+        st = state.stream.get(run_id) or {}
+        for k in ("replay", "watch"):
+            if st.get(k):
+                st[k]["stop"] = True
+                ev = st[k].get("stop_event")
+                if ev is not None:
+                    ev.set()
+        return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/stream/watch")
+    async def stream_watch(run_id: str, request: Request) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        body = await request.json()
+        folder = body.get("folder")
+        if not folder or not Path(folder).is_dir():
+            raise HTTPException(400, "folder must be an existing directory")
+        st = state.stream.setdefault(run_id, {"pushed": 0, "replay": None, "watch": None, "last": None})
+        if st.get("watch") and st["watch"].get("state") == "running":
+            st["watch"]["stop"] = True
+            time.sleep(0.1)
+        st["watch"] = {"state": "running", "folder": str(folder), "seen": [], "started_at": now_iso(), "stop": False, "poll_s": float(body.get("poll_s") or 2.0)}
+        fn = _lazy("tpm.ingest.stream:watch_folder")
+        stop = threading.Event()
+        st["watch"]["stop_event"] = stop
+
+        def worker() -> None:
+            try:
+                if fn is not None:
+                    fn(ws, state.settings, str(folder), callback=lambda df, bid, meta: _process(ws, df, f"WATCH-{bid}", "watch", aligned=True), poll_s=float(st["watch"]["poll_s"]), stop_event=stop)
+                else:
+                    fallback.watch_folder(ws, st["watch"], lambda df, bid: _process(ws, df, bid, "watch"))
+                st["watch"]["state"] = "stopped"
+            except Exception as e:
+                st["watch"]["state"] = "failed"
+                st["watch"]["error"] = str(e)
+
+        threading.Thread(target=worker, name=f"tpm-watch-{run_id}", daemon=True).start()
+        return {"ok": True, "watch": {k: v for k, v in st["watch"].items() if k not in ("stop", "stop_event")}}
+
+    @app.get("/api/runs/{run_id}/stream/status")
+    def stream_status(run_id: str) -> dict[str, Any]:
+        state.ws(run_id)
+        st = state.stream.get(run_id) or {"pushed": 0, "replay": None, "watch": None, "last": None}
+        out = json.loads(json.dumps(st, default=lambda o: None if isinstance(o, threading.Event) else str(o)))
+        for k in ("replay", "watch"):
+            if out.get(k):
+                out[k].pop("stop", None)
+                out[k].pop("stop_event", None)
+        return {"available": True, **out}
+
+    # ---------- report ----------
+    @app.get("/api/runs/{run_id}/report")
+    def get_report(run_id: str, lang: str = Query("en"), download: bool = Query(False)):
+        ws = state.ws(run_id)
+        lang = lang if lang in state.settings.report.languages else state.settings.report.default_language
+        p = ws.dir / f"report_{lang}.html"
+        if not p.exists():
+            fn = _lazy("tpm.report:run_report")
+            if fn is None:
+                return _unavailable("tpm.report:run_report", f"No report_{lang}.html in this run and the report module is not available.")
+            try:
+                ctx = {"source_path": ws.status().source_path, "options": {"language": lang, "languages": [lang]}, "progress": lambda *a, **k: None, "run_id": run_id}
+                fn(ws, state.settings, ctx)
+            except Exception as e:
+                raise HTTPException(500, f"report generation failed: {e}")
+            if not p.exists():
+                return _unavailable("tpm.report:run_report", f"report_{lang}.html was not produced.")
+        headers = {"Content-Disposition": f'attachment; filename="{run_id}_report_{lang}.html"'} if download else {}
+        return FileResponse(str(p), media_type="text/html", headers=headers)
+
+    @app.post("/api/runs/{run_id}/report/email")
+    async def email_report(run_id: str, request: Request):
+        ws = state.ws(run_id)
+        body = await request.json()
+        to = (body.get("to") or "").strip()
+        lang = body.get("lang") or "en"
+        if not to or "@" not in to:
+            raise HTTPException(400, "a valid recipient address is required")
+        fn = _lazy("tpm.report:email_report")
+        if fn is None:
+            return _unavailable("tpm.report:email_report", "Email sending is not available in this build.")
+        try:
+            res = fn(ws, state.settings, to, lang)
+        except Exception as e:
+            raise HTTPException(500, f"email failed: {e}")
+        ws.log.record("human:ui", "report_emailed", "report", lang, {"to": to})
+        return {"ok": True, "result": _jsonable(res) if res is not None else {}}
+
+    # ---------- data flow ----------
+    @app.get("/api/runs/{run_id}/egress")
+    def get_egress(run_id: str) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        ledger = ws.read_jsonl("egress_ledger") if ws.exists("egress_ledger") else []
+        summary = fallback.ledger_summary(ledger)
+        fn = _lazy("tpm.llm.ledger:summary")
+        if fn is not None:
+            try:
+                summary["detail"] = _jsonable(fn(ws, last_n=0))
+            except Exception:
+                pass
+        statement = None
+        fn2 = _lazy("tpm.llm.ledger:data_flow_statement")
+        if fn2 is not None:
+            try:
+                statement = fn2(ws, state.settings)
+            except Exception:
+                statement = None
+        if not statement:
+            statement = fallback.data_flow_statement(state.settings, summary)
+        return {"available": ws.exists("egress_ledger"), "ledger": ledger, "n": len(ledger), "summary": summary, "statement": statement, "profile": state.settings.profile, "allow_external": state.settings.active_profile.allow_external, "guard_strict": state.settings.active_profile.guard_strict, "external_key_configured": bool(state.settings.external_llm.api_key), "local_model": state.settings.local_llm.model, "external_model": state.settings.external_llm.model, "external_base_url": state.settings.external_llm.base_url}
+
+    # ---------- misc ----------
+    @app.post("/api/demo", status_code=202)
+    async def create_demo(request: Request) -> dict[str, Any]:
+        """Write a demo run from synthetic data (tests/fixtures/fake_workspace.py) in the background."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        run_id = body.get("run_id") or time.strftime("run_demo_%Y%m%d_%H%M%S")
+        try:
+            from tests.fixtures.fake_workspace import build_fake_workspace
+        except Exception as e:
+            raise HTTPException(501, f"demo fixture not available: {e}")
+
+        def worker() -> None:
+            job = state.jobs[run_id]
+            job["state"] = "running"
+            try:
+                ws = build_fake_workspace(state.settings, run_id=run_id, n_groups=int(body.get("groups") or 12), n_samples=int(body.get("samples") or 200))
+                ws.close()
+                job["state"] = "done"
+            except Exception as e:
+                job["state"] = "failed"
+                job["error"] = str(e)
+            job["finished_at"] = now_iso()
+            state.emit(run_id, "status", {"state": job["state"]})
+
+        state.jobs[run_id] = {"state": "pending", "run_id": run_id, "source_path": "synthetic", "created_at": now_iso()}
+        threading.Thread(target=worker, name=f"tpm-demo-{run_id}", daemon=True).start()
+        for _ in range(100):  # the fixture takes ~1 s; wait briefly so the run appears in the list
+            if state.jobs[run_id]["state"] in ("done", "failed"):
+                break
+            await asyncio.sleep(0.1)
+        return {"run_id": run_id, "state": state.jobs[run_id]["state"]}
+
+    @app.get("/api/runs/{run_id}/export")
+    def export_run(run_id: str):
+        """Zip of every artifact + reports (tpm.log.exports.export_run) for reviewers."""
+        ws = state.ws(run_id)
+        fn = _lazy("tpm.log.exports:export_run")
+        if fn is None:
+            return _unavailable("tpm.log.exports:export_run")
+        try:
+            out = fn(ws, ws.dir / "exports", make_reports=False)
+        except Exception as e:
+            raise HTTPException(500, f"export failed: {e}")
+        return FileResponse(str(out), media_type="application/zip", filename=Path(out).name)
+
+    @app.get("/api/runs/{run_id}/artifact/{name}")
+    def raw_artifact(run_id: str, name: str):
+        """Raw download of a small artifact (json/jsonl/html) for engineers."""
+        ws = state.ws(run_id)
+        safe = Path(name).name
+        p = ws.dir / safe
+        if not p.exists() or p.suffix not in (".json", ".jsonl", ".html", ".md", ".txt"):
+            raise HTTPException(404, "artifact not found")
+        return FileResponse(str(p), filename=safe)
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse({"error": str(exc), "type": type(exc).__name__}, status_code=500)
+
+    return app
+
+
+app = create_app()

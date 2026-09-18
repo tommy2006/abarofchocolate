@@ -1,0 +1,5 @@
+Task: {{ task }}.
+Derived artifacts (JSON):
+{{ payload_json }}
+
+{% if has_schema %}Respond with one JSON object matching the schema.{% else %}Respond in plain language.{% endif %}

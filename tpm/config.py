@@ -52,7 +52,7 @@ class ExternalLLMConfig(BaseModel):
 class GuardConfig(BaseModel):
     min_aggregate_n: int = 30
     max_series_points: int = 20
-    max_numeric_values_per_payload: int = 400
+    max_numeric_values_per_payload: int = 4000
     max_payload_bytes: int = 200_000
     allow_column_names: bool = True
     alias_column_names_in_strict: bool = True

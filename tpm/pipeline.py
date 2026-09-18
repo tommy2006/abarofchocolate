@@ -115,7 +115,12 @@ def process_batch(ws: Workspace, settings: Settings, batch_df: Any, batch_id: st
         flags = score_batch(ws, settings, batch_df, batch_id, trust)
         out["flags"] = [f.id for f in flags]
     if diagnose_flags and flags:
-        diags = diagnose_flags(ws, settings, flags)
+        # Streaming path: template narratives only, so a batch never waits on a model call.
+        # LLM-written explanations stay available on demand through the operator chat.
+        try:
+            diags = diagnose_flags(ws, settings, flags, use_llm=False)
+        except TypeError:
+            diags = diagnose_flags(ws, settings, flags)
         out["diagnoses"] = [d.id for d in diags]
     ws.log.record("system:pipeline", "batch_processed", "batch", batch_id, {k: v for k, v in out.items() if k != "trust"})
     return out

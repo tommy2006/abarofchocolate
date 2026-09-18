@@ -1,0 +1,732 @@
+"""Local tool-agent for the operator "why" chat and the assessor chat.
+
+Model-agnostic JSON-action loop (no native tool calling): the local model answers with one JSON object per
+turn, either {"thought", "action": "<tool>", "args"} or {"thought", "action": "final", "answer", "citations",
+...}. Every tool runs locally (DuckDB over dataset.parquet, workspace artifacts, the local index) and is
+logged. When no local model is available the chat still answers deterministically from the workspace
+objects and their evidence, so the UI always gets something useful.
+
+    from tpm.llm.agent import chat
+    out = chat(ws, settings, "Why was FLAG-000001 raised?", context={"flag_id": "FLAG-000001"})
+    out -> {"answer", "citations", "tool_trace", "source", "suggested_followups", "series", "turn_id"}
+"""
+from __future__ import annotations
+
+import json
+import math
+import re
+import time
+import uuid
+from typing import Any, Optional
+
+from ..config import Settings, get_settings
+from ..contracts import now_iso
+from . import prompts as prompts_mod
+from . import router as router_mod
+from .embeddings import LocalIndex
+
+SQL_LIMIT = 200
+TOOL_RESULT_CHARS = 4000
+CONTEXT_CHARS = 7000
+
+TOOL_SPECS: list[dict[str, str]] = [
+    {"name": "sql", "args": "query: str", "description": "read-only SELECT over views `dataset` (raw rows incl. __group__) and `scores` (per-row anomaly scores). A LIMIT is enforced. Use aggregates (avg, stddev, quantile_cont, count) rather than pulling rows."},
+    {"name": "describe_signal", "args": "id: str", "description": "signal catalog entry for an alias (S07): role, hypotheses, fingerprint aggregates, related signals, evidence statements."},
+    {"name": "stats", "args": "signal: str, group_id?: str, row_start?: int, row_end?: int", "description": "aggregates (n, mean, std, min, q05, median, q95, max, n_null) of one signal, optionally restricted to a group and/or a row range."},
+    {"name": "series", "args": "signal: str, row_start: int, row_end: int, max_points?: int", "description": "downsampled series (row, mean, min, max per bucket) for a chart; local only, never sent anywhere."},
+    {"name": "get_flag", "args": "id: str", "description": "one flag with ranked signals, trust context and its evidence statements."},
+    {"name": "get_diagnosis", "args": "id: str", "description": "one diagnosis with steps, propagation, uncertainty, critique and evidence statements."},
+    {"name": "get_evidence", "args": "id: str", "description": "one evidence item (statement, values, n_samples, signals)."},
+    {"name": "list_checks", "args": "batch_id?: str, signal?: str", "description": "data-quality checks (pass/warn/fail) with statements, optionally filtered by batch or signal."},
+    {"name": "search", "args": "query: str", "description": "semantic/keyword search over evidence, inferences, flags, diagnoses, checks, rules, patterns and the docs."},
+    {"name": "assessor_evaluate", "args": "action_text: str", "description": "ask the data-quality assessor to evaluate a proposed action in natural language (bounded experiments; nothing is applied)."},
+]
+
+_FORBIDDEN_SQL = re.compile(r"\b(insert|update|delete|drop|create|alter|attach|detach|copy|export|import|pragma|install|load|call|set|reset|truncate|merge|grant|vacuum|checkpoint|force)\b", re.I)
+_FILE_SQL = re.compile(r"\b(read_(csv|parquet|json|text|blob)\w*|glob|parquet_scan|csv_scan|sniff_csv|read_ndjson\w*)\s*\(", re.I)
+_ID_RE = re.compile(r"\b(FLAG-\d{3,}|DIAG-\d{3,}|EV-\d{3,}|CHK-\d{3,}|INF-\d{3,}|RULE-\d{2,}|PATTERN-[A-Z0-9]+|S\d{2,4})\b")
+
+_T = {
+    "en": {"flag": "Flag", "diagnosis": "Diagnosis", "signal": "Signal", "batch": "Batch", "evidence": "Evidence", "severity": "severity", "confidence": "confidence", "top_signals": "Signals contributing most", "steps": "Explanation steps", "uncertainty": "Uncertainty", "trust": "Trust verdict", "checks": "Data-quality checks", "related": "Related findings for your question", "nothing": "I could not link your question to a specific flag, diagnosis or signal. Here is what the run contains and the closest findings.", "no_model": "No local language model is available, so this answer was composed by code from the workspace objects and their evidence (source: template).", "contains": "This run contains", "flags": "flags", "diagnoses": "diagnoses", "checks_n": "checks", "signals_n": "signals", "assessor": "Assessor evaluation", "assessor_missing": "The assessor module is not available in this build, so the action could not be evaluated. Nothing was applied.", "rows": "rows"},
+    "fi": {"flag": "Hälytys", "diagnosis": "Diagnoosi", "signal": "Signaali", "batch": "Erä", "evidence": "Todisteet", "severity": "vakavuus", "confidence": "luottamus", "top_signals": "Eniten vaikuttaneet signaalit", "steps": "Selityksen vaiheet", "uncertainty": "Epävarmuus", "trust": "Luotettavuusarvio", "checks": "Laatutarkistukset", "related": "Kysymykseesi liittyvät löydökset", "nothing": "En pystynyt liittämään kysymystäsi tiettyyn hälytykseen, diagnoosiin tai signaaliin. Tässä ajon sisältö ja lähimmät löydökset.", "no_model": "Paikallista kielimallia ei ole käytettävissä, joten tämän vastauksen kokosi koodi työtilan objekteista ja todisteista (lähde: template).", "contains": "Tämä ajo sisältää", "flags": "hälytystä", "diagnoses": "diagnoosia", "checks_n": "tarkistusta", "signals_n": "signaalia", "assessor": "Arvioijan tulos", "assessor_missing": "Arvioijamoduuli ei ole käytettävissä tässä versiossa, joten toimenpidettä ei voitu arvioida. Mitään ei tehty.", "rows": "riviä"},
+    "sv": {"flag": "Flagga", "diagnosis": "Diagnos", "signal": "Signal", "batch": "Batch", "evidence": "Bevis", "severity": "allvarlighet", "confidence": "konfidens", "top_signals": "Signaler som bidrog mest", "steps": "Förklaringssteg", "uncertainty": "Osäkerhet", "trust": "Tillförlitlighetsbedömning", "checks": "Datakvalitetskontroller", "related": "Relaterade fynd för din fråga", "nothing": "Jag kunde inte koppla din fråga till en specifik flagga, diagnos eller signal. Här är vad körningen innehåller och de närmaste fynden.", "no_model": "Ingen lokal språkmodell är tillgänglig, så detta svar sattes ihop av kod från arbetsytans objekt och deras bevis (källa: template).", "contains": "Denna körning innehåller", "flags": "flaggor", "diagnoses": "diagnoser", "checks_n": "kontroller", "signals_n": "signaler", "assessor": "Bedömarens utvärdering", "assessor_missing": "Bedömarmodulen är inte tillgänglig i denna version, så åtgärden kunde inte utvärderas. Inget tillämpades.", "rows": "rader"},
+}
+
+
+def _t(lang: str) -> dict[str, str]:
+    return _T.get((lang or "en").lower(), _T["en"])
+
+
+def _dump(obj: Any) -> Any:
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if isinstance(obj, dict):
+        return {k: _dump(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_dump(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    return obj
+
+
+# ----------------------------------------------------------------------------------------------
+# Toolbox: every tool is local, bounded and logged
+# ----------------------------------------------------------------------------------------------
+
+
+class Toolbox:
+    def __init__(self, ws: Any, settings: Settings, index: Optional[LocalIndex] = None):
+        self.ws = ws
+        self.settings = settings
+        self._index = index
+        self._schema = None
+        self._signals: Optional[dict[str, Any]] = None
+        self.last_series: Optional[dict[str, Any]] = None
+        self.names = [t["name"] for t in TOOL_SPECS]
+
+    # ---- helpers ----
+    @property
+    def schema(self):
+        if self._schema is None and self.ws is not None:
+            try:
+                self._schema = self.ws.schema()
+            except Exception:
+                self._schema = None
+        return self._schema
+
+    @property
+    def signals(self) -> dict[str, Any]:
+        if self._signals is None:
+            self._signals = {}
+            if self.ws is not None:
+                try:
+                    self._signals = {s.id: s for s in self.ws.signals()}
+                except Exception:
+                    self._signals = {}
+        return self._signals
+
+    @property
+    def index(self) -> LocalIndex:
+        if self._index is None:
+            self._index = LocalIndex(self.ws, self.settings)
+        return self._index
+
+    def dataset_columns(self) -> list[str]:
+        sch = self.schema
+        return list(sch.columns) if sch else []
+
+    def resolve_column(self, signal: str) -> tuple[Optional[str], Optional[str]]:
+        """alias or original name -> (parquet column, alias)."""
+        sch = self.schema
+        if not signal:
+            return None, None
+        if sch:
+            inv = {v: k for k, v in sch.signal_alias.items()}
+            if signal in inv:
+                return inv[signal], signal
+            if signal in sch.columns:
+                return signal, sch.signal_alias.get(signal, signal)
+            for orig, alias in sch.signal_alias.items():
+                if orig == signal or alias.lower() == signal.lower():
+                    return orig, alias
+        s = self.signals.get(signal)
+        if s is not None and s.source_column:
+            return s.source_column, s.id
+        return None, None
+
+    def _base_sql(self) -> str:
+        cols = self.dataset_columns()
+        if "__row__" in cols:
+            return "(SELECT *, __row__ AS __rn FROM dataset)"
+        return "(SELECT *, row_number() OVER () - 1 AS __rn FROM dataset)"
+
+    def _group_col(self) -> Optional[str]:
+        sch = self.schema
+        if sch and sch.group_column in sch.columns:
+            return sch.group_column
+        return None
+
+    def evidence_statements(self, ids: list[str], limit: int = 12) -> list[dict[str, Any]]:
+        out = []
+        if self.ws is None:
+            return out
+        for eid in list(dict.fromkeys(ids))[:limit]:
+            e = self.ws.evidence.get(eid)
+            if e:
+                out.append({"id": e.id, "kind": e.kind, "signals": e.signals, "statement": e.statement, "n_samples": e.n_samples})
+        return out
+
+    # ---- dispatcher ----
+    def call(self, name: str, args: Optional[dict[str, Any]]) -> dict[str, Any]:
+        args = args or {}
+        if name not in self.names:
+            return {"error": f"unknown tool '{name}'. Available: {', '.join(self.names)}"}
+        fn = getattr(self, f"tool_{name}")
+        try:
+            res = fn(**{k: v for k, v in args.items() if isinstance(k, str)})
+        except TypeError as e:
+            return {"error": f"bad arguments for {name}: {e}"}
+        except Exception as e:
+            return {"error": f"{name} failed: {str(e)[:300]}"}
+        return _dump(res)
+
+    # ---- tools ----
+    def tool_sql(self, query: str = "", limit: int = SQL_LIMIT, **_: Any) -> dict[str, Any]:
+        if self.ws is None or not self.ws.exists("dataset"):
+            return {"error": "no dataset in this workspace"}
+        safe, err = safe_sql(query, min(int(limit or SQL_LIMIT), SQL_LIMIT))
+        if err:
+            return {"error": err}
+        con = self.ws.duckdb()
+        t0 = time.time()
+        cur = con.execute(safe)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        return {"columns": cols, "rows": [[_dump(v) for v in r] for r in rows[:SQL_LIMIT]], "n_rows": len(rows), "sql": safe, "ms": int((time.time() - t0) * 1000)}
+
+    def tool_describe_signal(self, id: str = "", **_: Any) -> dict[str, Any]:
+        s = self.signals.get(id)
+        if s is None:
+            col, alias = self.resolve_column(id)
+            s = self.signals.get(alias or "")
+        if s is None:
+            return {"error": f"signal '{id}' not found in the catalog", "known": list(self.signals)[:50]}
+        d = s.model_dump()
+        d["evidence"] = self.evidence_statements(s.evidence_ids)
+        try:
+            d["inferences"] = [{"id": i.id, "claim": i.claim, "status": i.status, "confidence": i.confidence} for i in self.ws.inferences.all() if i.subject == s.id][:6]
+        except Exception:
+            d["inferences"] = []
+        return d
+
+    def tool_stats(self, signal: str = "", group_id: Optional[str] = None, row_start: Optional[int] = None, row_end: Optional[int] = None, **_: Any) -> dict[str, Any]:
+        if self.ws is None or not self.ws.exists("dataset"):
+            return {"error": "no dataset in this workspace"}
+        col, alias = self.resolve_column(signal)
+        if not col:
+            return {"error": f"unknown signal '{signal}'"}
+        q = f'SELECT count("{col}") AS n, avg("{col}") AS mean, stddev_samp("{col}") AS std, min("{col}") AS min, quantile_cont("{col}", 0.05) AS q05, median("{col}") AS median, quantile_cont("{col}", 0.95) AS q95, max("{col}") AS max, count(*) - count("{col}") AS n_null, min(__rn) AS row_start, max(__rn) AS row_end FROM {self._base_sql()}'
+        conds, params = [], []
+        gcol = self._group_col()
+        if group_id is not None and gcol:
+            conds.append(f'CAST("{gcol}" AS VARCHAR) = ?')
+            params.append(str(group_id))
+        if row_start is not None:
+            conds.append("__rn >= ?")
+            params.append(int(row_start))
+        if row_end is not None:
+            conds.append("__rn <= ?")
+            params.append(int(row_end))
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        row = self.ws.duckdb().execute(q, params).fetchone()
+        keys = ["n", "mean", "std", "min", "q05", "median", "q95", "max", "n_null", "row_start", "row_end"]
+        out = {k: _dump(v) for k, v in zip(keys, row)}
+        out.update({"signal": alias or signal, "column": col, "group_id": group_id})
+        return out
+
+    def tool_series(self, signal: str = "", row_start: int = 0, row_end: Optional[int] = None, max_points: int = 400, **_: Any) -> dict[str, Any]:
+        if self.ws is None or not self.ws.exists("dataset"):
+            return {"error": "no dataset in this workspace"}
+        col, alias = self.resolve_column(signal)
+        if not col:
+            return {"error": f"unknown signal '{signal}'"}
+        con = self.ws.duckdb()
+        n_total = int(con.execute("SELECT count(*) FROM dataset").fetchone()[0])
+        a = max(0, int(row_start or 0))
+        b = int(row_end) if row_end is not None else min(n_total - 1, a + 2000)
+        b = min(b, n_total - 1)
+        if b < a:
+            return {"error": "row_end < row_start"}
+        max_points = max(10, min(int(max_points or 400), 2000))
+        n = b - a + 1
+        bucket = max(1, int(math.ceil(n / max_points)))
+        q = f'SELECT min(__rn) AS row, avg("{col}") AS mean, min("{col}") AS lo, max("{col}") AS hi FROM {self._base_sql()} WHERE __rn BETWEEN ? AND ? GROUP BY (__rn - ?) // ? ORDER BY row'
+        rows = con.execute(q, [a, b, a, bucket]).fetchall()
+        pts = [[int(r[0]), _dump(r[1]), _dump(r[2]), _dump(r[3])] for r in rows]
+        out = {"signal": alias or signal, "column": col, "row_start": a, "row_end": b, "n_raw": n, "bucket": bucket, "columns": ["row", "mean", "min", "max"], "points": pts, "local_only": True}
+        self.last_series = out
+        return {**out, "points": pts if len(pts) <= 60 else pts[:60], "note": f"{len(pts)} points computed; the UI receives the full series, the model sees the first 60"}
+
+    def tool_get_flag(self, id: str = "", **_: Any) -> dict[str, Any]:
+        for f in self.ws.flags() if self.ws else []:
+            if f.id == id:
+                d = f.model_dump()
+                d["evidence"] = self.evidence_statements(f.evidence_ids + [e for c in f.signals_ranked for e in c.evidence_ids])
+                return d
+        return {"error": f"flag '{id}' not found"}
+
+    def tool_get_diagnosis(self, id: str = "", **_: Any) -> dict[str, Any]:
+        for d in self.ws.diagnoses() if self.ws else []:
+            if d.id == id:
+                out = d.model_dump()
+                out["evidence"] = self.evidence_statements(d.evidence_ids)
+                return out
+        return {"error": f"diagnosis '{id}' not found"}
+
+    def tool_get_evidence(self, id: str = "", **_: Any) -> dict[str, Any]:
+        e = self.ws.evidence.get(id) if self.ws else None
+        return e.model_dump() if e else {"error": f"evidence '{id}' not found"}
+
+    def tool_list_checks(self, batch_id: Optional[str] = None, signal: Optional[str] = None, **_: Any) -> dict[str, Any]:
+        out = []
+        for c in self.ws.checks() if self.ws else []:
+            if batch_id and c.batch_id != batch_id:
+                continue
+            if signal and signal not in c.signals:
+                continue
+            out.append({"check_id": c.check_id, "check_type": c.check_type, "status": c.status, "severity": c.severity, "signals": c.signals, "batch_id": c.batch_id, "statement": c.statement, "evidence_ids": c.evidence_ids})
+        return {"n": len(out), "checks": out[:50]}
+
+    def tool_search(self, query: str = "", k: int = 6, **_: Any) -> dict[str, Any]:
+        hits = self.index.search(query, k=int(k or 6))
+        return {"method": self.index.method, "hits": hits}
+
+    def tool_assessor_evaluate(self, action_text: str = "", **_: Any) -> dict[str, Any]:
+        fn = _assessor_fn()
+        if fn is None:
+            return {"error": "assessor module not available (tpm.assessor.ask / evaluate_action missing)"}
+        res = fn(self.ws, self.settings, action_text)
+        return {"result": _dump(res)}
+
+
+def _assessor_fn():
+    try:
+        import importlib
+
+        mod = importlib.import_module("tpm.assessor")
+    except Exception:
+        return None
+    for name in ("ask", "evaluate_action"):
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
+def safe_sql(query: str, limit: int = SQL_LIMIT) -> tuple[str, Optional[str]]:
+    """Read-only, single-statement SELECT with an enforced LIMIT. Returns (sql, error)."""
+    if not query or not isinstance(query, str):
+        return "", "empty query"
+    q = re.sub(r"--[^\n]*", " ", query)
+    q = re.sub(r"/\*.*?\*/", " ", q, flags=re.S)
+    q = q.strip().rstrip(";").strip()
+    if ";" in q:
+        return "", "only one statement is allowed"
+    if not re.match(r"^(select|with)\b", q, re.I):
+        return "", "only SELECT / WITH queries are allowed"
+    m = _FORBIDDEN_SQL.search(q)
+    if m:
+        return "", f"forbidden keyword '{m.group(1)}' (read-only)"
+    if _FILE_SQL.search(q):
+        return "", "file access functions are not allowed; use the views dataset / scores"
+    m = re.search(r"\blimit\s+(\d+)\s*$", q, re.I)
+    if m and int(m.group(1)) <= limit:
+        return q, None
+    return f"SELECT * FROM ({q}) AS __q LIMIT {limit}", None
+
+
+# ----------------------------------------------------------------------------------------------
+# context loading
+# ----------------------------------------------------------------------------------------------
+
+
+def load_context(ws: Any, settings: Settings, context: Optional[dict[str, Any]], message: str, tb: Optional[Toolbox] = None) -> dict[str, Any]:
+    """Objects the operator is looking at (from the UI click) plus IDs mentioned in the message."""
+    tb = tb or Toolbox(ws, settings)
+    ctx = dict(context or {})
+    ids = set(_ID_RE.findall(message or ""))
+    for i in ids:
+        if i.startswith("FLAG-") and not ctx.get("flag_id"):
+            ctx["flag_id"] = i
+        elif i.startswith("DIAG-") and not ctx.get("diagnosis_id"):
+            ctx["diagnosis_id"] = i
+        elif re.match(r"^S\d{2,4}$", i) and not ctx.get("signal"):
+            ctx["signal"] = i
+    out: dict[str, Any] = {"context": ctx, "flag": None, "diagnosis": None, "signal": None, "trust": None, "checks": [], "evidence": [], "mentioned": []}
+    if ws is None:
+        return out
+    if ctx.get("flag_id"):
+        f = tb.tool_get_flag(ctx["flag_id"])
+        if "error" not in f:
+            out["flag"] = f
+            if not ctx.get("diagnosis_id"):
+                for d in ws.diagnoses():
+                    if ctx["flag_id"] in d.flag_ids:
+                        ctx["diagnosis_id"] = d.id
+                        break
+            if not ctx.get("batch_id") and f.get("batch_id"):
+                ctx["batch_id"] = f["batch_id"]
+    if ctx.get("diagnosis_id"):
+        d = tb.tool_get_diagnosis(ctx["diagnosis_id"])
+        if "error" not in d:
+            out["diagnosis"] = d
+            if out["flag"] is None and d.get("flag_ids"):
+                f = tb.tool_get_flag(d["flag_ids"][0])
+                if "error" not in f:
+                    out["flag"] = f
+                    ctx.setdefault("flag_id", f["id"])
+                    ctx.setdefault("batch_id", f.get("batch_id"))
+    if ctx.get("signal"):
+        s = tb.tool_describe_signal(ctx["signal"])
+        if "error" not in s:
+            out["signal"] = s
+    if ctx.get("batch_id"):
+        try:
+            out["trust"] = next((t.model_dump() for t in ws.trust() if t.batch_id == ctx["batch_id"]), None)
+        except Exception:
+            out["trust"] = None
+        out["checks"] = tb.tool_list_checks(batch_id=ctx["batch_id"]).get("checks", [])[:10]
+    for i in ids:
+        if i.startswith("EV-"):
+            e = tb.tool_get_evidence(i)
+            if "error" not in e:
+                out["mentioned"].append(e)
+        elif i.startswith("CHK-"):
+            for c in ws.checks():
+                if c.check_id == i:
+                    out["mentioned"].append(c.model_dump())
+    ev_ids: list[str] = []
+    for obj in (out["flag"], out["diagnosis"], out["signal"]):
+        if obj:
+            ev_ids += [e["id"] for e in obj.get("evidence", [])]
+    for c in out["checks"]:
+        ev_ids += c.get("evidence_ids", [])
+    out["evidence"] = tb.evidence_statements(ev_ids, limit=20)
+    return out
+
+
+def _context_text(loaded: dict[str, Any]) -> str:
+    compact: dict[str, Any] = {}
+    if loaded.get("flag"):
+        f = loaded["flag"]
+        compact["flag"] = {k: f.get(k) for k in ("id", "kind", "batch_id", "group_id", "row_start", "row_end", "severity", "score", "threshold", "detector", "statement", "likely_cause_class", "confidence", "pattern_id", "trust_context", "human_status")}
+        compact["flag"]["signals_ranked"] = [{"signal": c.get("signal"), "contribution": c.get("contribution"), "direction": c.get("direction"), "lag": c.get("lag")} for c in f.get("signals_ranked", [])[:6]]
+    if loaded.get("diagnosis"):
+        d = loaded["diagnosis"]
+        compact["diagnosis"] = {k: d.get(k) for k in ("id", "flag_ids", "fault_type", "cause_class", "steps", "summary", "confidence", "uncertainty", "assumptions", "propagation", "critique")}
+    if loaded.get("signal"):
+        s = loaded["signal"]
+        compact["signal"] = {k: s.get(k) for k in ("id", "structural_role", "structural_confidence", "instrument_hypothesis", "instrument_confidence", "unit_operation_hypothesis", "cluster_id", "related_signals", "fingerprint", "excluded")}
+    if loaded.get("trust"):
+        compact["trust"] = loaded["trust"]
+    if loaded.get("checks"):
+        compact["checks"] = [{k: c.get(k) for k in ("check_id", "status", "severity", "signals", "statement")} for c in loaded["checks"]]
+    if loaded.get("evidence"):
+        compact["evidence"] = loaded["evidence"]
+    if loaded.get("mentioned"):
+        compact["mentioned"] = loaded["mentioned"]
+    text = json.dumps(compact, ensure_ascii=False, default=str)
+    return text[:CONTEXT_CHARS]
+
+
+# ----------------------------------------------------------------------------------------------
+# deterministic answer (no model) and followups
+# ----------------------------------------------------------------------------------------------
+
+
+def _fmt(v: Any, nd: int = 3) -> str:
+    try:
+        if isinstance(v, bool) or v is None:
+            return str(v)
+        if isinstance(v, (int,)):
+            return str(v)
+        return f"{float(v):.{nd}g}"
+    except Exception:
+        return str(v)
+
+
+def deterministic_answer(ws: Any, settings: Settings, message: str, loaded: dict[str, Any], language: str = "en", tb: Optional[Toolbox] = None, task: str = "why_chat") -> dict[str, Any]:
+    t = _t(language)
+    tb = tb or Toolbox(ws, settings)
+    lines: list[str] = []
+    cites: list[str] = []
+    found = False
+    if task == "assessor_chat":
+        res = tb.tool_assessor_evaluate(message)
+        lines.append(f"{t['assessor']}:")
+        if "error" in res:
+            lines.append(t["assessor_missing"])
+        else:
+            lines.append(json.dumps(res.get("result"), ensure_ascii=False, default=str)[:1500])
+            found = True
+    f = loaded.get("flag")
+    if f:
+        found = True
+        lines.append(f"{t['flag']} {f['id']} ({f.get('kind')}, {t['severity']} {_fmt(f.get('severity'))}, {t['confidence']} {_fmt(f.get('confidence'))}, {f.get('detector')}): {f.get('statement')}")
+        if f.get("signals_ranked"):
+            lines.append(f"{t['top_signals']}: " + ", ".join(f"{c.get('signal')} ({_fmt(c.get('contribution'), 2)}{', ' + str(c.get('direction')) if c.get('direction') else ''}{', lag ' + str(c.get('lag')) if c.get('lag') else ''})" for c in f["signals_ranked"][:5]))
+        if f.get("trust_context"):
+            lines.append(f"{t['trust']}: {json.dumps(f['trust_context'], ensure_ascii=False)}")
+        cites += [e["id"] for e in f.get("evidence", [])]
+    d = loaded.get("diagnosis")
+    if d:
+        found = True
+        lines.append(f"{t['diagnosis']} {d['id']} ({d.get('cause_class')}, {t['confidence']} {_fmt(d.get('confidence'))}): {d.get('summary')}")
+        if d.get("steps"):
+            lines.append(f"{t['steps']}:")
+            lines += [f"  {s}" for s in d["steps"][:7]]
+        if d.get("uncertainty"):
+            lines.append(f"{t['uncertainty']}: " + "; ".join(d["uncertainty"][:5]))
+        if d.get("critique") and isinstance(d["critique"], dict):
+            lines.append(f"Critique: {d['critique'].get('verdict')} " + "; ".join(str(o) for o in (d['critique'].get('objections') or [])[:3]))
+        cites += [e["id"] for e in d.get("evidence", [])]
+    s = loaded.get("signal")
+    if s:
+        found = True
+        fp = s.get("fingerprint") or {}
+        lines.append(f"{t['signal']} {s['id']}: {s.get('structural_role')} ({t['confidence']} {_fmt(s.get('structural_confidence'))})" + (f", {s.get('instrument_hypothesis')} ({_fmt(s.get('instrument_confidence'))})" if s.get("instrument_hypothesis") else "") + (f"; mean {_fmt(fp.get('mean'))}, std {_fmt(fp.get('std'))}, range [{_fmt(fp.get('min'))}, {_fmt(fp.get('max'))}]" if fp.get("mean") is not None else "") + (f"; related: {', '.join(r.get('signal', '') + ' r=' + _fmt(r.get('r'), 2) for r in s.get('related_signals', [])[:3])}" if s.get("related_signals") else ""))
+        cites += [e["id"] for e in s.get("evidence", [])]
+    if loaded.get("trust") and not f:
+        tr = loaded["trust"]
+        found = True
+        lines.append(f"{t['trust']} {tr.get('batch_id')}: {tr.get('statement') or ('trusted' if tr.get('trusted') else 'untrusted')} ({_fmt(tr.get('trust_score'))})")
+        cites += tr.get("check_ids", [])
+    if loaded.get("checks") and (not f or any(c.get("status") != "pass" for c in loaded["checks"])):
+        lines.append(f"{t['checks']}: " + "; ".join(f"{c['check_id']} {c.get('status')}: {c.get('statement')}" for c in loaded["checks"][:5]))
+        cites += [c["check_id"] for c in loaded["checks"][:5]]
+    for m in loaded.get("mentioned", [])[:4]:
+        found = True
+        lines.append(f"{m.get('id') or m.get('check_id')}: {m.get('statement')}")
+        cites.append(m.get("id") or m.get("check_id"))
+    ev = loaded.get("evidence", [])
+    if ev:
+        lines.append(f"{t['evidence']}:")
+        lines += [f"  [{e['id']}] {e['statement']}" + (f" (n={e['n_samples']})" if e.get("n_samples") else "") for e in ev[:8]]
+    # keyword retrieval for the question itself
+    hits = []
+    try:
+        hits = tb.index.search(message, k=4, types=["evidence", "check", "diagnosis", "flag", "inference", "rule", "pattern"])
+    except Exception:
+        hits = []
+    hits = [h for h in hits if h["id"] not in cites]
+    if not found:
+        n_flags = len(ws.flags()) if ws else 0
+        n_diag = len(ws.diagnoses()) if ws else 0
+        n_chk = len(ws.checks()) if ws else 0
+        n_sig = len(ws.signals()) if ws else 0
+        lines.insert(0, t["nothing"])
+        lines.append(f"{t['contains']}: {n_flags} {t['flags']}, {n_diag} {t['diagnoses']}, {n_chk} {t['checks_n']}, {n_sig} {t['signals_n']}.")
+    if hits:
+        lines.append(f"{t['related']}:")
+        lines += [f"  [{h['id']}] {h['text'][:200]}" for h in hits[:4]]
+        cites += [h["id"] for h in hits[:4]]
+    lines.append(t["no_model"])
+    return {"answer": "\n".join(lines), "citations": list(dict.fromkeys(c for c in cites if c)), "confidence": 0.5 if found else 0.2}
+
+
+def suggest_followups(loaded: dict[str, Any], language: str = "en") -> list[str]:
+    ctx = loaded.get("context", {})
+    f, d, s = loaded.get("flag"), loaded.get("diagnosis"), loaded.get("signal")
+    out: list[str] = []
+    lang = (language or "en").lower()
+    if f:
+        top = (f.get("signals_ranked") or [{}])[0].get("signal")
+        out.append({"fi": f"Mitkä todisteet tukevat hälytystä {f['id']}?", "sv": f"Vilka bevis stöder flaggan {f['id']}?"}.get(lang, f"What evidence supports {f['id']}?"))
+        if top:
+            out.append({"fi": f"Näytä {top} rivien {f.get('row_start')}-{f.get('row_end')} ympärillä", "sv": f"Visa {top} runt raderna {f.get('row_start')}-{f.get('row_end')}"}.get(lang, f"Show {top} around rows {f.get('row_start')}-{f.get('row_end')}"))
+        out.append({"fi": f"Oliko erä {f.get('batch_id')} luotettava?", "sv": f"Var batchen {f.get('batch_id')} tillförlitlig?"}.get(lang, f"Was batch {f.get('batch_id')} trusted?"))
+    if d:
+        out.append({"fi": f"Voisiko {d['id']} olla anturivika prosessivian sijaan?", "sv": f"Kan {d['id']} vara ett sensorfel i stället för ett processfel?"}.get(lang, f"Could {d['id']} be a sensor fault instead of a process fault?"))
+    if s:
+        out.append({"fi": f"Mihin signaaleihin {s['id']} korreloi?", "sv": f"Vilka signaler korrelerar {s['id']} med?"}.get(lang, f"Which signals does {s['id']} correlate with?"))
+    if not out:
+        out = {"fi": ["Mitkä hälytykset ovat vakavimpia?", "Mitkä signaalit ovat epäluotettavia?", "Mitä oletuksia ajossa tehtiin?"], "sv": ["Vilka flaggor är allvarligast?", "Vilka signaler är opålitliga?", "Vilka antaganden gjordes i körningen?"]}.get(lang, ["Which flags are most severe?", "Which signals are untrusted?", "What assumptions were made in this run?"])
+    return out[:4]
+
+
+# ----------------------------------------------------------------------------------------------
+# the JSON-action loop
+# ----------------------------------------------------------------------------------------------
+
+
+_PLACEHOLDER_RE = re.compile(r"^\s*(<[^>]*>|answer(\s+for)?\s+the\s+(question|operator)|your\s+answer\s*(here)?|final\s+answer|answer|n/?a|todo|\.\.\.)\s*[.!]?\s*$", re.I)
+
+
+def _is_placeholder_answer(answer: str) -> bool:
+    """True for schema echoes like 'answer the question' or '<answer>' and for answers too short to be useful."""
+    a = (answer or "").strip()
+    return len(a) < 8 or bool(_PLACEHOLDER_RE.match(a))
+
+
+def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any], tb: Toolbox, *, task: str = "why_chat", purpose: str = "operator chat", language: str = "en", history: Optional[list[dict[str, str]]] = None, max_steps: Optional[int] = None) -> Optional[dict[str, Any]]:
+    """Returns {"answer","citations","confidence","suggested_followups","tool_trace","model"} or None if the
+    local model is unavailable / never produced a final answer."""
+    max_steps = int(max_steps if max_steps is not None else settings.local_llm.max_tool_steps)
+    system = prompts_mod.render_template(
+        "agent.system.j2",
+        tools=TOOL_SPECS,
+        max_steps=max_steps,
+        dataset_columns=", ".join(tb.dataset_columns()[:60]) or "(no dataset)",
+        sql_limit=SQL_LIMIT,
+        context_text=_context_text(loaded),
+        language=(language or "en").lower(),
+        language_name=prompts_mod.language_name(language),
+        has_schema=False,
+        schema_json="null",
+        task=task,
+    )
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for turn in (history or [])[-6:]:
+        role = "assistant" if turn.get("role") == "assistant" else "user"
+        messages.append({"role": role, "content": str(turn.get("content", ""))[:2000]})
+    messages.append({"role": "user", "content": f"Question: {message}\nRespond with one JSON object (tool call or final)."})
+    trace: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    model = ""
+    steps_used = 0
+    placeholder_retried = False
+    for step in range(max_steps + 3):
+        res = router_mod.local_chat(messages, task=task, purpose=purpose, ws=ws, settings=settings, schema=prompts_mod.AGENT_STEP_SCHEMA, max_tokens=900, artifact_types=["chat", "tool_results"])
+        if not res.ok or not isinstance(res.data, dict):
+            trace.append({"step": step, "tool": None, "ok": False, "error": res.error or "no JSON from model"})
+            if res.route == "none":
+                return None
+            break
+        model = res.model or model
+        data = res.data
+        action = str(data.get("action") or "final").strip()
+        if action == "final" or not action:
+            answer = str(data.get("answer") or data.get("thought") or "").strip()
+            if not answer:
+                break
+            if _is_placeholder_answer(answer) and not placeholder_retried:
+                # Small models sometimes echo the schema ("answer the question"). One nudge, then fall through.
+                placeholder_retried = True
+                messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
+                messages.append({"role": "user", "content": "That was a placeholder, not an answer. Write the actual answer for the operator in at least two full sentences, in plain language, citing evidence IDs. Respond with action \"final\"."})
+                continue
+            return {"answer": answer, "citations": [str(c) for c in (data.get("citations") or []) if c], "confidence": data.get("confidence"), "suggested_followups": [str(x) for x in (data.get("suggested_followups") or [])][:4], "tool_trace": trace, "model": model}
+        if steps_used >= max_steps:
+            messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
+            messages.append({"role": "user", "content": "No tool calls left. Respond now with action \"final\" and your best answer with citations."})
+            continue
+        args = data.get("args") if isinstance(data.get("args"), dict) else {}
+        key = action + json.dumps(args, sort_keys=True, default=str)
+        t0 = time.time()
+        if key in seen:
+            result = {"error": "identical call already made; use its result or finish"}
+        else:
+            seen.add(key)
+            result = tb.call(action, args)
+        steps_used += 1
+        ms = int((time.time() - t0) * 1000)
+        result_text = json.dumps(result, ensure_ascii=False, default=str)
+        trace.append({"step": step, "tool": action, "args": args, "ok": "error" not in result, "ms": ms, "summary": result_text[:300], "thought": str(data.get("thought", ""))[:300]})
+        try:
+            if ws is not None:
+                ws.log.record("system:llm.agent", "tool_call", "chat_tool", action, {"args": args, "ok": "error" not in result, "ms": ms, "result_chars": len(result_text)})
+        except Exception:
+            pass
+        messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
+        messages.append({"role": "user", "content": f"Tool result for {action}: {result_text[:TOOL_RESULT_CHARS]}\n({max_steps - steps_used} tool calls left.) Continue with another tool call or finish with action \"final\"."})
+    return {"answer": "", "citations": [], "confidence": None, "suggested_followups": [], "tool_trace": trace, "model": model, "incomplete": True}
+
+
+# ----------------------------------------------------------------------------------------------
+# public entry point
+# ----------------------------------------------------------------------------------------------
+
+
+def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", context: Optional[dict[str, Any]] = None, history: Optional[list[dict[str, str]]] = None, actor: str = "human", *, task: str = "why_chat", language: str = "en", max_steps: Optional[int] = None, use_model: bool = True) -> dict[str, Any]:
+    """Operator chat entry point (why chat and assessor chat). Always returns an answer."""
+    settings = settings or get_settings()
+    t_start = time.time()
+    turn_id = "CHAT-" + uuid.uuid4().hex[:10]
+    actor_str = actor if ":" in (actor or "") else f"human:{actor or 'operator'}(operator)"
+    tb = Toolbox(ws, settings)
+    loaded = load_context(ws, settings, context, message, tb)
+    _persist(ws, {"turn_id": turn_id, "ts": now_iso(), "role": "user", "actor": actor_str, "content": message, "context": loaded.get("context"), "task": task})
+
+    result: Optional[dict[str, Any]] = None
+    source = "template"
+    if use_model and settings.route_for(task) in ("local", "external"):
+        try:
+            result = run_agent(ws, settings, message, loaded, tb, task=task, purpose=f"{task}: {message[:80]}", language=language, history=history, max_steps=max_steps)
+        except Exception as e:
+            result = {"answer": "", "citations": [], "tool_trace": [{"error": str(e)}], "model": "", "incomplete": True}
+    trace = (result or {}).get("tool_trace", [])
+    if result and result.get("answer") and not result.get("incomplete"):
+        source = f"llm-local:{result.get('model') or settings.local_llm.model}"
+        answer = result["answer"]
+        citations = _known_ids(ws, result.get("citations", []), loaded)
+        followups = result.get("suggested_followups") or suggest_followups(loaded, language)
+        confidence = result.get("confidence")
+    else:
+        det = deterministic_answer(ws, settings, message, loaded, language, tb, task=task)
+        answer = det["answer"]
+        citations = det["citations"]
+        followups = suggest_followups(loaded, language)
+        confidence = det["confidence"]
+        if result and result.get("incomplete") and trace:
+            answer = answer + "\n(The local model ran tools but did not finish; the summary above was composed by code.)"
+    series = tb.last_series
+    if series is None and loaded.get("flag") and ws is not None and ws.exists("dataset"):
+        f = loaded["flag"]
+        top = (f.get("signals_ranked") or [{}])[0].get("signal")
+        if top:
+            try:
+                span = max(20, int(f["row_end"]) - int(f["row_start"]) + 1)
+                pad = min(200, span // 2)
+                s = tb.tool_series(top, max(0, int(f["row_start"]) - pad), int(f["row_end"]) + pad, 400)
+                series = tb.last_series if "error" not in s else None
+            except Exception:
+                series = None
+    out = {
+        "turn_id": turn_id,
+        "answer": answer,
+        "citations": citations,
+        "confidence": confidence,
+        "tool_trace": trace,
+        "source": source,
+        "suggested_followups": followups,
+        "series": series,
+        "context": loaded.get("context"),
+        "latency_ms": int((time.time() - t_start) * 1000),
+    }
+    _persist(ws, {"turn_id": turn_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
+    try:
+        if ws is not None:
+            ws.log.record(actor_str, "chat", "chat", turn_id, {"task": task, "question": message[:500], "source": source, "n_tools": len(trace), "context": loaded.get("context")}, evidence_ids=[c for c in citations if c.startswith("EV-")])
+    except Exception:
+        pass
+    return out
+
+
+def _known_ids(ws: Any, ids: list[str], loaded: dict[str, Any]) -> list[str]:
+    known: set[str] = set()
+    if ws is not None:
+        try:
+            known |= {e.id for e in ws.evidence.all()}
+            known |= {c.check_id for c in ws.checks()}
+            known |= {f.id for f in ws.flags()}
+            known |= {d.id for d in ws.diagnoses()}
+        except Exception:
+            pass
+    out = [i for i in dict.fromkeys(ids) if i in known]
+    if not out:
+        out = [e["id"] for e in loaded.get("evidence", [])][:5]
+    return out
+
+
+def _persist(ws: Any, turn: dict[str, Any]) -> None:
+    if ws is None:
+        return
+    try:
+        ws.append_jsonl("chat", turn)
+    except Exception:
+        pass
+
+
+def chat_history(ws: Any, limit: int = 50) -> list[dict[str, Any]]:
+    if ws is None:
+        return []
+    try:
+        return ws.read_jsonl("chat")[-limit:]
+    except Exception:
+        return []

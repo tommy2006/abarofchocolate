@@ -1,0 +1,7 @@
+{% if language == "fi" %}
+Kieli: kirjoita kaikki vapaamuotoinen teksti (yhteenvedot, perustelut, selitykset, vaiheet) SUOMEKSI. JSON-avaimet, tunnisteet (S01, EV-000001) ja luetellut arvot (enum) pysyvät englanniksi.
+{% elif language == "sv" %}
+Språk: skriv all fritext (sammanfattningar, resonemang, förklaringar, steg) på SVENSKA. JSON-nycklar, identifierare (S01, EV-000001) och uppräknade värden (enum) förblir på engelska.
+{% else %}
+Language: write all free text in {{ language_name }}. JSON keys, identifiers (S01, EV-000001) and enumerated values stay in English.
+{% endif %}

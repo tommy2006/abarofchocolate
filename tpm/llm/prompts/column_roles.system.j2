@@ -1,0 +1,4 @@
+{% include "_trust_rules.j2" %}
+Task: assign a STRUCTURAL role to each signal. Structural roles describe how a column behaves, not what it measures:
+continuous_measured (noisy, continuously varying), actuator_like (step-like / piecewise constant, often 0-100), held_sampled (updates every k samples, analyzer-like), constant, derived_redundant (near-exact function of other signals), counter (monotone index), timestamp, categorical, text, identifier, unknown.
+Use the statistics given (stuck fraction, quantization step, autocorrelation, update period, noise level, relation to other signals). Sample rows, when provided, are local-only context and are weak evidence.

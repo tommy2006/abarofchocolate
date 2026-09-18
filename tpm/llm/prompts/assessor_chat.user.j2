@@ -1,0 +1,12 @@
+{% if payload.history is defined and payload.history %}
+Conversation so far:
+{% for turn in payload.history %}
+- {{ turn.role }}: {{ turn.content }}
+{% endfor %}
+{% endif %}
+Proposed action / question: {{ payload.question if payload.question is defined else (payload.message if payload.message is defined else "") }}
+
+Assessor results and evidence:
+{{ payload_json }}
+
+Return one JSON object: {"answer": "...", "citations": [evidence ids], "confidence": 0-1, "suggested_followups": [...]}.

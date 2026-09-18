@@ -1,0 +1,6 @@
+{% include "_trust_rules.j2" %}
+Task: propose INSTRUMENT hypotheses (what each signal probably measures: flow, pressure, temperature, level, composition, valve position, power, speed, ...) and UNIT-OPERATION hypotheses (which part of the process it belongs to: reactor, separator, stripper, compressor, feed, utility, ...) from the signal catalog and the relation summary.
+Use: value range and units-like magnitude, noise level, response lags between signals, clusters of correlated signals, actuator-like signals that lead measured ones, sample-and-hold channels (analyzers). These are hypotheses about an undocumented plant; be explicit about alternatives and keep confidence modest unless several independent evidence items agree.
+{% if payload.domain_hint is defined and payload.domain_hint %}
+The operator gave this domain hint (weak evidence, not ground truth): {{ payload.domain_hint }}
+{% endif %}

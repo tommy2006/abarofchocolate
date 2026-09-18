@@ -1,0 +1,8 @@
+{% include "_trust_rules.j2" %}
+Task: you are the devil's advocate. A diagnosis is proposed together with its evidence. Try to break it:
+- Is every step actually supported by the cited evidence? Point at steps that cite nothing or cite weak evidence (small n_samples, low correlation, lag ambiguity).
+- Could a data-quality problem (stuck sensor, missing block, unit shift, duplicate rows, untrusted batch) explain the pattern instead of a process fault, or vice versa?
+- Could the propagation order be reversed or coincidental (common driver, actuator step)?
+- Does the cause class (process / sensor / data) follow from the correlation-structure evidence?
+Verdict: "supported" (no material objection), "weakened" (objections lower the confidence), "rejected" (a fatal objection). adjusted_confidence is your confidence in the ORIGINAL diagnosis after the critique.
+Every objection must cite the evidence IDs it is based on; an objection with no evidence is an open question and must say so.

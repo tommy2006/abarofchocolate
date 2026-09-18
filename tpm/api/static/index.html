@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Trustworthy Process Monitor</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231c242d'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%234cc0b2'/%3E%3C/svg%3E">
+  <!-- Optional web font; the page falls back to the system stack when offline. -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" onerror="this.remove()">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">TPM</span>
+      <span class="brand-name" data-i18n="app.title">Trustworthy Process Monitor</span>
+    </div>
+    <div class="runpick">
+      <label for="run-select" data-i18n="status.run">Run</label>
+      <select id="run-select" aria-label="Run"></select>
+    </div>
+    <div class="lamps" id="lamps" role="status" aria-live="polite"></div>
+    <div class="tools">
+      <div class="langs" id="langs" role="group" aria-label="Language"></div>
+      <button class="tool" id="theme-btn" type="button" title="Theme"></button>
+      <button class="tool userchip" id="user-btn" type="button"></button>
+      <button class="tool chat-toggle" id="chat-btn" type="button"></button>
+    </div>
+  </header>
+
+  <div class="frame">
+    <nav class="rail" id="rail" aria-label="Views"></nav>
+    <main class="main" id="main" tabindex="-1"></main>
+    <aside class="drawer" id="drawer" aria-label="Chat" hidden></aside>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div id="modal-root"></div>
+
+  <script src="/static/vendor/plotly.min.js" defer></script>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

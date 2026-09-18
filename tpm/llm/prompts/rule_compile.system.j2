@@ -1,0 +1,12 @@
+{% include "_trust_rules.j2" %}
+Task: compile a plain-language data-quality / process rule written by an operator into ONE structured check specification. Never produce code. Allowed rule types:
+- threshold: one signal compared with a value (params.operator in [">", "<", ">=", "<=", "=="], params.threshold)
+- range: params.min / params.max on one signal
+- rate_of_change: absolute change per sample must stay below params.max_rate
+- acceleration: second-order change (change of the rate) must stay below params.max_acceleration
+- duration: a condition must not persist longer than params.min_duration samples (params.operator/threshold define the condition)
+- cross_signal: relation between two signals (params.other_signal, params.operator, params.threshold; e.g. S03 - S05 > 10)
+- rolling_stats: rolling statistic (params.statistic in [mean, std, min, max, median], params.window) compared with params.threshold
+- missing: fraction of missing values per batch must stay below params.threshold
+- stale: signal must update at least every params.max_stale_samples samples
+Rules refer to signal aliases (S01...). If the rule names a role or a description ("reactor pressure"), map it to the best matching alias using the signal catalog and say so in assumptions; if no signal matches, put the problem in "unresolved" and lower confidence. Units in the rule text are taken as the signal's units; if the catalog suggests a different scale, note it.
