@@ -161,7 +161,9 @@ class TrustVerdict(BaseModel):
     batch_id: str
     trusted: bool
     trust_score: float  # 0..1
-    untrusted_signals: list[str] = Field(default_factory=list)
+    untrusted_signals: list[str] = Field(default_factory=list)  # unreliable for a meaningful share of the batch
+    local_untrusted: list[dict[str, Any]] = Field(default_factory=list)  # [{signal,row_start,row_end,check_type,severity}] unreliable only in those rows
+    n_rows: Optional[int] = None  # batch rows the exposure weighting used (what-if recomputations reuse it)
     reasons: list[str] = Field(default_factory=list)
     check_ids: list[str] = Field(default_factory=list)
     statement: str = ""

@@ -97,7 +97,7 @@ class DetectConfig(BaseModel):
     n_folds: int = 5
     max_fit_rows: int = 300_000
     window: int = 20
-    time_budget_s: int = 600
+    time_budget_s: int = 480
     detectors: list[str] = Field(default_factory=lambda: ["pca", "robust_z", "ewma", "cusum", "corr_break", "iforest", "autoencoder"])
     use_autoencoder: bool = True
     autoencoder_max_rows: int = 60_000

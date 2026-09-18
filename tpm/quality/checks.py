@@ -515,12 +515,18 @@ class BatchAccumulator:
         if stuck:
             longest = max(stuck, key=lambda r: r[1])
             frac = sum(r[1] for r in stuck) / max(1, acc.n * self.stride)
-            sev = min(1.0, 0.5 + 0.5 * longest[1] / (4.0 * stuck_thr))
-            if frac >= q.stuck_fraction_warn:
-                sev = 1.0
+            # severity grows with the share of the batch that is frozen and with the longest run; a run that
+            # covers a small part of a large batch is a local problem (row-scoped in the trust verdict), not a
+            # reason to distrust the signal everywhere.
+            sev_frac = min(1.0, frac / max(float(q.stuck_fraction_warn), 1e-6))
+            sev_len = min(1.0, longest[1] / (10.0 * stuck_thr))
+            sev = min(1.0, 0.15 + 0.45 * sev_frac + 0.4 * sev_len)
+            status = "fail" if (frac >= 0.02 or (longest[1] >= 10 * stuck_thr and frac >= 0.005)) else "warn"
             ev = [(r[0], r[0] + r[1] - 1) for r in stuck[:MAX_EVENTS]]
             role_note = f" (held signal, hold period {hold}; threshold {stuck_thr})" if hold and hold > 1 else ""
-            out.append(self._make("stuck", "consistency", [alias], "fail", sev, f"{alias} is frozen at {fmt_num(longest[2])} for {longest[1]} samples in batch {self.batch_id} (rows {longest[0]}-{longest[0] + longest[1] - 1}){role_note}: looks like a dead or stale sensor, not a process change", {"longest_run": longest[1], "value": longest[2], "threshold": stuck_thr, "stuck_fraction": round(frac, 4), "n_runs": len(stuck), "events": ev}, row_start=ev[0][0], row_end=ev[-1][1]))
+            at_zero = abs(float(longest[2])) <= tol
+            why = "a closed valve or zero flow held exactly at 0, or a dead sensor" if at_zero else "looks like a dead or stale sensor, not a process change"
+            out.append(self._make("stuck", "consistency", [alias], status, sev, f"{alias} is frozen at {fmt_num(longest[2])} for {longest[1]} samples in batch {self.batch_id} (rows {longest[0]}-{longest[0] + longest[1] - 1}){role_note}: {why}; the signal is treated as unreliable in those rows ({frac:.2%} of the batch)", {"longest_run": longest[1], "value": longest[2], "threshold": stuck_thr, "stuck_fraction": round(frac, 4), "fraction": round(frac, 6), "n_runs": len(stuck), "at_zero": at_zero, "events": ev}, row_start=ev[0][0], row_end=ev[-1][1]))
         elif hold and hold > 1:
             stale = [r for r in plain if r[1] > 2 * hold]
             if stale:

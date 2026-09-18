@@ -67,20 +67,26 @@ def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any
         # per-group detection / false alarms / delay
         det, fa, delays = [], [], []
         classes_by_group: dict[str, str] = {}
-        for code in np.unique(g):
-            m = g == code
-            group = store.groups[int(code)]
-            has_abn = bool(y[m].any())
-            is_flagged = group in flagged_groups or bool(flagged[m].any())
+        # one stable sort by group keeps row order inside each group; slices replace 15M-row masks per group
+        r_all = rows_sorted[ok]
+        og = np.argsort(g, kind="stable")
+        gs, ys, ss, rs = g[og], y[og], s[og], r_all[og]
+        cut = np.flatnonzero(gs[1:] != gs[:-1]) + 1
+        starts = np.concatenate([[0], cut]) if len(gs) else np.zeros(0, dtype=int)
+        ends = np.concatenate([cut, [len(gs)]]) if len(gs) else np.zeros(0, dtype=int)
+        for a, b in zip(starts, ends):
+            group = store.groups[int(gs[a])]
+            ym, sm, r = ys[a:b], ss[a:b], rs[a:b]
+            has_abn = bool(ym.any())
+            fm = sm >= 1.0
+            is_flagged = group in flagged_groups or bool(fm.any())
             if has_abn:
                 det.append(is_flagged)
-                onset_i = int(np.argmax(y[m] == 1))
-                r = rows_sorted[ok][m]
+                onset_i = int(np.argmax(ym == 1))
                 onset_row = int(r[onset_i])
-                sm = s[m]
-                hit = np.flatnonzero((sm >= 1.0) & (np.arange(len(sm)) >= onset_i))
+                hit = np.flatnonzero(fm[onset_i:])
                 if len(hit):
-                    delays.append(int(r[hit[0]] - onset_row))
+                    delays.append(int(r[onset_i + hit[0]] - onset_row))
             else:
                 fa.append(is_flagged)
         res["group_level"] = {"n_groups_abnormal": len(det), "detection_rate": round(float(np.mean(det)), 4) if det else None, "n_groups_normal": len(fa), "false_alarm_rate": round(float(np.mean(fa)), 4) if fa else None, "median_detection_delay_rows": (None if not delays else float(np.median(delays))), "delay_note": "delay is measured from the first labelled-abnormal row of the group; when labels are group-level (abnormal from row 0) it reflects time-to-first-flag, not true onset delay"}

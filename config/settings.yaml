@@ -108,7 +108,7 @@ detect:
   n_folds: 5
   max_fit_rows: 300000
   window: 20
-  time_budget_s: 600
+  time_budget_s: 480                # detect stage: 8 minutes of the 20-minute overall budget
   detectors: [pca, robust_z, ewma, cusum, corr_break, iforest, autoencoder]
   use_autoencoder: true
   autoencoder_max_rows: 60000

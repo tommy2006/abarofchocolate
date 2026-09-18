@@ -61,7 +61,7 @@ def compute_dq_scores(checks: Iterable[CheckResult], verdicts: Iterable[TrustVer
         for c in kept:
             by_batch.setdefault(c.batch_id, []).append(c)
         for v in verdicts:
-            t = compute_trust(settings, v.batch_id, by_batch.get(v.batch_id, []), n_signals=n_sig)
+            t = compute_trust(settings, v.batch_id, by_batch.get(v.batch_id, []), n_signals=n_sig, n_rows=getattr(v, "n_rows", None))
             trust_scores.append(t["trust_score"])
             n_untrusted += 0 if t["trusted"] else 1
     else:

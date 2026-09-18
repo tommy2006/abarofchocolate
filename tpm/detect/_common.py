@@ -315,16 +315,17 @@ def fetch_blocks(ws, columns: list[str], group_col: str, blocks: list[tuple[int,
     con = ws.duckdb()
     if not blocks:
         return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=object), np.zeros((0, len(columns)), dtype=np.float32)
-    starts = pa.array([int(b[0]) for b in blocks], type=pa.int64())
-    ends = pa.array([int(b[1]) for b in blocks], type=pa.int64())
-    blk = pa.table({"s": starts, "e": ends})
-    con.register("__blk", blk)
+    # explicit row ids + hash semi-join: one scan of the parquet regardless of the number of blocks
+    # (a range join over tens of thousands of blocks took minutes on a 15M-row file)
+    ids = np.concatenate([np.arange(int(b[0]), int(b[1]), dtype=np.int64) for b in blocks if int(b[1]) > int(b[0])]) if blocks else np.zeros(0, dtype=np.int64)
+    ids = np.unique(ids)
+    con.register("__rows", pa.table({"__row__": pa.array(ids, type=pa.int64())}))
     try:
-        q = f"SELECT {_select_clause(columns, group_col)} FROM dataset d JOIN __blk b ON d.__row__ >= b.s AND d.__row__ < b.e ORDER BY d.__row__"
+        q = f"SELECT {_select_clause(columns, group_col)} FROM dataset d WHERE d.__row__ IN (SELECT __row__ FROM __rows) ORDER BY d.__row__"
         tbl = _arrow(con.execute(q))
     finally:
         try:
-            con.unregister("__blk")
+            con.unregister("__rows")
         except Exception:
             pass
     return _table_to_arrays(tbl, columns)
