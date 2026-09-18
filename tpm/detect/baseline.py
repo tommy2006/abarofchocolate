@@ -290,6 +290,44 @@ def cand_pre_changepoint(z: np.ndarray, groups: np.ndarray, window: int, budget:
     return mask, {"n_groups": n_groups, "n_groups_with_change": len(onsets), "groups_skipped_for_budget": skipped, "change_positions_sample": {k: v for k, v in list(onsets.items())[:50]}}
 
 
+def cand_early_segment(z: np.ndarray, groups: np.ndarray, window: int, budget: Budget, rstd_z: Optional[np.ndarray] = None, spe_z: Optional[np.ndarray] = None, max_points: int = 200) -> tuple[np.ndarray, dict[str, Any]]:
+    """Temporal prior: the earliest sampled rows of each group are the most likely normal reference (runs and
+    batches usually start in normal operation). Per group: its first contiguous sampled segment, cut at the
+    first significant change in ANY channel -- levels included, because a fault that settles into a new steady
+    state is still a fault (pre_changepoint deliberately ignores level channels). Whether this prior holds is
+    decided by the same cross-group scoring as every other candidate."""
+    n, p = z.shape
+    mask = np.zeros(n, dtype=bool)
+    if rstd_z is None:
+        rstd_z = rolling_std_z(z, groups, window)
+    chan_all = np.hstack([z, rstd_z] + ([spe_z[:, None]] if spe_z is not None else []))
+    gi: dict[str, list[tuple[int, int]]] = {}
+    for s, e in segments(groups):
+        gi.setdefault(str(groups[s]), []).append((s, e))
+    n_cut = 0
+    t_end = time.time() + max(2.0, budget.remaining() * 0.25)
+    skipped = 0
+    for g, segs in gi.items():
+        s, e = segs[0]
+        m = e - s
+        if len(segs) == 1:  # whole group (or one block) sampled: its earliest 40 % is the candidate
+            e = s + max(min(m, 2 * window), int(0.4 * m))
+        idx = np.arange(s, e)
+        if time.time() < t_end and len(idx) >= 8:
+            k = min(max_points, len(idx))
+            bounds = np.linspace(0, len(idx), k + 1).astype(int)
+            Fm = np.stack([chan_all[idx[a:b]].mean(axis=0) for a, b in zip(bounds[:-1], bounds[1:]) if b > a])
+            if len(Fm) >= 8:
+                bp, _eff = _first_significant_change(Fm, min_size=max(3, int(0.08 * len(Fm))), effect_min=1.5)
+                if bp is not None and int(bounds[bp]) >= max(5, window // 2):
+                    idx = idx[: int(bounds[bp])]
+                    n_cut += 1
+        elif time.time() >= t_end:
+            skipped += 1
+        mask[idx] = True
+    return mask, {"n_groups": len(gi), "n_groups_cut_at_change": n_cut, "groups_skipped_for_budget": skipped, "assumption": "the earliest sampled rows of each group are the most likely normal reference"}
+
+
 def cand_densest_windows(z: np.ndarray, groups: np.ndarray, window: int, seed: int = 0, spe_z: Optional[np.ndarray] = None) -> tuple[np.ndarray, dict[str, Any]]:
     """Window fingerprints = [std of z per signal, mean PCA residual]; the tightest sizeable cluster is the
     normal regime (levels are left out on purpose, see cand_pre_changepoint)."""
@@ -578,6 +616,9 @@ def estimate_baseline(ws, settings, sample: Sample, roles: dict[str, str], budge
     t0 = time.time()
     m, info = cand_pre_changepoint(z, sample.groups, window, budget, rstd_z=rstd_z, spe_z=spe_z)
     cands["pre_changepoint"] = (m, info | {"seconds": round(time.time() - t0, 2)})
+    t0 = time.time()
+    m, info = cand_early_segment(z, sample.groups, window, budget, rstd_z=rstd_z, spe_z=spe_z)
+    cands["early_segment"] = (m, info | {"seconds": round(time.time() - t0, 2)})
     if not budget.exhausted(margin=budget.seconds * 0.5):
         t0 = time.time()
         try:
@@ -622,6 +663,8 @@ def estimate_baseline(ws, settings, sample: Sample, roles: dict[str, str], budge
         confidence = min(confidence, 0.3)
     else:
         notes = []
+    if strategy.startswith("early_segment"):
+        assumptions.append("Assumes each group (run/batch) starts in normal operation; the earliest sampled rows, cut at the first significant change, form the reference. Supported by cross-group separation and generalization scores, not by labels.")
     ranges = mask_to_ranges(mask, sample.rows, sample.groups)
     status = "inferred" if confidence >= 0.5 else "assumed"
     n_g = sum(1 for v in ranges.values() if v)

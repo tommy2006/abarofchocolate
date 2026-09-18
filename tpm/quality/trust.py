@@ -86,7 +86,7 @@ def _effective_severity(c: CheckResult, batch_rows: Optional[int]) -> float:
 
 
 LOCAL_MIN_SEVERITY = 0.35  # below this effective severity a failing signal check is row-scoped, not batch-wide
-BATCH_MIN_EXPOSURE = 0.05  # a failing check touching >= this share of the batch rows is batch-wide regardless
+BATCH_MIN_EXPOSURE = 0.25  # a failing check touching >= this share of the batch rows is batch-wide regardless (smaller shares stay row-scoped)
 MAX_LOCAL_ENTRIES = 400
 
 
@@ -209,6 +209,8 @@ def trust_verdict(ws: Any, settings: Any, batch_id: str, checks: Iterable[CheckR
             statement = f"Data in batch {batch_id} cannot be trusted: {n_aff} of {n_signals} signals are unreliable, e.g. {listed}{more}."
     elif batch_reasons:
         statement = (f"Data in batch {batch_id} has structural problems: " if trusted else f"Data in batch {batch_id} cannot be trusted: ") + batch_reasons[0]
+    elif local:
+        statement = f"Data in batch {batch_id} is usable overall."
     else:
         statement = f"Data in batch {batch_id} passed all baseline checks."
     if untrusted and batch_reasons:

@@ -97,7 +97,7 @@ class DetectConfig(BaseModel):
     n_folds: int = 5
     max_fit_rows: int = 300_000
     window: int = 20
-    time_budget_s: int = 480
+    time_budget_s: int = 450
     detectors: list[str] = Field(default_factory=lambda: ["pca", "robust_z", "ewma", "cusum", "corr_break", "iforest", "autoencoder"])
     use_autoencoder: bool = True
     autoencoder_max_rows: int = 60_000
@@ -110,7 +110,7 @@ class DetectConfig(BaseModel):
 class AssessorConfig(BaseModel):
     learning_curve_fractions: list[float] = Field(default_factory=lambda: [0.1, 0.2, 0.4, 0.7, 1.0])
     holdback_fraction: float = 0.2
-    experiment_time_budget_s: int = 120
+    experiment_time_budget_s: int = 90
 
 
 class SmtpConfig(BaseModel):

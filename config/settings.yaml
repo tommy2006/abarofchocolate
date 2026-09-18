@@ -108,7 +108,7 @@ detect:
   n_folds: 5
   max_fit_rows: 300000
   window: 20
-  time_budget_s: 480                # detect stage: 8 minutes of the 20-minute overall budget
+  time_budget_s: 450                # detect stage: 7.5 minutes of the 20-minute overall budget
   detectors: [pca, robust_z, ewma, cusum, corr_break, iforest, autoencoder]
   use_autoencoder: true
   autoencoder_max_rows: 60000
@@ -120,7 +120,7 @@ detect:
 assessor:
   learning_curve_fractions: [0.1, 0.2, 0.4, 0.7, 1.0]
   holdback_fraction: 0.2
-  experiment_time_budget_s: 120
+  experiment_time_budget_s: 90
 
 report:
   default_language: en

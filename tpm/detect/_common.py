@@ -372,6 +372,19 @@ def plan_blocks(groups: list[dict[str, Any]], max_rows: int, block_len: int, lea
             continue
         n_blocks = max(1, int(math.ceil(quota / block_len)))
         blen = min(block_len, quota)
+        if n_blocks == 1 and span >= 2 * (blen // 2 + lead) + 10:
+            # two half-length blocks: one at the START of the group (temporal prior: runs usually begin in
+            # normal operation, which the baseline estimator verifies across groups) and one at a spread
+            # offset in the remainder (coverage of later phases for calibration and detection)
+            half = max(30, blen // 2)
+            first = (g["row_min"], min(g["row_max"] + 1, g["row_min"] + half + lead))
+            lo = first[1]
+            free = max(0, (g["row_max"] + 1) - lo - half - lead)
+            frac = (i * 0.6180339887498949) % 1.0
+            st = lo + int(frac * free)
+            out.append((first[0], first[1], g["group"]))
+            out.append((st, min(g["row_max"] + 1, st + half + lead), g["group"]))
+            continue
         free = max(0, span - blen - lead)
         if n_blocks == 1:
             frac = (i * 0.6180339887498949) % 1.0

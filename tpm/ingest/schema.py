@@ -763,6 +763,22 @@ def infer_schema(ws, settings, ctx: dict[str, Any], conv: dict[str, Any], fmt: d
                 (meta_cols if hint == "meta" else label_cols).append(c)
                 reasons[c] = f"integer-coded, {t['n_unique']} values, constant within {within_const:.0%} of groups, varies across groups -> label-like"
                 continue
+        if k in ("integer", "numeric") and within_const is None and n_groups > 1:
+            # any numeric column that is constant inside (almost) every group but differs between groups is a
+            # per-group identifier or label, whatever its cardinality: a measurement never behaves like that
+            try:
+                df_ = pd.DataFrame({"g": group_of_sample, "v": sample[c].to_numpy()})
+                cnt = df_.groupby("g")["v"].count()
+                nun = df_.groupby("g")["v"].nunique(dropna=True)[cnt >= 3]
+                if len(nun) >= 20:
+                    wc = float((nun <= 1).mean())
+                    av = int(df_.groupby("g")["v"].first().nunique()) > 1
+                    if wc >= 0.98 and av:
+                        (label_cols if t.get("n_unique", 10**9) <= max(50, 0.05 * n_groups) and hint != "meta" else meta_cols).append(c)
+                        reasons[c] = f"numeric but constant within {wc:.0%} of groups and varying across groups -> per-group identifier/label, not a measurement"
+                        continue
+            except Exception:
+                pass
         signal_cols.append(c)
         reasons[c] = "numeric measurement"
     e = ev.add("label_detection", f"{len(label_cols)} label-like, {len(meta_cols)} metadata, {len(signal_cols)} signal columns (structure-based; header names used only as tie-breakers)", values={"label_columns": label_cols, "meta_columns": meta_cols, "reasons": reasons}, computed_by="ingest.schema.label_detection", n_samples=len(sample))
