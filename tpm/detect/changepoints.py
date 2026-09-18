@@ -174,7 +174,7 @@ def signal_onsets(z: np.ndarray, rstd_z: np.ndarray, resid: Optional[np.ndarray]
         dev_dn = z[:, j] < -z_thr
         noisy = rstd_z[:, j] > 3.0
         stuck = rstd_z[:, j] < -2.5
-        shifted = np.abs(resid[:, j]) > 3.0 if resid is not None else np.zeros(n, dtype=bool)
+        shifted = np.abs(resid[:, j]) > 3.0 if resid is not None and resid.shape[0] == z.shape[0] else np.zeros(z.shape[0], dtype=bool)
         any_dev = dev_up | dev_dn | noisy | stuck | shifted
         # sustained: min_run consecutive rows, searching from `start`
         run = 0

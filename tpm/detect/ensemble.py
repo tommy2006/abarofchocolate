@@ -332,6 +332,7 @@ def calibrate_ensemble_threshold(fm: FoldModel, selected: list[str]) -> float:
 
 
 SPEED_DROPPED: dict[str, str] = {}
+ESSENTIAL_DETECTORS = ("robust_z", "ewma", "pca", "corr_break")
 
 
 def _prefilter_by_speed(fm: FoldModel, sample: Sample, sample_keys: np.ndarray, budget: Budget, n_rows_total: int) -> tuple[list[str], dict[str, str]]:
@@ -350,7 +351,16 @@ def _prefilter_by_speed(fm: FoldModel, sample: Sample, sample_keys: np.ndarray, 
     keep: list[str] = []
     used = 0.0
     dropped: dict[str, str] = {}
+    # essentials are always fitted: cheap specialists plus corr_break, the detector that tells a sensor that
+    # disagrees with its peers from a process deviation (rich attribution needs it even if the scoring pass
+    # later leaves it out for speed)
+    for n in ESSENTIAL_DETECTORS:
+        if n in names:
+            keep.append(n)
+            used += projected[n]
     for n in sorted(names, key=lambda k: projected[k]):
+        if n in keep:
+            continue
         if used + projected[n] <= allowed or len(keep) < 2:
             keep.append(n)
             used += projected[n]

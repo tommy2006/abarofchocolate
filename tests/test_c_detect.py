@@ -254,3 +254,19 @@ def test_missing_optional_artifacts(tmp_path):
     assert summary["n_flags"] >= 0
     meta = ws.read_json("detect_meta")
     assert any("relations" in n for n in meta["notes"])
+
+
+def test_signal_onsets_without_residuals_and_with_stop():
+    """Regression: when corr_break residuals are absent the placeholder mask must span all rows even if
+    `stop` truncates the search window (crashed with a broadcast error on the 6 GB run)."""
+    import numpy as np
+    from tpm.detect.changepoints import signal_onsets
+
+    n, p = 700, 4
+    z = np.zeros((n, p), dtype=np.float32)
+    z[300:, 1] = 5.0  # signal 1 deviates from row 300
+    rstd = np.zeros((n, p), dtype=np.float32)
+    out = signal_onsets(z, rstd, None, start=250, stop=400)
+    assert out and out[0][0] == 1 and 295 <= out[0][1] <= 302
+    out2 = signal_onsets(z, rstd, np.zeros((100, p), dtype=np.float32), start=250, stop=400)  # wrong-length resid is ignored
+    assert out2 and out2[0][0] == 1
