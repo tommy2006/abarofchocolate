@@ -202,6 +202,22 @@ def make_folds(sample: Sample, groups_meta: list[dict[str, Any]], settings, seed
 # ------------------------------------------------------------------------------------------------
 
 
+def _dilate_within_blocks(mask: np.ndarray, groups: np.ndarray, k: int) -> np.ndarray:
+    """mask OR rows within k positions of a True row, without crossing block (group-run) boundaries."""
+    out = mask.copy()
+    for s, e in segments(groups):
+        m = mask[s:e]
+        if not m.any() or m.all():
+            continue
+        idx = np.flatnonzero(m)
+        n = e - s
+        c = np.zeros(n + 1, dtype=np.int32)
+        np.add.at(c, np.maximum(idx - k, 0), 1)
+        np.add.at(c, np.minimum(idx + k + 1, n), -1)
+        out[s:e] = np.cumsum(c[:-1]) > 0
+    return out
+
+
 def _fit_fold(fold: int, train_keys: list[str], val_keys: list[str], heldout_keys: list[str], sample: Sample, sample_keys: np.ndarray, baseline: BaselineResult, inputs: DetectInputs, settings, detector_names: list[str], budget: Budget, seed: int = 0) -> FoldModel:
     t0 = time.time()
     window = int(settings.detect.window)
@@ -281,7 +297,16 @@ def _fit_fold(fold: int, train_keys: list[str], val_keys: list[str], heldout_key
     if len(val_rows) == 0:
         val_rows = np.flatnonzero(in_train)
         notes.append("no validation groups; thresholds calibrated on training rows (optimistic)")
-    vmask = baseline.mask[val_rows]
+    vmask = baseline.mask[val_rows].copy()
+    # Extend the calibration set to the temporal neighbourhood (+-window rows, same block) of baseline rows: a
+    # baseline picked near per-signal modes is a low-variance core, and thresholds calibrated on it alone flag
+    # the normal regime's own wandering (false alarms). Dilation stays local, so the bulk of a fault inside a
+    # partly-normal group is not pulled into the calibration set.
+    n_before = int(vmask.sum())
+    vmask = _dilate_within_blocks(vmask, sample.groups[val_rows], window)
+    n_ext = int(vmask.sum()) - n_before
+    if n_ext:
+        notes.append(f"calibration set extended by {n_ext} neighbouring rows (+-{window}) of baseline rows (natural variability)")
     if vmask.sum() < 30:
         vmask = np.ones(len(val_rows), dtype=bool)
     raw = score_rows(dets, val_rows)
@@ -306,7 +331,37 @@ def calibrate_ensemble_threshold(fm: FoldModel, selected: list[str]) -> float:
     return max(robust_threshold(m, margin=1.0, q=0.99), 0.05)
 
 
-def fit_fold_models(sample: Sample, fold_map: FoldMap, baseline: BaselineResult, inputs: DetectInputs, settings, budget: Budget, detector_names: list[str], seed: int = 0, progress=None) -> tuple[list[FoldModel], np.ndarray]:
+SPEED_DROPPED: dict[str, str] = {}
+
+
+def _prefilter_by_speed(fm: FoldModel, sample: Sample, sample_keys: np.ndarray, budget: Budget, n_rows_total: int) -> tuple[list[str], dict[str, str]]:
+    """Measure seconds/row of every detector on fold 0's held-out sample rows and keep the set whose projected
+    full-dataset scoring time fits ~45 % of the stage budget (cheapest first; at least two detectors)."""
+    idx = np.flatnonzero(np.isin(sample_keys, fm.heldout_keys))
+    names = list(fm.detectors)
+    if len(idx) < 200 or len(names) <= 2:
+        return names, {}
+    F = fm.spec.transform(sample.X[idx], sample.groups[idx])
+    res = fm.score_features(F, sample.groups[idx], names=names, isolate_state=True)
+    fm.reset_states()
+    per_row = {n: res["timing"].get(n, 0.0) / max(1, len(idx)) for n in names}
+    projected = {n: per_row[n] * n_rows_total for n in names}
+    allowed = budget.seconds * 0.45
+    keep: list[str] = []
+    used = 0.0
+    dropped: dict[str, str] = {}
+    for n in sorted(names, key=lambda k: projected[k]):
+        if used + projected[n] <= allowed or len(keep) < 2:
+            keep.append(n)
+            used += projected[n]
+        else:
+            dropped[n] = f"too slow for the budget (projected {projected[n]:.0f}s of {allowed:.0f}s)"
+    return keep, dropped
+
+
+def fit_fold_models(sample: Sample, fold_map: FoldMap, baseline: BaselineResult, inputs: DetectInputs, settings, budget: Budget, detector_names: list[str], seed: int = 0, progress=None, n_rows_total: int = 0) -> tuple[list[FoldModel], np.ndarray]:
+    speed_dropped: dict[str, str] = {}
+    SPEED_DROPPED.clear()
     sample_keys = fold_map.keys(sample.groups, sample.rows).astype(str)
     key_sizes: dict[str, int] = {}
     for k in sample_keys:
@@ -314,14 +369,22 @@ def fit_fold_models(sample: Sample, fold_map: FoldMap, baseline: BaselineResult,
     all_keys = list(fold_map.fold_of_key)
     n_folds = max(fold_map.fold_of_key.values()) + 1 if all_keys else 1
     models: list[FoldModel] = []
+    names_for_fold = list(detector_names)
     for f in range(n_folds):
         heldout = [k for k in all_keys if fold_map.fold_of_key[k] == f]
         rest = [k for k in all_keys if fold_map.fold_of_key[k] != f]
         if not rest:  # single fold: fit on everything, validation = training (noted)
             rest = heldout
         train, val = train_val_split(rest, val_fraction=0.25, sizes=key_sizes, seed=seed + f)
-        fm = _fit_fold(f, train, val, heldout, sample, sample_keys, baseline, inputs, settings, detector_names, budget, seed=seed)
+        fm = _fit_fold(f, train, val, heldout, sample, sample_keys, baseline, inputs, settings, names_for_fold, budget, seed=seed)
         models.append(fm)
+        if f == 0 and n_folds > 1 and n_rows_total:
+            # pilot on the first fold only: detectors whose projected full-scoring time does not fit the
+            # budget are dropped now, before they are fitted on every other fold
+            names_for_fold, dropped = _prefilter_by_speed(fm, sample, sample_keys, budget, n_rows_total)
+            if dropped:
+                fm.notes.append("dropped after fold-0 speed pilot: " + ", ".join(f"{k} ({v})" for k, v in dropped.items()))
+                speed_dropped.update(dropped)
         if progress:
             progress(0.25 + 0.2 * (f + 1) / n_folds, f"fitted fold {f + 1}/{n_folds}")
         if budget.fraction_used() > 0.5 and f + 1 < n_folds:
@@ -334,6 +397,7 @@ def fit_fold_models(sample: Sample, fold_map: FoldMap, baseline: BaselineResult,
                 clone.notes = fm.notes + [f"fold {g} reuses fold {f}'s model (time budget); held-out groups that were in its training set are scored in-sample"]
                 models.append(clone)
             break
+    SPEED_DROPPED.update(speed_dropped)
     return models, sample_keys
 
 
@@ -414,6 +478,7 @@ def pilot_and_select(models: list[FoldModel], sample: Sample, sample_keys: np.nd
     if len(selected) < min(3, len(ranked)):
         selected = ranked[: min(3, len(ranked))]
     dropped: dict[str, str] = {n: "low reliability" for n in names if n not in selected}
+    dropped.update({n: v for n, v in SPEED_DROPPED.items() if n not in names})
     # speed vs budget: the scoring pass may use ~55 % of what is left (features + I/O take the rest)
     allowed = budget.remaining() * 0.55
     while len(selected) > 2 and sum(projected[n] for n in selected) > allowed:

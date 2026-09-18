@@ -189,7 +189,7 @@ def build_flags(ws, inputs, settings, store: ScoreStore, models: list[FoldModel]
     scan_s = time.time() - t_scan
 
     # ---- pass 2: strongest groups first
-    t_end_rich = time.time() + max(5.0, budget.remaining() * 0.6)
+    t_end_rich = time.time() + max(45.0, budget.remaining() * 0.6)  # rich attribution is the most valuable output: always at least 45 s
     rich_done = 0
     summary_done = 0
     skipped_cap = 0

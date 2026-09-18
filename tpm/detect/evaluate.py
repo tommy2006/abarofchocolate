@@ -24,13 +24,19 @@ def _auroc(scores: np.ndarray, positive: np.ndarray) -> Optional[float]:
     return float((r[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
+def _score_table(store):
+    import pyarrow as pa
+
+    return pa.table({"__row__": pa.array(store.rows.astype(np.int64)), "ens": pa.array(store.ens.astype(np.float32))})
+
+
 def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any]]:
     labels = list(inputs.label_columns or [])
     if not labels:
         return None
     con = ws.duckdb()
     window = int(settings.detect.window)
-    out: dict[str, Any] = {"note": "evaluation only; labels never used for detection", "assumption": "the most frequent label value is treated as 'normal'", "columns": {}}
+    out: dict[str, Any] = {"note": "evaluation only; labels never used for detection", "assumption": "the label value with the lowest mean anomaly score is treated as 'normal' (see normal_choice)", "columns": {}}
     order = np.argsort(store.rows, kind="stable")
     rows_sorted = store.rows[order]
     ens_sorted = store.ens[order]
@@ -46,8 +52,21 @@ def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any
         if not top or len(top) < 2:
             out["columns"][col] = {"note": "single-valued label column; nothing to evaluate"}
             continue
-        normal = top[0][0]
         n_distinct = len(top)
+        # "normal" = the label value whose rows have the LOWEST mean out-of-fold score (evaluation-only heuristic;
+        # the most frequent value is wrong for balanced class sets, and names like normal/0/ok cannot be relied on).
+        # Ties/near-ties fall back to the most frequent value. Assumption is stated in the output.
+        normal = top[0][0]
+        try:
+            con.register("__sc", _score_table(store))
+            means = con.execute(f"SELECT CAST(d.{qident(col)} AS VARCHAR) AS v, AVG(s.ens) AS m, COUNT(*) AS n FROM dataset d JOIN __sc s ON d.__row__ = s.__row__ GROUP BY v HAVING COUNT(*) >= 100 ORDER BY m ASC").fetchall()
+            con.unregister("__sc")
+            if means:
+                normal = means[0][0]
+                out["columns"].setdefault(col, {})
+                out.setdefault("normal_choice", {})[col] = {"rule": "lowest mean score", "mean_score": round(float(means[0][1]), 4), "n_rows": int(means[0][2]), "alternatives": [(v, round(float(m), 4)) for v, m, _ in means[1:4]]}
+        except Exception as e:  # keep the frequency heuristic
+            out.setdefault("normal_choice", {})[col] = {"rule": "most frequent (score lookup failed)", "error": str(e)[:160]}
         tbl = _arrow(con.execute(f"SELECT __row__, CASE WHEN CAST({qident(col)} AS VARCHAR) IS DISTINCT FROM {_lit(normal)} THEN 1 ELSE 0 END AS abn FROM dataset ORDER BY __row__"))
         lab_rows = tbl.column("__row__").to_numpy().astype(np.int64)
         abn = tbl.column("abn").to_numpy().astype(np.int8)

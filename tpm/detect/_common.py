@@ -346,30 +346,42 @@ def row_bounds(ws) -> tuple[int, int]:
 
 def plan_blocks(groups: list[dict[str, Any]], max_rows: int, block_len: int, lead: int) -> list[tuple[int, int, str]]:
     """Contiguous row blocks per group, evenly spread, totalling <= max_rows (+ lead-in rows that are dropped
-    after feature computation). Returns [(row_start, row_end, group)]."""
+    after feature computation). Returns [(row_start, row_end, group)].
+
+    When there are more groups than useful blocks (e.g. tens of thousands of short runs), a spread subset of
+    groups gets one full-length block each instead of every group getting a few rows. Single blocks are placed
+    at golden-ratio offsets across the group span so that, across groups, the sample covers every phase of a
+    run rather than only its first rows (start-up transients are often identical across runs)."""
     total = sum(g["n"] for g in groups)
     if total <= max_rows:
         return [(g["row_min"], g["row_max"] + 1, g["group"]) for g in groups]
     out: list[tuple[int, int, str]] = []
-    # quota proportional to group size but at least one block per group (bounded by group size)
     n_groups = len(groups)
-    min_quota = min(block_len, max_rows // max(1, n_groups))
-    for g in groups:
-        quota = max(min_quota, int(max_rows * g["n"] / total))
+    max_groups = max(1, int(max_rows // max(1, block_len // 2)))
+    chosen = groups
+    if n_groups > max_groups:
+        step = n_groups / max_groups
+        chosen = [groups[int(i * step)] for i in range(max_groups)]
+    total_c = sum(g["n"] for g in chosen)
+    min_quota = min(block_len, max_rows // max(1, len(chosen)))
+    for i, g in enumerate(chosen):
+        quota = max(min_quota, int(max_rows * g["n"] / max(1, total_c)))
         span = g["row_max"] + 1 - g["row_min"]
         if span <= quota + lead:
             out.append((g["row_min"], g["row_max"] + 1, g["group"]))
             continue
         n_blocks = max(1, int(math.ceil(quota / block_len)))
         blen = min(block_len, quota)
+        free = max(0, span - blen - lead)
         if n_blocks == 1:
-            starts = [g["row_min"]]
+            frac = (i * 0.6180339887498949) % 1.0
+            starts = [g["row_min"] + int(frac * free)]
         else:
-            step = (span - blen - lead) / (n_blocks - 1)
-            starts = [g["row_min"] + int(round(i * step)) for i in range(n_blocks)]
-        for s in starts:
-            e = min(g["row_max"] + 1, s + blen + lead)
-            out.append((s, e, g["group"]))
+            step = free / (n_blocks - 1)
+            starts = [g["row_min"] + int(round(k * step)) for k in range(n_blocks)]
+        for st in starts:
+            e = min(g["row_max"] + 1, st + blen + lead)
+            out.append((st, e, g["group"]))
     out.sort()
     return out
 

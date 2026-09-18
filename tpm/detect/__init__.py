@@ -93,14 +93,14 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
     lap("folds", t0)
     detector_names = [d for d in settings.detect.detectors]
     t0 = time.time()
-    models, sample_keys = fit_fold_models(sample, fold_map, baseline, inputs, settings, budget, detector_names, seed=seed, progress=progress)
+    models, sample_keys = fit_fold_models(sample, fold_map, baseline, inputs, settings, budget, detector_names, seed=seed, progress=progress, n_rows_total=int(inputs.n_rows))
     lap("fit_folds", t0)
     t0 = time.time()
     selection = pilot_and_select(models, sample, sample_keys, settings, budget, inputs.n_rows)
     lap("pilot_select", t0)
     progress(0.45, f"detectors selected: {', '.join(selection['selected'])}")
     t0 = time.time()
-    final = fit_final_model(sample, baseline, inputs, settings, models, detector_names, budget, seed=seed)
+    final = fit_final_model(sample, baseline, inputs, settings, models, [n for n in detector_names if n in selection["selected"]] or detector_names, budget, seed=seed)
     final.selected = [n for n in selection["selected"] if n in final.detectors]
     final.ens_threshold = float(np.median([m.ens_threshold for m in models])) if models else 1.0
     final.reset_states()
