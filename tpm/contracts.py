@@ -219,6 +219,9 @@ class Flag(BaseModel):
     signals_ranked: list[SignalContribution] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     likely_cause_class: str = "unknown"  # CauseClass
+    # what exactly the cause rule saw: {"kind": "actuator_saturation" | "common_freeze" | "duplicate_rows" |
+    # "single_sensor" | ..., ...} and {"spread": {...}} when no single signal dominates the deviation
+    cause_detail: Optional[dict[str, Any]] = None
     confidence: float = 0.5
     pattern_id: Optional[str] = None
     trust_context: Optional[dict[str, Any]] = None  # trust verdict summary of the batch
@@ -263,6 +266,7 @@ class Diagnosis(BaseModel):
     pattern_id: Optional[str] = None
     fault_type: str  # pattern name or "PATTERN-A (unnamed)" or "sensor fault" ...
     cause_class: str = "unknown"  # CauseClass
+    cause_detail: Optional[dict[str, Any]] = None  # copied from the main flag (see Flag.cause_detail)
     ranked_signals: list[SignalContribution] = Field(default_factory=list)
     propagation: list[PropagationStep] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)  # step-by-step explanation for a non-expert

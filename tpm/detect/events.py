@@ -1,6 +1,8 @@
 """Turn score sequences into Flag objects.
 
-anomaly     contiguous rows with ensemble >= 1 lasting >= min_event_len rows (adjacent segments merged)
+anomaly     rows where the score stays high: the median score of one analysis window is above the sustained
+            threshold (calibrated on the held-out baseline stretches, see calibrate_sustained_threshold);
+            adjacent stretches merged, at least min_event_len rows. Single readings above threshold are points.
 drift       such a segment whose onset is gradual and sustained (>= 3 windows)
 changepoint one per group with a detected onset (from changepoints.py)
 cascade     produced by cascade.py
@@ -18,7 +20,7 @@ from ..contracts import Flag, SignalContribution
 from ._common import Budget, batch_ids_for_rows, fetch_blocks, fetch_group_range, runs_of_true
 from .attribution import attribute_event
 from .changepoints import analyse_group_onset
-from .ensemble import FoldMap, FoldModel, ScoreStore, rescore_window
+from .ensemble import FoldMap, FoldModel, ScoreStore, rescore_window, robust_threshold
 
 MAX_EVENTS_PER_GROUP = 8
 MAX_FLAGS_TOTAL = 4000        # readable cap; every group is still summarised in group_scores.json
@@ -29,6 +31,51 @@ POINT_MIN_PEAK = 1.5          # ...clearly above threshold (isolated marginal ex
 Z_POINT = 4.0                 # level deviation (in normal spreads) that counts as 'this reading is off'
 MAX_POINT_FLAGS = 500
 MAX_POINT_FETCH_ROWS = 120_000
+SUSTAIN_FLOOR, SUSTAIN_CEIL = 0.5, 1.0   # the calibrated sustained threshold stays inside these bounds
+
+
+def sustained_mask(ens: np.ndarray, persist: int, thr: float) -> np.ndarray:
+    """True where the MEDIAN score of the `persist` rows around a row is >= thr. A median cannot be lifted by one or
+    two high readings (those are point findings), only by a lasting rise - moderate or strong."""
+    n = len(ens)
+    if persist <= 1:
+        return ens >= thr
+    if n < persist:
+        return np.zeros(n, dtype=bool)
+    from scipy.ndimage import median_filter
+
+    return median_filter(np.asarray(ens, dtype=np.float64), size=int(persist), mode="nearest") >= thr
+
+
+def calibrate_sustained_threshold(ws, store: ScoreStore, window: int) -> dict[str, Any]:
+    """Label-free: the robust 99.5th percentile (x1.1, the rule used for every threshold here) of the window-median
+    out-of-fold score on the baseline stretches. Every group is scored by a model that never saw it, so these are
+    held-out normal rows."""
+    from scipy.ndimage import median_filter
+
+    ranges = (ws.read_json("baseline") or {}).get("ranges") or {}
+    gidx = store.group_indices()
+    vals: list[np.ndarray] = []
+    for g, rr in ranges.items():
+        idx = gidx.get(str(g))
+        if idx is None:
+            continue
+        rows = store.rows[idx]
+        order = np.argsort(rows, kind="stable")
+        rows, e = rows[order], store.ens[idx][order]
+        for s, t in rr:
+            a, b = int(np.searchsorted(rows, int(s))), int(np.searchsorted(rows, int(t), side="right"))
+            seg = np.asarray(e[a:b], dtype=np.float64)
+            if len(seg) >= window:
+                h = window // 2
+                vals.append(median_filter(seg, size=window, mode="nearest")[h: len(seg) - h] if len(seg) > 2 * h else median_filter(seg, size=window, mode="nearest"))
+    if not vals:
+        return {"persist_rows": int(window), "sustained_threshold": 1.0, "n_windows": 0, "method": "no baseline stretch is one window long: the row threshold (1.0) is used for the window average"}
+    v = np.concatenate(vals)
+    raw = float(robust_threshold(v, margin=1.1, q=0.995))
+    thr = float(np.clip(raw, SUSTAIN_FLOOR, SUSTAIN_CEIL))
+    return {"persist_rows": int(window), "sustained_threshold": round(thr, 4), "raw_threshold": round(raw, 4), "n_windows": int(len(v)), "median_window_score": round(float(np.median(v)), 4),
+            "method": f"an event needs the median score of {window} consecutive rows to reach {thr:.2f}: the robust 99.5th percentile (x1.1) of that median on the held-out baseline stretches, kept within [{SUSTAIN_FLOOR}, {SUSTAIN_CEIL}]; one or two high readings alone are point findings"}
 
 
 def next_flag_id(ws) -> str:
@@ -51,21 +98,24 @@ class FlagIds:
         return f"FLAG-{self._n:06d}"
 
 
-def find_segments(ens: np.ndarray, min_len: int, merge_gap: int, thr: float = 1.0, window: Optional[int] = None) -> list[tuple[int, int]]:
+def find_segments(ens: np.ndarray, min_len: int, merge_gap: int, thr: float = 1.0, window: Optional[int] = None, persist: Optional[int] = None, sustain_thr: Optional[float] = None) -> list[tuple[int, int]]:
     """Runs of ens >= thr; runs separated by <= merge_gap rows are merged; short runs dropped. A short
     segment (< 2 windows) must also be clearly above threshold (mean >= 1.25 or peak >= 2) -- isolated
-    marginal exceedances are the expected ~1 % baseline noise, not events."""
+    marginal exceedances are the expected ~1 % baseline noise, not events.
+    With `persist` (round 6) a run is also kept only when the median score of `persist` rows reaches `sustain_thr`
+    somewhere in it, and a lasting moderate rise (at least two windows) that never crosses the row threshold becomes a
+    segment of its own. Boundaries of kept runs are unchanged."""
     runs = runs_of_true(ens >= thr)
-    if not runs:
-        return []
-    merged: list[list[int]] = [list(runs[0])]
-    for s, e in runs[1:]:
-        if s - merged[-1][1] <= merge_gap:
+    smask = sustained_mask(ens, int(persist), float(sustain_thr if sustain_thr is not None else thr)) if persist and persist > 1 else None
+    merged: list[list[int]] = []
+    for s, e in runs:
+        if merged and s - merged[-1][1] <= merge_gap:
             merged[-1][1] = e
         else:
             merged.append([s, e])
-    out = []
+    out: list[tuple[int, int]] = []
     short = 2 * (window or merge_gap)
+    covered = np.zeros(len(ens), dtype=bool)
     for s, e in merged:
         if e - s < min_len:
             continue
@@ -73,7 +123,15 @@ def find_segments(ens: np.ndarray, min_len: int, merge_gap: int, thr: float = 1.
         hot = seg[seg >= thr]
         if e - s < short and not (hot.mean() >= 1.25 * thr or seg.max() >= 2.0 * thr):
             continue
+        if smask is not None and not smask[s:e].any():
+            continue  # no lasting rise anywhere in this run: a burst of isolated readings, not an event
         out.append((s, e))
+        covered[s:e] = True
+    if smask is not None:
+        for s, e in runs_of_true(smask):
+            if e - s >= max(min_len, short) and not covered[s:e].any():
+                out.append((s, e))  # a lasting moderate rise that never crossed the row threshold: long by definition
+        out.sort()
     return out
 
 
@@ -336,6 +394,11 @@ def build_flags(ws, inputs, settings, store: ScoreStore, models: list[FoldModel]
     n_groups = len(gidx)
     selected = list(models[0].selected) if models else []
 
+    # ---- the event rule: sustained score over one window, threshold calibrated on held-out baseline stretches
+    event_rule = calibrate_sustained_threshold(ws, store, window)
+    persist, sustain_thr = int(event_rule["persist_rows"]), float(event_rule["sustained_threshold"])
+    ws.log.record("system:detect", "event_rule", "dataset", "events", event_rule)
+
     # ---- pass 1: every group, numpy only
     t_scan = time.time()
     cand: list[tuple[float, str, np.ndarray, np.ndarray, np.ndarray, list[tuple[int, int]]]] = []
@@ -349,7 +412,7 @@ def build_flags(ws, inputs, settings, store: ScoreStore, models: list[FoldModel]
         rows = store.rows[idx]
         order = np.argsort(rows, kind="stable")
         rows, ens, top1 = rows[order], store.ens[idx][order], store.top1[idx][order]
-        segs = find_segments(ens, min_len, merge_gap, window=window)
+        segs = find_segments(ens, min_len, merge_gap, window=window, persist=persist, sustain_thr=sustain_thr)
         # point candidates: (a) raw stretches of <= POINT_MAX_LEN readings clearly above threshold that are not part
         # of a sustained segment, (b) short segments (a single spike keeps rolling features high for ~a window)
         covered = np.zeros(len(ens), dtype=bool)
@@ -476,7 +539,7 @@ def build_flags(ws, inputs, settings, store: ScoreStore, models: list[FoldModel]
             if onset is not None and onset.evidence_id and abs(onset.row - row_start) <= 3 * window:
                 ev_ids.append(onset.evidence_id)
             bids = (tctx or {}).get("batch_ids") or []
-            fl = Flag(id=ids.next(), kind=kind, batch_id=bids[0] if bids else None, group_id=group, row_start=row_start, row_end=row_end - 1, severity=severity_of(mean_norm, n_ev, window), score=round(mean_norm, 4), threshold=1.0, detector="ensemble:" + "+".join(fm.selected), statement=statement, signals_ranked=ranked, evidence_ids=ev_ids, likely_cause_class=att["cause"], confidence=round(conf, 3), trust_context=tctx)
+            fl = Flag(id=ids.next(), kind=kind, batch_id=bids[0] if bids else None, group_id=group, row_start=row_start, row_end=row_end - 1, severity=severity_of(mean_norm, n_ev, window), score=round(mean_norm, 4), threshold=1.0, detector="ensemble:" + "+".join(fm.selected), statement=statement, signals_ranked=ranked, evidence_ids=ev_ids, likely_cause_class=att["cause"], cause_detail=att.get("cause_detail"), confidence=round(conf, 3), trust_context=tctx)
             flags.append(fl)
             if onset is not None:
                 first = onset.first_signals[:5]
@@ -489,5 +552,5 @@ def build_flags(ws, inputs, settings, store: ScoreStore, models: list[FoldModel]
         gev = ws.evidence.add("group_scores", f"{len(cand)} of {n_groups} groups have at least one sustained stretch above the anomaly threshold; {rich_done} received full attribution, {summary_done} summary flags, {skipped_cap} are listed only in the per-group table.", values={"n_groups": n_groups, "n_groups_over_threshold": len(cand), "rich_groups": rich_done, "summary_groups": summary_done, "groups_only_in_table": skipped_cap, "flag_cap": MAX_FLAGS_TOTAL}, computed_by="detect.events.build_flags", n_samples=int(n_groups))
         ws.inferences.add("dataset", f"{len(cand)} of {n_groups} groups exceed the anomaly threshold; {rich_done} strongest groups received full attribution and onset analysis, {summary_done} received summary flags, {skipped_cap} are listed only in group_scores.json (flag cap {MAX_FLAGS_TOTAL}).", status="inferred", confidence=0.9, evidence_ids=[gev.id], reasoning="Per-group scores are complete (out-of-fold); the flag list is capped for readability and time budget. Rich analysis is prioritised by event strength.", source="code", stage="detect")
     meta_points = {"n_point_stretches": n_points, "n_sustained_stretches": n_sustained, "share_points": round(share_points, 4), "point_dominated": point_dominated, "n_point_flags": len([f for f in flags if f.kind == "point"])}
-    meta = {"points": meta_points, "n_groups": n_groups, "n_groups_over_threshold": len(cand), "n_groups_with_events": len({f.group_id for f in flags if f.kind in ('anomaly', 'drift')}), "rich_groups": rich_done, "summary_groups": summary_done, "groups_capped": capped_groups, "groups_skipped_for_cap": skipped_cap, "max_events_per_group": MAX_EVENTS_PER_GROUP, "max_rich_groups": MAX_RICH_GROUPS, "scan_seconds": round(scan_s, 2)}
+    meta = {"event_rule": event_rule, "points": meta_points, "n_groups": n_groups, "n_groups_over_threshold": len(cand), "n_groups_with_events": len({f.group_id for f in flags if f.kind in ('anomaly', 'drift')}), "rich_groups": rich_done, "summary_groups": summary_done, "groups_capped": capped_groups, "groups_skipped_for_cap": skipped_cap, "max_events_per_group": MAX_EVENTS_PER_GROUP, "max_rich_groups": MAX_RICH_GROUPS, "scan_seconds": round(scan_s, 2)}
     return flags, onsets, meta

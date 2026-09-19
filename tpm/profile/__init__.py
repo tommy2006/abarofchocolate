@@ -15,13 +15,13 @@ from typing import Any, Optional
 from ..contracts import SignalDescriptor
 from .fingerprints import compute_fingerprints, load_dynamics_sample
 from .relations import compute_relations
-from .roles import ACTOR, STAGE, apply_override, heuristic_hypotheses, llm_hypotheses, structural_role  # noqa: F401
+from .roles import ACTOR, MANIPULATED_MIN_SCORE, STAGE, apply_override, heuristic_hypotheses, llm_hypotheses, manipulated_evidence, structural_role  # noqa: F401
 
 __all__ = ["run_profile", "apply_override", "write_catalog", "build_understanding"]
 
 ROLE_TEXT = {
     "continuous_measured": "a continuously varying measurement",
-    "actuator_like": "a step-like manipulated variable (actuator-like)",
+    "actuator_like": "a step-like manipulated variable (actuator-like, manipulated_evidence, MANIPULATED_MIN_SCORE)",
     "held_sampled": "a sample-and-hold measurement (updated every few samples)",
     "constant": "constant",
     "derived_redundant": "a derived / redundant signal (function of other signals)",
@@ -186,6 +186,14 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     for c, a in zip(signal_cols, aliases):
         fp = fps[c]
         role, conf, reasoning, alts = structural_role(fp, red_by_alias.get(a))
+        # manipulated vs measured: a continuous signal that behaves like a valve position / controller output is an
+        # actuator. Its value pinned at a limit is then a saturated actuator (a process symptom), not a dead sensor.
+        m_score, m_reasons = manipulated_evidence(a, fp, rel)
+        fp["manipulated"] = {"score": m_score, "reasons": m_reasons}
+        if role == "continuous_measured" and m_score >= MANIPULATED_MIN_SCORE:
+            role, conf = "actuator_like", round(min(0.85, 0.35 + 0.5 * m_score), 3)
+            reasoning = "behaves like a manipulated variable (valve position / controller output): " + "; ".join(m_reasons)
+            alts = ["a measured percentage (for example a level in %)"]
         ev_fp = ws.evidence.add("distribution", f"{a}: n={fp.get('count')}, missing {float(fp.get('missing_rate') or 0):.1%}, mean {_fmt(fp.get('mean'))}, std {_fmt(fp.get('std'))}, range [{_fmt(fp.get('min'))}, {_fmt(fp.get('max'))}], {fp.get('n_unique')} distinct, shape {fp.get('distribution_shape')}", signals=[a], values={k: v for k, v in fp.items() if k != "sampling"}, computed_by="profile.fingerprints", n_samples=int(fp.get("count") or 0))
         ev_ids = [ev_fp.id]
         if fp.get("n_samples_dynamics"):

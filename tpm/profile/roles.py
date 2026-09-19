@@ -100,6 +100,91 @@ def structural_role(fp: dict[str, Any], redundancy: Optional[dict[str, Any]] = N
 
 
 # --------------------------------------------------------------------------------------------------
+# manipulated (actuator / controller output) vs measured
+# --------------------------------------------------------------------------------------------------
+MANIPULATED_MIN_SCORE = 0.55
+
+
+def percent_like(fp: dict[str, Any]) -> Optional[str]:
+    """'0-100' or '0-1' when the signal lives inside a percentage / fraction range (a small overshoot is tolerated:
+    controller outputs are often logged at -0.4 or 100.2) and actually uses a large part of it."""
+    mn, mx = fp.get("min"), fp.get("max")
+    if mn is None or mx is None:
+        return None
+    mn, mx = float(mn), float(mx)
+    if mn >= -3.0 and mx <= 103.0 and (mx - mn) >= 20.0:
+        return "0-100"
+    if mn >= -0.03 and mx <= 1.03 and (mx - mn) >= 0.2 and not fp.get("integer_valued"):
+        return "0-1"
+    return None
+
+
+def at_limit_side(fp: dict[str, Any], level: float) -> Optional[str]:
+    """'upper' / 'lower' when `level` sits at the edge of the signal's own range (or of its percentage range)."""
+    mn, mx = fp.get("min"), fp.get("max")
+    if mn is None or mx is None or level is None:
+        return None
+    mn, mx = float(mn), float(mx)
+    span = mx - mn
+    if span <= 0:
+        return None
+    pl = percent_like(fp)
+    top, bottom = (100.0, 0.0) if pl == "0-100" else ((1.0, 0.0) if pl == "0-1" else (mx, mn))
+    tol = 0.02 * (top - bottom if pl else span)
+    if level >= min(mx, top) - tol:
+        return "upper"
+    if level <= max(mn, bottom) + tol:
+        return "lower"
+    return None
+
+
+def manipulated_evidence(alias: str, fp: dict[str, Any], relations: Optional[dict[str, Any]]) -> tuple[float, list[str]]:
+    """How much a signal looks like a manipulated variable (valve position, controller output, set point) rather
+    than a measurement. Generic evidence only: a percentage-like range used from one end to the other (fully closed
+    to fully open), readings pinned exactly at a limit (saturation), step-like moves (holds, then jumps), and a
+    directed relation with other signals (others follow its moves, or it reacts to a measurement the way a
+    controller output does). Returns (score 0..1, reasons in words); >= MANIPULATED_MIN_SCORE means actuator."""
+    score = 0.0
+    reasons: list[str] = []
+    pl = percent_like(fp)
+    mn, mx = fp.get("min"), fp.get("max")
+    if pl and mn is not None and mx is not None:
+        top = 100.0 if pl == "0-100" else 1.0
+        low_end, high_end = float(mn) <= 0.03 * top, float(mx) >= 0.97 * top
+        if low_end and high_end:
+            score += 0.55 if pl == "0-100" else 0.2
+            reasons.append("uses its whole " + ("0-100 % range, from fully closed to fully open" if pl == "0-100" else "0-1 range from end to end"))
+        elif low_end or high_end:
+            score += 0.2 if pl == "0-100" else 0.1
+            reasons.append(f"bounded like a {'percentage' if pl == '0-100' else 'fraction'} and reaches its {'upper' if high_end else 'lower'} end")
+    at_max, at_min = float(fp.get("share_at_max") or 0.0), float(fp.get("share_at_min") or 0.0)
+    if pl and max(at_max, at_min) > 0.001:
+        score += 0.35
+        reasons.append(f"sits exactly at its {'upper' if at_max >= at_min else 'lower'} limit in {max(at_max, at_min):.1%} of readings (saturation)")
+    big = float(fp.get("large_jump_share") or 0.0)
+    stuck = float(fp.get("stuck_fraction") or 0.0)
+    jump = fp.get("jump_ratio")
+    if stuck >= 0.4 and (big >= 0.3 or (jump is not None and float(jump) >= 0.5)):
+        score += 0.25
+        reasons.append("moves in steps (holds, then jumps)")
+    followers, drivers = [], []
+    for pr in (relations or {}).get("pairs") or []:
+        if abs(float(pr.get("r") or 0.0)) < 0.5 or int(pr.get("lag") or 0) < 1:
+            continue
+        if pr.get("a") == alias:
+            followers.append((pr["b"], int(pr["lag"])))
+        elif pr.get("b") == alias:
+            drivers.append((pr["a"], int(pr["lag"])))
+    if followers:
+        score += 0.25
+        reasons.append("other signals follow its moves (" + ", ".join(f"{b} {lag} samples later" for b, lag in followers[:3]) + ")")
+    elif drivers:
+        score += 0.1
+        reasons.append("it reacts to other signals the way a controller output does (" + ", ".join(f"{lag} samples after {a}" for a, lag in drivers[:3]) + ")")
+    return round(min(1.0, score), 3), reasons
+
+
+# --------------------------------------------------------------------------------------------------
 # hypotheses (heuristic layer)
 # --------------------------------------------------------------------------------------------------
 def heuristic_hypotheses(d: SignalDescriptor, relations: dict[str, Any]) -> list[dict[str, Any]]:
@@ -110,8 +195,11 @@ def heuristic_hypotheses(d: SignalDescriptor, relations: dict[str, Any]) -> list
     bounded = bool(fp.get("range_0_100"))
     ac1 = _g(fp, "autocorr_lag1")
     noise = _g(fp, "noise_level", 1.0)
+    manip = fp.get("manipulated") or {}
     if role in ("constant", "derived_redundant", "counter", "categorical", "unknown"):
         pass
+    elif role == "actuator_like" and manip.get("reasons"):
+        out.append({"kind": "instrument", "value": "manipulated variable: valve position / controller output", "confidence": min(0.5, 0.25 + 0.3 * float(manip.get("score") or 0.0)), "reasoning": "; ".join(manip["reasons"][:3])})
     elif role == "actuator_like":
         out.append({"kind": "instrument", "value": "valve / actuator position", "confidence": 0.45 if bounded else 0.35, "reasoning": "step-like signal" + (" bounded to 0-100" if bounded else "")})
     elif role == "held_sampled":
