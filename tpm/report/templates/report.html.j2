@@ -509,6 +509,28 @@ details > summary { cursor: pointer; }
     <div><b>{{ t('s8_leaves') }}</b><p class="small">{{ t('s8_leaves_items') }}</p></div>
   </div>
   <p><b>{{ t('s8_guard_rules') }}:</b> <span class="small">{{ dataflow.guard_items }}</span></p>
+  {# ---- round 6 (agent E) begin: who wrote the explanations; egress-guard demonstration (tpm guard-demo) ---- #}
+  {% if dataflow.coverage %}
+  <h3>{{ dataflow.coverage.heading }}</h3>
+  <p>{{ dataflow.coverage.sentence }}</p>
+  {% if dataflow.coverage.details %}<ul class="tight">{% for d in dataflow.coverage.details %}<li class="small">{{ d }}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
+  {% if dataflow.guard_demo %}{% set gd = dataflow.guard_demo %}
+  <h3 id="guard-demo">{{ gd.title }}</h3>
+  <p class="small">{{ gd.intro }}</p>
+  <ul class="tight">{% for line in gd.safe %}<li>{{ line }}</li>{% endfor %}</ul>
+  {% if gd.question %}
+  <p>{{ gd.question.head }}</p>
+  <div class="kv">
+    <div>{{ gd.question.before_label }}</div><div class="mono">{{ gd.question.before }}</div>
+    <div>{{ gd.question.after_label }}</div><div class="mono">{{ gd.question.after }}</div>
+  </div>
+  {% endif %}
+  <ul class="tight">{% for line in gd.unsafe %}<li>{% if loop.index == 2 %}<span class="badge {{ 'b-fail' if gd.unsafe_ok else 'b-warn' }}">{{ 'demo_blocked' if gd.unsafe_ok else 'demo_allowed' }}</span>{% endif %}{{ line }}</li>{% endfor %}</ul>
+  {% if gd.layers %}<p class="small"><b>{{ gd.layers_label }}:</b></p><ul class="tight small">{% for n in gd.layers %}<li class="mono">{{ n }}</li>{% endfor %}</ul>{% endif %}
+  <p class="small">{{ gd.headers }} {{ gd.ledger }}</p>
+  {% endif %}
+  {# ---- round 6 (agent E) end ---- #}
   <h3>{{ t('s8_ledger_summary') }}</h3>
   <div class="kv">
     <div>{{ t('calls_local') }}</div><div class="conf">{{ dataflow.summary.n_local }}</div>
@@ -524,7 +546,7 @@ details > summary { cursor: pointer; }
   <table>
     <tr><th>{{ t('id') }}</th><th>{{ t('when') }}</th><th>{{ t('task') }}</th><th>{{ t('route') }}</th><th>{{ t('model') }}</th><th>{{ t('guard_result') }}</th><th>{{ t('bytes') }}</th><th>{{ t('artifact_types') }}</th><th>{{ t('purpose') }}</th></tr>
     {% for r in dataflow.ledger %}
-    <tr><td class="mono">{{ r.id }}</td><td class="small">{{ r.ts|ts }}</td><td>{{ r.task }}</td><td><span class="badge {{ 'b-ext' if r.route == 'external' else 'b-primary' }}">{{ r.route }}</span></td><td class="mono">{{ r.provider }}/{{ r.model }}</td><td><span class="badge {{ 'b-fail' if r.guard_result == 'blocked' else ('b-warn' if r.guard_result == 'fallback' else 'b-pass') }}">{{ r.guard_result }}</span>{% if r.guard_reason %}<br><span class="small">{{ r.guard_reason }}</span>{% endif %}</td><td class="conf">{{ r.payload_bytes }}</td><td class="small">{{ r.artifact_types }}</td><td class="small">{{ r.purpose }}{% if r.error %}<br>{{ r.error }}{% endif %}</td></tr>
+    <tr><td class="mono">{{ r.id }}</td><td class="small">{{ r.ts|ts }}</td><td>{{ r.task }}</td><td><span class="badge {{ 'b-ext' if r.route == 'external' else 'b-primary' }}">{{ r.route }}</span></td><td class="mono">{{ r.provider }}/{{ r.model }}</td><td><span class="badge {{ 'b-fail' if r.guard_result in ('blocked', 'demo_blocked') else ('b-warn' if r.guard_result == 'fallback' else ('b-primary' if r.guard_result == 'demo_allowed' else 'b-pass')) }}">{{ r.guard_result }}</span>{% if r.guard_reason %}<br><span class="small">{{ r.guard_reason }}</span>{% endif %}</td><td class="conf">{{ r.payload_bytes }}</td><td class="small">{{ r.artifact_types }}</td><td class="small">{{ r.purpose }}{% if r.error %}<br>{{ r.error }}{% endif %}</td></tr>
     {% endfor %}
   </table>
   {% else %}<p class="na">{{ t('s8_no_ledger') }}</p>{% endif %}

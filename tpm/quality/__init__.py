@@ -27,6 +27,9 @@ def check_batch(ws: Any, settings: Any, batch_df: Any, batch_id: str) -> tuple[l
     """Stream path: baseline checks + active rules + trust verdict for one in-memory batch."""
     checks, verdict = _check_batch(ws, settings, batch_df, batch_id)
     rule_checks = run_rules_on_frame(ws, settings, batch_df, batch_id)
+    from ..log.stage_log import log_checks  # decision log: one entry per check of the batch (ids, status, signals, rows)
+
+    log_checks(ws, list(checks) + list(rule_checks or []))
     if rule_checks:
         checks = checks + rule_checks
         # rule failures also count for trust: rewrite the verdict once with everything
@@ -34,6 +37,7 @@ def check_batch(ws: Any, settings: Any, batch_df: Any, batch_id: str) -> tuple[l
         verdicts = [v for v in ws.read_jsonl("trust") if v.get("batch_id") != batch_id]
         verdicts.append(verdict.model_dump())
         ws.rewrite_jsonl("trust", verdicts)
+        ws.log.record("system:quality", "trust", "batch", batch_id, {"trusted": verdict.trusted, "trust_score": verdict.trust_score, "untrusted_signals": verdict.untrusted_signals[:20], "recomputed_after_rule_checks": True})
     return checks, verdict
 
 
@@ -46,6 +50,9 @@ def run_quality(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) ->
     budget = max(30.0, min(240.0, 0.2 * total_budget))
     deadline = t0 + budget
     ws.log.record("system:quality", "stage", "stage", "quality", {"state": "started", "budget_s": budget})
+    from ..log.stage_log import log_checks, log_stage_inferences  # every check gets its own decision-log entry, in bulk
+
+    n_logged, log_seconds = 0, 0.0
     if not ws.exists("dataset"):
         raise FileNotFoundError("dataset.parquet is missing; run ingest first")
     for art in ("checks", "trust"):
@@ -74,6 +81,9 @@ def run_quality(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) ->
         checks = run_checks_for_batch(ws, settings, b, qctx, deadline=deadline, stride=stride)
         for c in checks:
             ws.append_jsonl("checks", c)
+        check_log = log_checks(ws, checks)  # decision log: one entry per check (ids, status, signals, rows; no readings)
+        n_logged += check_log["n"]
+        log_seconds += check_log["seconds"]
         v = trust_verdict(ws, settings, b["batch_id"], checks, n_signals=n_signals)
         verdicts.append(v)
         n_checks += len(checks)
@@ -96,6 +106,9 @@ def run_quality(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) ->
     progress(0.82, "evaluating active rules")
     rule_checks = run_active_rules(ws, settings, batches, deadline=t0 + budget * 1.5)
     rule_fail_batches = {c.batch_id for c in rule_checks if c.status == "fail"}
+    check_log = log_checks(ws, rule_checks)  # rule checks: one entry each, like the baseline checks
+    n_logged += check_log["n"]
+    log_seconds += check_log["seconds"]
     if rule_checks:
         n_checks += len(rule_checks)
         n_fail += sum(c.status == "fail" for c in rule_checks)
@@ -108,9 +121,11 @@ def run_quality(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) ->
             new_verdicts.append(v)
         verdicts = new_verdicts
         ws.rewrite_jsonl("trust", verdicts)
+        ws.log.record_many(("system:quality", "trust", "batch", v.batch_id, {"trusted": v.trusted, "trust_score": v.trust_score, "untrusted_signals": v.untrusted_signals[:20], "recomputed_after_rule_checks": True}) for v in verdicts if v.batch_id in rule_fail_batches)  # the verdict changed: log the new one
         untrusted = [v.batch_id for v in verdicts if not v.trusted]
     seconds = round(time.time() - t0, 2)
     summary = {"n_batches": len(batches), "n_checks": n_checks, "n_fail": n_fail, "n_warn": n_warn, "untrusted_batches": untrusted, "n_rules_loaded": n_rules_loaded, "n_rule_checks": len(rule_checks), "stride": stride, "seconds": seconds, "message": f"{len(batches)} batches, {n_checks} checks ({n_fail} fail, {n_warn} warn), {len(untrusted)} untrusted batches in {seconds}s"}
-    ws.log.record("system:quality", "stage", "stage", "quality", {"state": "done", **{k: v for k, v in summary.items() if k != "message"}})
+    n_inf_logged = log_stage_inferences(ws, "quality")  # e.g. the inference behind each compiled rule
+    ws.log.record("system:quality", "stage", "stage", "quality", {"state": "done", **{k: v for k, v in summary.items() if k != "message"}, "n_checks_logged": n_logged, "log_seconds": round(log_seconds, 3), "n_inferences_logged_at_end": n_inf_logged})
     progress(1.0, summary["message"])
     return summary

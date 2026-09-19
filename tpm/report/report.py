@@ -260,6 +260,8 @@ def _score_timelines(ws: Workspace, schema: Optional[dict[str, Any]], flags: lis
 
 
 def _ledger_summary(ws: Workspace, ledger: list[dict[str, Any]]) -> dict[str, Any]:
+    # records of `tpm guard-demo` (guard_result demo_allowed / demo_blocked) were shown, never sent: not model calls
+    ledger = [r for r in ledger if str(r.get("guard_result") or "") not in ("demo_allowed", "demo_blocked")]
     own = {
         "n_local": sum(1 for r in ledger if r.get("route") == "local"),
         "n_external": sum(1 for r in ledger if r.get("route") == "external" and r.get("guard_result") in ("allowed", None, "")),
@@ -280,12 +282,38 @@ def _ledger_summary(ws: Workspace, ledger: list[dict[str, Any]]) -> dict[str, An
     return own
 
 
+# ---- data-flow additions, round 6 (agent E): who wrote the explanations, the egress-guard demonstration --------------
+_COVERAGE_HEADING = {"en": "Who wrote the explanations", "fi": "Kuka selitykset kirjoitti", "sv": "Vem skrev förklaringarna"}
+
+
+def _dataflow_round6(ws: Workspace, settings: Settings, lang: str) -> dict[str, Any]:
+    """{"coverage": {heading, sentence, details} | None, "guard_demo": tpm.llm.guard_demo.report_context() | None}.
+    Both parts are optional: a missing module or a run without diagnoses / demonstration renders nothing."""
+    out: dict[str, Any] = {"coverage": None, "guard_demo": None}
+    try:
+        from ..llm.ledger import coverage_details, coverage_sentence, narrative_coverage
+
+        cov = narrative_coverage(ws, settings)
+        if (cov.get("diagnoses") or {}).get("total"):
+            out["coverage"] = {"heading": _COVERAGE_HEADING.get(lang, _COVERAGE_HEADING["en"]), "sentence": coverage_sentence(cov, lang), "details": coverage_details(cov, lang)}
+    except Exception:
+        pass
+    try:
+        from ..llm.guard_demo import report_context
+
+        out["guard_demo"] = report_context(ws, lang)
+    except Exception:
+        pass
+    return out
+# ---- end of the round-6 data-flow additions ------------------------------------------------------------------------
+
+
 def _dataflow_statement(ws: Workspace, settings: Settings, t: Translator, summ: dict[str, Any], prof) -> str:
     try:
         from ..llm import ledger as _ledger  # agent D
 
-        try:
-            s = _ledger.data_flow_statement(ws, settings, language=t.lang)
+        try:  # extras=False: who wrote the explanations and the guard demonstration have blocks of their own below
+            s = _ledger.data_flow_statement(ws, settings, language=t.lang, extras=False)
         except TypeError:
             s = _ledger.data_flow_statement(ws, settings)
         if isinstance(s, str) and s.strip():
@@ -762,6 +790,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         "ledger": [{**r, "purpose": _short(r.get("purpose"), 90), "artifact_types": ", ".join(r.get("artifact_types") or [])} for r in ledger[:200]], "n_ledger": len(ledger), "summary": summ, "statement": statement,
         "guard_items": t("s8_guard_items", min_n=g.min_aggregate_n, max_series=g.max_series_points, max_vals=g.max_numeric_values_per_payload, max_bytes=g.max_payload_bytes),
     }
+    dataflow.update(_dataflow_round6(ws, settings, lang))  # round 6 (E): who wrote the explanations; guard demonstration
 
     # ---- dataset / overview
     n_excluded = sum(1 for s in signals if s.get("excluded")) + (len(schema.get("label_columns") or []) + len(schema.get("meta_columns") or []) if schema else 0)

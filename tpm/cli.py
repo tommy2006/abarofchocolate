@@ -6,9 +6,10 @@
     python -m tpm report <run_id> [--format html|pdf|pptx|all] [--lang en|fi|sv|all] [--out FILE|DIR] [--no-llm]
     python -m tpm email <run_id> --to a@b.c [--lang en] [--pdf] [--pptx]
     python -m tpm export <run_id> [--out DIR]
-    python -m tpm verify-log <run_id>
+    python -m tpm verify-log <run_id> [--json]          (hash chain + completeness audit of the decision log)
     python -m tpm bench-llm --run <run_id> [--profile hybrid] [--tasks a,b] [--n 3] [--routes local,external] [--dry-run]
-    python -m tpm models | bakeoff | demo | doctor | list
+    python -m tpm guard-demo --run <run_id> [--profile hybrid|eu-hosted] [--send] [--json]
+    python -m tpm models [--run <run_id>] | bakeoff | demo | doctor | list
 """
 from __future__ import annotations
 
@@ -449,18 +450,28 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_verify_log(args: argparse.Namespace) -> int:
+    """Chain check (exit code 0 / 1), then the completeness audit: per object type, how many objects the run's
+    artifacts hold and how many have an entry of their own in the log, with the reason for every gap."""
     settings = _settings(args)
     ws = _open_ws(args.run_id, settings)
+    from .log.completeness import audit, format_audit
+
     try:
         res = ws.log.verify_chain()
         n = ws.log.count()
+        comp = None if getattr(args, "no_audit", False) else audit(ws)
     finally:
         ws.close()
+    if getattr(args, "json", False):
+        _p(json.dumps({"chain": {**res, "total": n}, "completeness": comp}, indent=1, default=str))
+        return 0 if res.get("ok") else 1
     if res.get("ok"):
         _p(f"OK: hash chain intact, {res['checked']} entries verified ({n} total)")
-        return 0
-    _p(f"FAIL: chain broken at seq {res.get('first_bad_seq')} after {res.get('checked')} good entries")
-    return 1
+    else:
+        _p(f"FAIL: chain broken at seq {res.get('first_bad_seq')} after {res.get('checked')} good entries")
+    for line in format_audit(comp) if comp else []:
+        _p(line)
+    return 0 if res.get("ok") else 1
 
 
 def _ollama_tags(base_url: str, timeout: float = 2.5) -> Optional[list[dict[str, Any]]]:
@@ -542,6 +553,12 @@ def cmd_models(args: argparse.Namespace) -> int:
             _p(f"  {'[x]' if ok else '[ ]'} {m}" + ("" if ok else f"   ->  ollama pull {m}"))
     key = settings.external_llm.api_key
     _p(f"External model: {settings.external_llm.provider}/{settings.external_llm.model}  API key {'present' if key else 'NOT set'} ({settings.external_llm.api_key_env}); route allowed by profile: {settings.active_profile.allow_external}")
+    try:
+        line = _coverage_line(settings, getattr(args, "run", None))
+    except Exception as e:  # the model listing must not fail because of one run
+        line = f"Explanations: could not be read ({e})"
+    if line:
+        _p(line)
     return 0
 
 
@@ -569,6 +586,55 @@ def cmd_bench_llm(args: argparse.Namespace) -> int:
     _p(bench.format_table(result))
     _p(f"Written: {ws.dir / (bench.DRY_RUN_FILE if args.dry_run else bench.BENCH_FILE)}")
     return 0
+
+
+def cmd_guard_demo(args: argparse.Namespace) -> int:
+    """Prove the egress guard on a real run: a real payload before / after the guard, an operator question naming
+    original columns, and a deliberately unsafe payload that is blocked and never sent (tpm.llm.guard_demo)."""
+    settings = _settings(argparse.Namespace(settings=getattr(args, "settings", None), workspace=getattr(args, "workspace", None), profile=None))
+    ws = _open_ws(args.run, settings)
+    from .llm import guard_demo
+
+    try:
+        result = guard_demo.run_demo(ws, settings, profile=args.profile, send=bool(args.send), language=args.lang or "en")
+    except ValueError as e:
+        ws.close()
+        return _fail(str(e))
+    except Exception as e:  # a broken artifact must not end in a traceback
+        ws.close()
+        return _fail(f"the guard demonstration failed: {e}")
+    try:
+        if args.json:
+            _p(json.dumps(result, indent=1, ensure_ascii=False, default=str))
+        else:
+            for line in guard_demo.format_demo(result, ws.dir):
+                _p(line)
+    finally:
+        ws.close()
+    if (result.get("unsafe") or {}).get("verdict") != "blocked" or (result.get("headers_check") or {}).get("found"):
+        _err("the guard let raw material through: see the lines above")
+        return 2
+    return 0
+
+
+def _coverage_line(settings: Any, run_id: Optional[str]) -> Optional[str]:
+    """`tpm models`: who wrote the explanations of a run (the latest one by default), in one plain sentence."""
+    from .workspace import Workspace
+
+    runs = Workspace.list_runs(settings)
+    rid = run_id if run_id and run_id not in ("latest", "last") else (runs[0]["run_id"] if runs else None)
+    if not rid or not (settings.workspace_path / rid / "status.json").exists():
+        return None
+    from .llm.ledger import narrative_coverage
+
+    ws = Workspace.open(rid, settings)
+    try:
+        cov = narrative_coverage(ws, settings)
+    finally:
+        ws.close()
+    if not (cov.get("diagnoses") or {}).get("total"):
+        return None
+    return f"Explanations in run {rid}: {cov['sentence']}" + "".join(f"\n  {d}" for d in cov.get("details") or [])
 
 
 def cmd_bakeoff(args: argparse.Namespace) -> int:
@@ -836,8 +902,10 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--lang", choices=["en", "fi", "sv"])
     ex.set_defaults(fn=cmd_export)
 
-    vl = sub.add_parser("verify-log", help="verify the decision-log hash chain")
+    vl = sub.add_parser("verify-log", help="verify the decision-log hash chain and audit its completeness")
     vl.add_argument("run_id")
+    vl.add_argument("--json", action="store_true", help="print the chain check and the completeness audit as JSON")
+    vl.add_argument("--no-audit", action="store_true", help="only the chain check")
     vl.set_defaults(fn=cmd_verify_log)
 
     mo = sub.add_parser("models", help="show local/external model availability")
@@ -845,7 +913,16 @@ def build_parser() -> argparse.ArgumentParser:
     mo.add_argument("--pull", metavar="NAME", help="download a model through the local Ollama, with progress (e.g. qwen3:4b)")
     mo.add_argument("--use", metavar="NAME", help="use this installed model from now on ('auto' = best installed model for this machine)")
     mo.add_argument("--embedding", action="store_true", help="with --use: choose the search (embedding) model instead of the chat model")
+    mo.add_argument("--run", metavar="RUN_ID", help="say who wrote the explanations of this run (default: the latest run)")
     mo.set_defaults(fn=cmd_models)
+
+    gd = sub.add_parser("guard-demo", help="prove the egress guard on a real run: before / after, and an unsafe payload that is blocked")
+    gd.add_argument("--run", required=True, metavar="RUN_ID", help="run id, or 'latest'")
+    gd.add_argument("--profile", choices=["hybrid", "eu-hosted"], help="the external profile the guard speaks for (default: the active one if it allows external models, else hybrid)")
+    gd.add_argument("--send", action="store_true", help="afterwards send the REAL payload once through the normal router (needs the key; off by default). The unsafe payload is never sent.")
+    gd.add_argument("--lang", choices=["en", "fi", "sv"], help="language of the model reply when --send is used")
+    gd.add_argument("--json", action="store_true", help="print the result as JSON (it is always written to guard_demo.json)")
+    gd.set_defaults(fn=cmd_guard_demo)
 
     bl = sub.add_parser("bench-llm", help="time a finished run's model tasks on the local and the external route")
     bl.add_argument("--run", required=True, metavar="RUN_ID", help="run id, or 'latest'")
