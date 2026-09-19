@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import functools
 import importlib
 import io
 import json
@@ -86,6 +87,27 @@ def _rewrite_profile_line(settings_path: Optional[Path], profile: str) -> bool:
         return False
     p.write_text(new, encoding="utf-8")
     return True
+
+
+def _offload(handler):
+    """Run a blocking async handler OFF the server's event loop.
+
+    These routes are `async def` only because they read the request body; after that they call blocking code
+    (local-model calls, DuckDB, file writes, SMTP). Executed on the event loop, one such request froze the whole
+    server for every client until it returned (a chat question waiting on the model made the UI look dead).
+    The body is read and cached on the server loop, then the handler coroutine runs in a worker thread with its
+    own short-lived loop; `await request.json()` / `request.form()` there only touch the cached body."""
+
+    @functools.wraps(handler)
+    async def wrapper(*args, **kwargs):
+        req = kwargs.get("request")
+        if req is None:
+            req = next((a for a in args if isinstance(a, Request)), None)
+        if req is not None:
+            await req.body()
+        return await asyncio.to_thread(lambda: asyncio.run(handler(*args, **kwargs)))
+
+    return wrapper
 
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
@@ -287,6 +309,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         }
 
     @app.put("/api/settings")
+    @_offload
     async def put_settings(request: Request) -> dict[str, Any]:
         body = await request.json()
         allowed = {}
@@ -920,6 +943,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return result
 
     @app.post("/api/runs/{run_id}/decisions")
+    @_offload
     async def post_decision(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         body = await request.json()
@@ -983,6 +1007,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return f"RULE-{n + 1:03d}"
 
     @app.post("/api/runs/{run_id}/rules")
+    @_offload
     async def compile_rule(run_id: str, request: Request):
         ws = state.ws(run_id)
         body = await request.json()
@@ -1013,6 +1038,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "rule": rd}
 
     @app.post("/api/runs/{run_id}/rules/{rule_id}/{verb}")
+    @_offload
     async def rule_decision(run_id: str, rule_id: str, verb: str, request: Request) -> dict[str, Any]:
         if verb not in ("approve", "reject"):
             raise HTTPException(404, "use approve or reject")
@@ -1027,6 +1053,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "rule": rule, **res}
 
     @app.post("/api/runs/{run_id}/rules/run")
+    @_offload
     async def run_rules(run_id: str):
         ws = state.ws(run_id)
         run_active = _lazy("tpm.quality:run_active_rules")
@@ -1049,6 +1076,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "result": _jsonable(res) if res is not None else {}}
 
     @app.post("/api/runs/{run_id}/rules/upload")
+    @_offload
     async def upload_rules(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         form = await request.form()
@@ -1095,6 +1123,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
 
     # ---------- chat ----------
     @app.post("/api/runs/{run_id}/chat")
+    @_offload
     async def post_chat(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         body = await request.json()
@@ -1150,6 +1179,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
 
     # ---------- assessor ----------
     @app.post("/api/runs/{run_id}/assessor/ask")
+    @_offload
     async def assessor_ask(run_id: str, request: Request):
         ws = state.ws(run_id)
         body = await request.json()
@@ -1185,6 +1215,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "answer": ans}
 
     @app.post("/api/runs/{run_id}/assessor/upload")
+    @_offload
     async def assessor_upload(run_id: str, request: Request):
         ws = state.ws(run_id)
         form = await request.form()
@@ -1205,6 +1236,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "path": str(p), "result": _jsonable(res) if res is not None else {}}
 
     @app.post("/api/runs/{run_id}/assessor/apply")
+    @_offload
     async def assessor_apply(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         body = await request.json()
@@ -1251,6 +1283,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return res
 
     @app.post("/api/runs/{run_id}/stream/push")
+    @_offload
     async def stream_push(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         ctype = request.headers.get("content-type", "")
@@ -1277,6 +1310,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, **_jsonable(res)}
 
     @app.post("/api/runs/{run_id}/stream/replay")
+    @_offload
     async def stream_replay(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         try:
@@ -1324,6 +1358,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "replay": {k: v for k, v in st["replay"].items() if k not in ("stop", "stop_event")}}
 
     @app.post("/api/runs/{run_id}/stream/stop")
+    @_offload
     async def stream_stop(run_id: str) -> dict[str, Any]:
         st = state.stream.get(run_id) or {}
         for k in ("replay", "watch"):
@@ -1335,6 +1370,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/stream/watch")
+    @_offload
     async def stream_watch(run_id: str, request: Request) -> dict[str, Any]:
         ws = state.ws(run_id)
         body = await request.json()
@@ -1436,6 +1472,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return _report_export(run_id, "pptx", lang, refresh)
 
     @app.post("/api/runs/{run_id}/report/email")
+    @_offload
     async def email_report(run_id: str, request: Request):
         ws = state.ws(run_id)
         body = await request.json()
@@ -1478,6 +1515,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
 
     # ---------- misc ----------
     @app.post("/api/demo", status_code=202)
+    @_offload
     async def create_demo(request: Request) -> dict[str, Any]:
         """Start a demo run: the REAL pipeline on ``samples/demo_process.csv`` (or ``path`` from the body)
         in a background thread, exactly like ``POST /api/runs`` with a path. Answers at once with the run

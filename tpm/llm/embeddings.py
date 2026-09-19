@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -70,6 +71,10 @@ def collect_items(ws: Any, include_docs: bool = True, docs_dir: Optional[Path] =
         except Exception:
             pass
     return [it for it in items if it.get("text")]
+
+
+MAX_EMBED_ITEMS = 600   # larger workspaces use TF-IDF (instant) instead of per-item model embeddings
+EMBED_BUDGET_S = 20.0   # total time an index build may spend on model embeddings before falling back
 
 
 class LocalIndex:
@@ -152,10 +157,15 @@ class LocalIndex:
         if not self.force_tfidf:
             try:
                 prov = OllamaProvider(self.settings)
-                if prov.is_available() and prov.has_embedding_model():
+                # Embedding every item through the local model is only worth it for a modest index and while it
+                # stays fast; otherwise the instant TF-IDF index is used so a chat answer never waits on it.
+                if len(items) <= MAX_EMBED_ITEMS and prov.is_available() and prov.has_embedding_model():
                     vecs = []
                     texts = [it["text"][:2000] for it in items]
+                    t_embed = time.time()
                     for i in range(0, len(texts), 32):
+                        if time.time() - t_embed > EMBED_BUDGET_S:
+                            raise TimeoutError("embedding budget exceeded")
                         vecs.append(prov.embed(texts[i: i + 32]))
                     self._vecs = np.vstack(vecs).astype(np.float32)
                     norms = np.linalg.norm(self._vecs, axis=1, keepdims=True) + 1e-9

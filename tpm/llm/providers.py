@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any, Optional
 
@@ -129,6 +130,26 @@ def split_system(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, st
 # ----------------------------------------------------------------------------------------------
 
 
+_CLIENTS: dict[str, "httpx.Client"] = {}
+_CLIENTS_LOCK = threading.Lock()
+
+
+def _client_for(base_url: str) -> "httpx.Client":
+    """One pooled client per endpoint: module-level httpx.post() opened a new connection for every call."""
+    with _CLIENTS_LOCK:
+        c = _CLIENTS.get(base_url)
+        if c is None:
+            c = httpx.Client(timeout=httpx.Timeout(180.0, connect=5.0))
+            _CLIENTS[base_url] = c
+        return c
+
+
+def _loopback(url: str) -> str:
+    """'localhost' resolves to IPv6 first on Windows; Ollama listens on 127.0.0.1, so every new connection paid
+    a ~2 s fallback. Use the IPv4 loopback address directly."""
+    return re.sub(r"^(https?://)localhost(?=[:/]|$)", r"\g<1>127.0.0.1", url or "")
+
+
 class OllamaProvider:
     """Local model over the Ollama HTTP API. Never leaves the machine (base_url is localhost by default)."""
 
@@ -138,7 +159,7 @@ class OllamaProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.cfg = settings.local_llm
-        self.base_url = self.cfg.base_url.rstrip("/")
+        self.base_url = _loopback(self.cfg.base_url.rstrip("/"))
         self.timeout = float(self.cfg.timeout_s)
 
     # ---- discovery ----
@@ -244,11 +265,11 @@ class OllamaProvider:
         parsed = extract_json(text) if schema else None
         return text, parsed, latency
 
-    def _post_with_retry(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post_with_retry(self, path: str, body: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
         last: Optional[Exception] = None
         for attempt in range(2):
             try:
-                r = httpx.post(f"{self.base_url}{path}", json=body, timeout=self.timeout)
+                r = _client_for(self.base_url).post(f"{self.base_url}{path}", json=body, timeout=timeout or self.timeout)
                 if r.status_code >= 500 or r.status_code == 429:
                     raise TransientError(f"ollama HTTP {r.status_code}: {r.text[:200]}")
                 if r.status_code >= 400:
@@ -272,7 +293,7 @@ class OllamaProvider:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
         try:
-            data = self._post_with_retry("/api/embed", {"model": model, "input": texts, "keep_alive": self.cfg.keep_alive})
+            data = self._post_with_retry("/api/embed", {"model": model, "input": texts, "keep_alive": self.cfg.keep_alive}, timeout=45.0)
             vecs = data.get("embeddings")
             if vecs:
                 return np.asarray(vecs, dtype=np.float32)
@@ -281,7 +302,7 @@ class OllamaProvider:
         # legacy endpoint, one text at a time
         out = []
         for t in texts:
-            data = self._post_with_retry("/api/embeddings", {"model": model, "prompt": t})
+            data = self._post_with_retry("/api/embeddings", {"model": model, "prompt": t}, timeout=20.0)
             out.append(data.get("embedding", []))
         return np.asarray(out, dtype=np.float32)
 
