@@ -349,6 +349,13 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     app.state.tpm = state
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
+    # ---------- live sensor monitor (own page, independent of runs) ----------
+    from ..live import LiveMonitor, create_router as _live_router
+
+    live_monitor = LiveMonitor(lambda: state.settings, settings.workspace_path / "_live")
+    app.state.live = live_monitor
+    app.include_router(_live_router(lambda: live_monitor))
+
     # ---------- basics ----------
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
