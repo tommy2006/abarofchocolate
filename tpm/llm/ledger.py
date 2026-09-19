@@ -554,4 +554,32 @@ def _statement_extras(ws: Any, settings: Settings, all_recs: list[EgressRecord],
             out += ["", demo]
     except Exception:
         pass
+    try:
+        res = residency_statement(ws)
+        if res:
+            out += ["", res]
+    except Exception:
+        pass
     return out
+
+
+def residency_statement(ws: Any) -> Optional[str]:
+    """One paragraph from the last residency check of this run (`tpm eu-check`), so the report carries the measurement
+    and not only the claim. None when the check was never run here."""
+    try:
+        if not ws.exists("eu_residency"):
+            return None
+        r = ws.read_json("eu_residency") or {}
+    except Exception:
+        return None
+    verdict = r.get("verdict") or {}
+    if verdict.get("ok") is None:
+        return None
+    ep, rtt, dist = r.get("endpoint") or {}, r.get("rtt") or {}, r.get("distance") or {}
+    refs = "; ".join(f"{x.get('where')} {x.get('min_ms')} ms" for x in (r.get("references") or []) if x.get("n"))
+    head = ("Where the external model runs, measured on this machine" + (f" ({r.get('checked_at', '')[:19]} UTC)" if r.get("checked_at") else "") + ": ")
+    body = (f"a TCP round trip with {ep.get('host')} took {rtt.get('min_ms')} ms, which in fibre is at most "
+            f"~{dist.get('max_km')} km from here" if rtt.get("min_ms") is not None else "the round trip could not be measured")
+    tail = f" Reference endpoints at the same moment: {refs}." if refs else ""
+    limits = " " + (verdict.get("limits") or [""])[0]
+    return head + body + "." + tail + limits + (" The settings claim: " + ", ".join(x for x in (ep.get("operator_says"), ep.get("location_says")) if x) + "." if ep.get("location_says") else "")

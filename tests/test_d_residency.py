@@ -116,6 +116,33 @@ def test_without_an_external_endpoint_nothing_is_measured(monkeypatch):
     assert not calls["rtt"] and not calls["tls"] and not calls["registry"], "no-egress must not touch the network"
 
 
+def test_the_report_carries_the_measurement_not_only_the_claim(monkeypatch, tmp_path):
+    monkeypatch.setenv("TPM_EU_API_KEY", "k")
+    _measurements(monkeypatch)
+    _ledger(monkeypatch, [_rec(f"openai-compatible @ {VERDA}")])
+    result = residency.check(load_settings(profile="eu-hosted"), ws=_Ws([]))
+
+    from tpm.llm import ledger as ledger_mod
+
+    class Ws:
+        def exists(self, name):
+            return name == "eu_residency"
+
+        def read_json(self, name):
+            return result
+
+    text = ledger_mod.residency_statement(Ws())
+    assert "9.0 ms" in text and "at most ~900 km" in text and "N. Virginia, USA 130.0 ms" in text
+    assert "not where it might forward the request afterwards" in text, "the report must carry the limits too"
+    assert "The settings claim:" in text and "Finland (EU)" in text
+
+    class NoCheck:
+        def exists(self, name):
+            return False
+
+    assert ledger_mod.residency_statement(NoCheck()) is None
+
+
 @pytest.mark.parametrize("path", ["/api/eu-check", "/api/runs/{run_id}/eu-check"])
 def test_the_ui_can_ask_for_the_check(path):
     from tpm.api.server import create_app
