@@ -1,6 +1,6 @@
 /* View 7: data flow — external model use (plain sentence, profile switch with confirmation, external model, calls /
    tokens / seconds per call: js/externaluse.js), model status, plain statement, egress ledger. */
-import { state, t, el, clear, api, runApi, fmt, chip, section, table, viewHead, empty, hiddenHint, kv, st, confirmDialog, toast, errText, bus, roleAllows, notice, linkifyRefs, cleanText, refLink } from '../core.js';
+import { state, t, el, clear, api, runApi, fmt, chip, section, table, viewHead, empty, hiddenHint, kv, st, confirmDialog, toast, errText, bus, roleAllows, notice, linkifyRefs, cleanText, refLink, actorName, actorRole } from '../core.js';
 import { summaryCard, techDetails } from '../brief.js';
 import { externalUseCard } from '../externaluse.js';
 
@@ -16,7 +16,7 @@ export async function render(main) {
   page.append(tech);
   const view = tech.body;
   const s = state.settings || (await api('/api/settings')).data;
-  const eg = state.run ? await runApi('/egress') : { ok: false, data: {} };
+  const eg = state.run ? await runApi('/egress', { params: { lang: state.lang } }) : { ok: false, data: {} };
   const E = eg.ok ? eg.data : {};
 
   // ---- external model use: plain sentence, profile switch, external model, calls / tokens / seconds per call.
@@ -62,11 +62,50 @@ export async function render(main) {
   const stmt = el('div', { class: 'statement' });
   ss.body.append(stmt);
   async function renderStatement() {
-    const r = state.run ? await runApi('/egress') : { ok: false };
+    const r = state.run ? await runApi('/egress', { params: { lang: state.lang } }) : { ok: false };
     clear(stmt);
     stmt.append(linkifyRefs(cleanText(r.ok && r.data.statement ? r.data.statement : (s.allow_external ? t('status.egressPossible') : t('status.noEgress')))));
   }
   await renderStatement();
+  // who wrote the explanations: how many a language model wrote, and why the others use the evidence template
+  if (E.coverage && E.coverage.sentence) {
+    ss.body.append(el('h3', { class: 'small muted', style: { marginTop: '12px' }, text: t('flow.coverage') }), el('p', { text: E.coverage.sentence }));
+    if ((E.coverage.details || []).length) ss.body.append(el('ul', { class: 'small muted' }, E.coverage.details.map((d) => el('li', { text: d }))));
+  }
+
+  // ---- the egress guard shown on this run's own data: a real payload before / after the guard, an operator question
+  // naming the original column names, and a deliberately unsafe payload of raw rows that the guard blocks. Nothing is
+  // sent from here (the command line has --send); the ledger marks these records demo_allowed / demo_blocked.
+  const gs = section(t('flow.guardDemo'));
+  gs.root.dataset.briefSection = 'guard';
+  view.append(gs.root);
+  const guardCard = (head, kind, lines) => el('div', { style: { border: '1px solid var(--line)', borderTop: `4px solid var(--${kind})`, borderRadius: 'var(--radius)', padding: '10px 12px', background: 'var(--bg-2)', minWidth: '0' } },
+    el('div', { style: { marginBottom: '6px' } }, head), el('ul', { class: 'small', style: { margin: '0', paddingLeft: '18px', overflowWrap: 'anywhere' } }, (lines || []).map((x) => el('li', { text: x }))));
+  const renderGuard = (gd) => {
+    clear(gs.body);
+    gs.body.append(el('p', { class: 'hint', text: t('flow.guardDemoHint') }));
+    if (!state.run) { gs.body.append(el('div', { class: 'notice warn', text: t('runs.noRunHint') })); return; }
+    const btn = el('button', { class: 'btn', type: 'button' }, gd ? t('flow.guardDemoAgain') : t('flow.guardDemoRun'));
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = t('flow.guardDemoWorking');
+      const r = await runApi('/guard-demo', { method: 'POST', body: { lang: state.lang, actor: actorName(), role: actorRole() } });
+      btn.disabled = false;
+      if (!r.ok) { btn.textContent = gd ? t('flow.guardDemoAgain') : t('flow.guardDemoRun'); toast(errText(r), 'fail'); return; }
+      if (!gs.root.isConnected) return;
+      renderGuard(r.data.guard_demo);
+      toast(r.data.unsafe_blocked && !r.data.headers_leaked ? t('flow.guardDemoBlocked') : t('flow.guardDemoNotBlocked'), r.data.unsafe_blocked && !r.data.headers_leaked ? 'ok' : 'fail');
+    });
+    gs.body.append(el('div', { class: 'row' }, btn));
+    if (!gd) return;
+    gs.body.append(el('h3', { style: { marginTop: '12px' }, text: gd.title }), el('p', { class: 'small muted', text: gd.intro }));
+    gs.body.append(el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: '10px', margin: '8px 0' } },
+      guardCard(el('span', {}, chip(t('flow.guardSafe'), 'ok')), 'ok', gd.safe),
+      guardCard(el('span', {}, chip(gd.unsafe_ok ? 'demo_blocked' : 'demo_allowed', gd.unsafe_ok ? 'fail' : 'warn'), ' ', el('b', { text: t('flow.guardUnsafe') })), gd.unsafe_ok ? 'fail' : 'warn', gd.unsafe)));
+    if (gd.question) gs.body.append(el('h3', { class: 'small', text: gd.question.head }), kv([[gd.question.before_label, el('span', { class: 'mono small', style: { overflowWrap: 'anywhere' }, text: gd.question.before || '' })], [gd.question.after_label, el('span', { class: 'mono small', style: { overflowWrap: 'anywhere' }, text: gd.question.after || '' })]]));
+    if ((gd.layers || []).length && roleAllows('engineer')) gs.body.append(el('details', {}, el('summary', { class: 'small', text: gd.layers_label }), el('ul', { class: 'small mono', style: { overflowWrap: 'anywhere' } }, gd.layers.map((x) => el('li', { text: x })))));
+    gs.body.append(el('p', { class: 'small muted', text: `${gd.headers || ''} ${gd.ledger || ''}`.trim() }));
+  };
+  renderGuard(E.guard_demo);
 
   // ---- ledger
   const ls = section(t('flow.ledger'), { level: 'engineer', right: E.summary ? el('span', { class: 'row small muted' }, chip(`${E.summary.local || 0} ${t('flow.summary.local')}`, 'ok'), chip(`${E.summary.external_allowed || 0} ${t('flow.summary.sent')}`, E.summary.external_allowed ? 'warn' : ''), chip(`${E.summary.external_blocked || 0} ${t('flow.summary.blocked')}`)) : null });
@@ -82,7 +121,7 @@ export async function render(main) {
     { label: t('flow.artifacts'), cls: 'wrap', render: (r) => (r.artifact_types || []).join(', ') },
     { label: t('flow.bytes'), render: (r) => fmt.bytes(r.payload_bytes), num: true },
     { label: t('flow.ext.tokensCol'), render: (r) => (r.input_tokens || r.output_tokens ? `${fmt.int(r.input_tokens || 0)} / ${fmt.int(r.output_tokens || 0)}` : ''), num: true },
-    { label: t('flow.guardResult'), cls: 'wrap', render: (r) => el('span', {}, chip(r.guard_result, { allowed: 'ok', blocked: 'fail', fallback: 'warn', budget: 'warn' }[r.guard_result] || ''), r.guard_reason ? el('span', { class: 'dim small', text: ' ' + r.guard_reason }) : null) },
+    { label: t('flow.guardResult'), cls: 'wrap', render: (r) => el('span', {}, chip(r.guard_result, { allowed: 'ok', blocked: 'fail', fallback: 'warn', budget: 'warn', demo_blocked: 'fail', demo_allowed: '' }[r.guard_result] || ''), r.guard_reason ? el('span', { class: 'dim small', text: ' ' + r.guard_reason }) : null) },
     { label: t('common.status'), render: (r) => st(r.ok ? 'ok' : 'fail', r.ok ? 'ok' : (r.error || 'error')) },
     // external records keep the SANITISED payload only: exactly what was sent, after the guard cleaned it
     { label: t('flow.ext.previewCol'), cls: 'wrap', render: (r) => el('span', { class: 'small dim preview' }, linkifyRefs(r.payload_preview || '')) },

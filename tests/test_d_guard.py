@@ -291,3 +291,23 @@ def test_explain_mentions_thresholds(settings):
     assert "nothing leaves" in txt2.lower()
     txt3 = guard.explain(load_settings(profile="eu-hosted"))
     assert "NOT used" in txt3 and "base_url" in txt3
+
+
+def test_narrow_table_rows_never_leave(demo_ws, settings):
+    """Round 6: a table with only a few numeric columns next to many text columns (business records, logs). Its rows are
+    rows however few numbers they carry: three records under the data's own column names are dropped, and a row written
+    as text with a row number / time stamp / file name is dropped with three value pairs already."""
+    recs = [{"order": f"A-{i}", "region": "north", "category": "x", "status": "open", "note": "ok", "flow_a": 100.1 + i, "press_r": 2700.0 + i, "temp_r": 120.0} for i in range(3)]
+    g = guard.check({"batch": recs, "evidence": _evidence()}, settings, strict=False, ws=demo_ws)
+    assert g.allowed and "batch" not in g.sanitized_payload and any("row-like structure" in n for n in g.notes)
+    row_text = {"id": "EV-000002", "kind": "note", "signals": ["S01"], "statement": "row 12: flow_a=100.1, press_r=2700.5, temp_r=120.2", "n_samples": 500}
+    stamped = {"id": "EV-000003", "kind": "note", "signals": ["S01"], "statement": "flow_a=100.1, press_r=2700.5, temp_r=120.2 logged at 2026-03-01T08:02:17", "n_samples": 500}
+    shares = {"id": "EV-000004", "kind": "attribution", "signals": ["S01"], "statement": "share of the deviation: flow_a=0.31, press_r=0.22, temp_r=0.12", "n_samples": 500}
+    g2 = guard.check({"evidence": [row_text, stamped, shares]}, settings, strict=False, ws=demo_ws)
+    kept = [e.get("id") for e in g2.sanitized_payload.get("evidence", []) if e.get("statement")]
+    assert kept == ["EV-000004"], g2.notes  # attribution shares without a row locator are aggregates and stay
+    assert sum("a raw row written as text" in n for n in g2.notes) == 2
+    # aggregates keyed by statistics (not by column names) are still allowed, whatever their number
+    stats = [{"signal": f"S0{i}", "mean": 1.2 + i, "std": 0.3, "n": 500} for i in range(1, 4)]
+    g3 = guard.check({"signals": stats, "evidence": _evidence()}, settings, strict=False, ws=demo_ws)
+    assert g3.allowed and len(g3.sanitized_payload.get("signals") or []) == 3, g3.notes

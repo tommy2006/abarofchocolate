@@ -90,7 +90,7 @@
 .dq-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; min-width: 0; }
 .dq-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line-2); font-size: 12px; color: var(--ink-2); white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 .dq-chip b { font-weight: 600; }
-.dq-chip.fail { border-color: var(--fail); color: var(--fail); } .dq-chip.warn { border-color: var(--warn); color: var(--warn); } .dq-chip.ok { border-color: var(--ok); color: var(--ok); }
+.dq-chip.fail { border-color: var(--fail); color: var(--fail); } .dq-chip.warn { border-color: var(--warn); color: var(--warn); } .dq-chip.ok { border-color: var(--ok); color: var(--ok); } .dq-chip.nt { border-style: dashed; color: var(--ink-3); }
 .dq-batchchecks { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: baseline; font-size: 13px; margin-top: 8px; }
 .dq-scorewords { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; flex-basis: 100%; max-width: 100ch; }
 .dq-legend { display: grid; gap: 3px; font-size: 13px; margin: 6px 0 0; padding: 0; list-style: none; }

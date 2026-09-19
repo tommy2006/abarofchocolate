@@ -23,7 +23,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..config import GuardConfig, Settings
 
@@ -143,6 +143,18 @@ _LA = r"(?![^\W_])"
 # as text ("row 3: S01=0.251, S02=3660, ..."), which rounding alone would let through
 _PAIR_RE = re.compile(r"(?<![\w\[])(\[column\]|[A-Za-z_][\w.-]{0,63})\s*[=:]\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 ROW_TEXT_MIN_SIGNALS = 5
+# narrow tables (a few numeric columns): fewer pairs are a raw row too when the text also says WHERE the reading comes
+# from - a row number, a (redacted) time stamp or file name ("row 0: S01=1020, S03=12.1, S04=8.2; logged at [time]")
+ROW_TEXT_MIN_WITH_LOCATOR = 3
+_ROW_LOCATOR_RE = re.compile(r"\brow\s*#?\s*\d+\b|\[time\]|\[file\]|\blogged at\b", re.IGNORECASE)
+# a list of records whose numeric fields are the data's own columns (or their aliases) is rows of the table, however
+# many text columns sit next to them; aggregates are keyed by statistics (mean, std, n), not by column names
+ROW_LIKE_MIN_COLUMN_FIELDS = 3
+
+
+def raw_row_text(n_pairs: int, text: str) -> bool:
+    """True when a string is a raw row written as text (see ROW_TEXT_MIN_SIGNALS / ROW_TEXT_MIN_WITH_LOCATOR)."""
+    return n_pairs >= ROW_TEXT_MIN_SIGNALS or (n_pairs >= ROW_TEXT_MIN_WITH_LOCATOR and bool(_ROW_LOCATOR_RE.search(text or "")))
 
 KNOWN_VOCAB = {
     "continuous_measured", "actuator_like", "held_sampled", "constant", "derived_redundant", "counter", "timestamp",
@@ -465,6 +477,10 @@ class _Redactor:
     def find_long_number(self, s: str) -> bool:
         return any(_token_sig_digits(m.group(0)) > self.digits for m in _DECIMAL_TOKEN_RE.finditer(s))
 
+    def is_column(self, key: str) -> bool:
+        """Is this key one of the data's own columns (original name or alias)?"""
+        return bool(ALIAS_RE.match(key)) or key == REDACT_COLUMN or key.lower() in self._names_ci or key in self._names_cs
+
     def row_pairs(self, s: str) -> int:
         """How many different signals appear as 'signal = number' (or 'signal: number') in one string. Signals are
         aliases (S01), [column], or the dataset's original column names."""
@@ -564,7 +580,7 @@ class _Sanitizer:
                 raise _Drop(f"free-text/categorical value under key '{key or '?'}'")
             if numbers and self.cfg.forbid_row_like_structures:
                 n_pairs = self.red.row_pairs(out)
-                if n_pairs >= ROW_TEXT_MIN_SIGNALS:
+                if raw_row_text(n_pairs, out):
                     raise _Drop(f"a raw row written as text ({n_pairs} signal=value pairs)")
             return out
         return node
@@ -616,7 +632,7 @@ class _Sanitizer:
             self.max_series = max(self.max_series, len(node))
             self.numeric += len(node)
             return [self._number(x, None, in_rule) if isinstance(x, float) else x for x in node]
-        if self.cfg.forbid_row_like_structures and _looks_row_like(node):
+        if self.cfg.forbid_row_like_structures and _looks_row_like(node, self.red.is_column):
             raise _Drop(f"row-like structure ({len(node)} records)")
         out: list[Any] = []
         for i, item in enumerate(node):
@@ -633,8 +649,9 @@ class _Sanitizer:
         return c
 
 
-def _looks_row_like(items: list[Any]) -> bool:
-    """A list of >=2 dicts sharing >=5 numeric keys that make up most of their keys, or a numeric matrix."""
+def _looks_row_like(items: list[Any], is_column: Optional[Callable[[str], bool]] = None) -> bool:
+    """A list of >=2 dicts sharing >=5 numeric keys that make up most of their keys, a list of dicts sharing >=3
+    numeric keys named after the data's own columns (narrow tables), or a numeric matrix."""
     if len(items) < 2:
         return False
     if all(isinstance(x, list) and len(x) >= 5 and all(_is_num(v) for v in x) for x in items):
@@ -650,6 +667,8 @@ def _looks_row_like(items: list[Any]) -> bool:
         shared_keys = ks if shared_keys is None else shared_keys & ks
     if not shared_numeric or not shared_keys:
         return False
+    if is_column is not None and sum(1 for k in shared_numeric if is_column(str(k))) >= ROW_LIKE_MIN_COLUMN_FIELDS:
+        return True
     if len(shared_numeric) < 5:
         return False
     has_identity = any(_is_text_key(k) and any(isinstance(d.get(k), str) for d in items) for k in shared_keys)
@@ -751,7 +770,7 @@ def verify_invariant(sanitized: Any, amap: Optional[dict[str, str]], vocab: Opti
             out.append(f"number with more than {digits} significant digits inside a string at {path}")
         if numbers and cfg.forbid_row_like_structures:
             n_pairs = red.row_pairs(s)
-            if n_pairs >= ROW_TEXT_MIN_SIGNALS:
+            if raw_row_text(n_pairs, s):
                 out.append(f"row-like text ({n_pairs} signal=value pairs) at {path}")
 
     def walk(node: Any, key: Optional[str], path: str, in_rule: bool) -> None:
@@ -1053,7 +1072,7 @@ def audit_messages(messages: list[dict[str, Any]], settings: Settings, ws: Any =
         red = _Redactor(cfg, ws_names if _aliasing_on(cfg, settings.active_profile.guard_strict) else {}, data_vocabulary(ws), file_tokens)
         row_texts = 0
         for t in texts:
-            if red.row_pairs(t) >= ROW_TEXT_MIN_SIGNALS:
+            if raw_row_text(red.row_pairs(t), t):
                 row_texts += 1
             red.redact(t)
         counts = {k: int(v) for k, v in red.counts.items() if k in _COUNT_KEYS and v}

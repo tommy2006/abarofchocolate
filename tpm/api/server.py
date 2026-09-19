@@ -1136,6 +1136,19 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         res["count"] = ws.log.count()
         return res
 
+    @app.get("/api/runs/{run_id}/log/completeness")
+    def log_completeness(run_id: str) -> dict[str, Any]:
+        """Is every decision logged? Objects in the run's artifacts vs objects with an entry of their own, and the reason
+        for every gap (review item 21). Read-only, well under a second on the 15 M-row practice run."""
+        ws = state.ws(run_id)
+        fn = _lazy("tpm.log.completeness:audit")
+        if fn is None:
+            return _unavailable("tpm.log.completeness:audit", "The completeness audit is not available in this build.")
+        res = fn(ws)
+        st_fn = _lazy("tpm.log.completeness:completeness_statement")
+        res["statement"] = st_fn(res) if st_fn else ""
+        return _jsonable(res)
+
     @app.get("/api/runs/{run_id}/log/export")
     def export_log(run_id: str) -> FileResponse:
         ws = state.ws(run_id)
@@ -1703,6 +1716,11 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     def get_report_pptx(run_id: str, lang: str = Query("en"), refresh: bool = Query(False)):
         return _report_export(run_id, "pptx", lang, refresh)
 
+    @app.get("/api/runs/{run_id}/summary.pdf")
+    def get_summary_pdf(run_id: str, lang: str = Query("en"), refresh: bool = Query(False)):
+        """One A4 page to share (review item 30): what was found, how sure, what to do next."""
+        return _report_export(run_id, "summary", lang, refresh)
+
     @app.post("/api/runs/{run_id}/report/email")
     @_offload
     async def email_report(run_id: str, request: Request):
@@ -1723,9 +1741,59 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return {"ok": True, "result": _jsonable(res) if res is not None else {}}
 
     # ---------- data flow ----------
-    @app.get("/api/runs/{run_id}/egress")
-    def get_egress(run_id: str) -> dict[str, Any]:
+    def _coverage(ws: Any, lang: str) -> Optional[dict[str, Any]]:
+        """Who wrote the explanations of a run (model or evidence template, and why), in one sentence + details."""
+        try:
+            from ..llm.ledger import coverage_details, coverage_sentence, narrative_coverage
+
+            cov = narrative_coverage(ws, state.settings)
+            if not (cov.get("diagnoses") or {}).get("total"):
+                return None
+            return {"sentence": coverage_sentence(cov, lang), "details": coverage_details(cov, lang)}
+        except Exception:
+            return None
+
+    def _guard_demo_ctx(ws: Any, lang: str) -> Optional[dict[str, Any]]:
+        try:
+            from ..llm.guard_demo import report_context
+
+            return report_context(ws, lang)
+        except Exception:
+            return None
+
+    @app.get("/api/runs/{run_id}/explanations")
+    def get_explanations(run_id: str, lang: str = Query("en")) -> dict[str, Any]:
+        """Diagnoses page: how many explanations a model wrote and why the rest use the evidence template."""
         ws = state.ws(run_id)
+        lang = lang if lang in state.settings.report.languages else state.settings.report.default_language
+        return {"coverage": _coverage(ws, lang)}
+
+    @app.post("/api/runs/{run_id}/guard-demo")
+    def post_guard_demo(run_id: str, body: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Run the egress-guard demonstration on this run's own data (review item 22): a real payload goes through the
+        guard, an operator question naming original headers is cleaned, and a deliberately unsafe payload made of the
+        run's raw rows is blocked. Nothing is sent from here (the CLI has --send); the ledger marks the records demo_*."""
+        ws = state.ws(run_id)
+        body = body or {}
+        lang = str(body.get("lang") or "en")
+        lang = lang if lang in state.settings.report.languages else state.settings.report.default_language
+        fn = _lazy("tpm.llm.guard_demo:run_demo")
+        if fn is None:
+            return _unavailable("tpm.llm.guard_demo:run_demo", "The guard demonstration is not available in this build.")
+        try:
+            res = fn(ws, state.settings, profile=body.get("profile") or None, send=False, language=lang)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(500, f"guard demonstration failed: {e}")
+        actor, role = str(body.get("actor") or "ui")[:60], str(body.get("role") or "operator")[:20]
+        ws.log.record(f"human:{actor}({role})", "guard_demo_requested", "run", run_id, {"profile": res.get("profile"), "unsafe_verdict": (res.get("unsafe") or {}).get("verdict"), "sent": False})
+        return {"ok": True, "guard_demo": _guard_demo_ctx(ws, lang), "unsafe_blocked": (res.get("unsafe") or {}).get("verdict") == "blocked", "headers_leaked": bool((res.get("headers_check") or {}).get("found"))}
+
+    @app.get("/api/runs/{run_id}/egress")
+    def get_egress(run_id: str, lang: str = Query("en")) -> dict[str, Any]:
+        ws = state.ws(run_id)
+        lang = lang if lang in state.settings.report.languages else state.settings.report.default_language
         ledger = ws.read_jsonl("egress_ledger") if ws.exists("egress_ledger") else []
         summary = fallback.ledger_summary(ledger)
         fn = _lazy("tpm.llm.ledger:summary")
@@ -1743,7 +1811,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
                 statement = None
         if not statement:
             statement = fallback.data_flow_statement(state.settings, summary)
-        return {"available": ws.exists("egress_ledger"), "ledger": ledger, "n": len(ledger), "summary": summary, "statement": statement, "profile": state.settings.profile, "allow_external": state.settings.active_profile.allow_external, "guard_strict": state.settings.active_profile.guard_strict, "external_key_configured": bool(state.settings.external_llm.api_key), "local_model": state.settings.local_llm.model, "external_model": state.settings.external_llm.model, "external_base_url": state.settings.external_llm.base_url}
+        return {"available": ws.exists("egress_ledger"), "ledger": ledger, "n": len(ledger), "summary": summary, "statement": statement, "coverage": _coverage(ws, lang), "guard_demo": _guard_demo_ctx(ws, lang), "profile": state.settings.profile, "allow_external": state.settings.active_profile.allow_external, "guard_strict": state.settings.active_profile.guard_strict, "external_key_configured": bool(state.settings.external_llm.api_key), "local_model": state.settings.local_llm.model, "external_model": state.settings.external_llm.model, "external_base_url": state.settings.external_llm.base_url}
 
     @app.get("/api/runs/{run_id}/llm/usage")
     def get_llm_usage(run_id: str) -> dict[str, Any]:

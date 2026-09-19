@@ -38,6 +38,10 @@ export async function render(main, params = {}) {
   page.append(summaryCard('diagnoses'), plain, topHost, tech);
   const view = tech.body;
   await addPlainBox(view, 'diagnoses');
+  // who wrote these explanations (a language model or the evidence template, and why): one line, filled in when it arrives
+  const covLine = el('p', { class: 'small muted' });
+  view.append(covLine);
+  runApi('/explanations', { params: { lang: state.lang } }).then((r) => { if (r.ok && r.data && r.data.coverage && covLine.isConnected) covLine.append(el('b', { text: `${t('flow.coverage')}: ` }), r.data.coverage.sentence); });
   const [dg, fl, pt] = await Promise.all([runApi('/diagnoses'), runApi('/flags', { params: { limit: 5000 } }), runApi('/patterns')]);
   if (!dg.ok || !dg.data.available) { view.append(dg.unavailable ? unavailableNote(dg) : empty(t('diag.none'))); return view; }
   const flags = fl.ok ? fl.data.items || [] : [];

@@ -465,9 +465,12 @@ def watch_folder(ws: Workspace, ctl: dict[str, Any], on_batch: Callable[[Any, st
 
 # --------------------------------------------------------------------------------------- egress
 def ledger_summary(ledger: list[dict[str, Any]]) -> dict[str, Any]:
-    s: dict[str, Any] = {"n": len(ledger), "local": 0, "external": 0, "external_allowed": 0, "external_blocked": 0, "fallback": 0, "bytes_external": 0, "by_task": {}, "models": sorted({r.get("model", "") for r in ledger if r.get("model")}), "last_ts": ledger[-1].get("ts") if ledger else None}
+    s: dict[str, Any] = {"n": len(ledger), "local": 0, "external": 0, "external_allowed": 0, "external_blocked": 0, "fallback": 0, "bytes_external": 0, "demo": 0, "by_task": {}, "models": sorted({r.get("model", "") for r in ledger if r.get("model")}), "last_ts": ledger[-1].get("ts") if ledger else None}
     for r in ledger:
         route = r.get("route")
+        if str(r.get("guard_result") or "") in ("demo_allowed", "demo_blocked"):  # guard demonstration: shown, never sent
+            s["demo"] += 1
+            continue
         if route == "external":
             s["external"] += 1
             if r.get("guard_result") == "allowed" and r.get("ok", True):

@@ -54,7 +54,9 @@ export async function render(main, params = {}) {
   const batchRows = Object.fromEntries(((batches.ok && batches.data.batches) || []).map((b) => [b.batch_id, b]));
   const allChecks = ckAll.ok ? ckAll.data.items || [] : [];
   const isOk = (c) => c.status === 'pass' || /_ok$/.test(c.check_type || '');
-  const problems = allChecks.filter((c) => !isOk(c));
+  // "not testable" (e.g. timeliness without a time column) is its own grey state: never a pass, never a problem
+  const isNT = (c) => c.status === 'not_testable';
+  const problems = allChecks.filter((c) => !isOk(c) && !isNT(c));
   const full = roleAllows('operator');
   const hasIssue = (x) => !x.trusted || (x.reasons || []).length > 0 || (x.local_untrusted || []).length > 0 || (x.untrusted_signals || []).length > 0;
   const verdictOf = (x) => (!x.trusted ? 'untrusted' : hasIssue(x) ? 'caution' : 'trusted');
@@ -63,30 +65,35 @@ export async function render(main, params = {}) {
   const revealTech = () => { const det = page.querySelector('details.tech-details:not(.nested)'); if (det && !det.hidden) det.open = true; };
   /** The checks that ran on one batch, per kind: worst status + count; the *_ok records count as passed. */
   const checksOfBatch = (bid) => {
-    const kinds = new Map(); let passed = 0;
+    const kinds = new Map(); let passed = 0; let untestable = 0;
     for (const c of allChecks) {
       if (c.batch_id !== bid) continue;
       if (isOk(c)) { passed++; continue; }
+      if (isNT(c)) { untestable++; continue; }
       const k = typeKey(c.check_type); const g = kinds.get(k) || { key: k, label: typeWord(c.check_type), status: 'warn', n: 0, category: c.category };
       g.n++; if (c.status === 'fail') g.status = 'fail'; kinds.set(k, g);
     }
-    return { kinds: [...kinds.values()].sort((a, b) => (b.status === 'fail') - (a.status === 'fail') || b.n - a.n), passed };
+    return { kinds: [...kinds.values()].sort((a, b) => (b.status === 'fail') - (a.status === 'fail') || b.n - a.n), passed, untestable };
   };
   const checkChips = (bid) => {
-    const { kinds, passed } = checksOfBatch(bid);
+    const { kinds, passed, untestable } = checksOfBatch(bid);
     return el('div', { class: 'dq-chips' },
       kinds.map((k) => el('span', { class: 'dq-chip ' + k.status, title: `${k.label}: ${k.n} × ${vt('dq.viz.cell.' + k.status)}` }, k.label, k.n > 1 ? el('b', { text: ` ×${k.n}` }) : null)),
       passed ? el('span', { class: 'dq-chip ok' }, tq('dq.checked.passed', { n: passed })) : null,
+      untestable ? el('span', { class: 'dq-chip nt', title: t('dq.notTestableHelp') }, t('dq.checked.notTestable', { n: untestable })) : null,
       !kinds.length && !passed ? el('span', { class: 'dim small', text: t('common.notYet') }) : null);
   };
 
   // ---- banner
   const untrusted = trust.untrusted || [];
   const caution = items.filter((x) => x.trusted && x.reasons && x.reasons.length);
-  const bannerCls = untrusted.length ? '' : caution.length ? 'warn' : 'ok';
+  const runVerdict = trust.summary && trust.summary.verdict;
+  const usableNotClean = !untrusted.length && runVerdict === 'usable_with_problems';
+  const bannerCls = untrusted.length ? '' : caution.length || usableNotClean ? 'warn' : 'ok';
   const sigs = [...new Set(untrusted.flatMap((x) => x.untrusted_signals || []))];
   const capList = (arr, n) => arr.slice(0, n).join(', ') + (arr.length > n ? ` +${arr.length - n}` : '');
-  const bannerText = untrusted.length ? t('dq.bannerFail', { signals: capList(sigs, 8) || '–', batches: capList(untrusted.map((x) => x.batch_id), 8) }) : caution.length ? t('dq.bannerWarn', { n: caution.length }) : t('dq.bannerOk', { n: items.length });
+  const bannerText = untrusted.length ? t('dq.bannerFail', { signals: capList(sigs, 8) || '–', batches: capList(untrusted.map((x) => x.batch_id), 8) }) : caution.length ? t('dq.bannerWarn', { n: caution.length })
+    : usableNotClean ? t('dq.bannerUsable', { fail: fmt.int(trust.summary.n_fail || problems.filter((c) => c.status === 'fail').length), warn: fmt.int(trust.summary.n_warn || problems.filter((c) => c.status === 'warn').length) }) : t('dq.bannerOk', { n: items.length });
   if (tr.ok && tr.data.available) {
     view.append(el('div', { class: 'trust-banner ' + bannerCls, role: 'status' },
       el('div', { class: 'score' }, fmt.pct(trust.overall), el('small', { text: t('dq.trustScore') })),
@@ -229,7 +236,7 @@ export async function render(main, params = {}) {
   const ck = section(t('dq.checks'));
   ck.root.dataset.briefSection = 'checks';
   view.append(ck.root);
-  const fStatus = el('select', {}, [['', t('common.all')], ['fail', t('dq.fail')], ['warn', t('dq.warn')], ['pass', t('dq.pass')]].map(([v, l]) => el('option', { value: v, text: l })));
+  const fStatus = el('select', {}, [['', t('common.all')], ['fail', t('dq.fail')], ['warn', t('dq.warn')], ['pass', t('dq.pass')], ['not_testable', t('dq.not_testable')]].map(([v, l]) => el('option', { value: v, text: l })));
   const fCat = el('select', {}, [['', t('common.all')], ...CATEGORIES.map((c) => [c, c])].map(([v, l]) => el('option', { value: v, text: l })));
   const fSig = el('input', { type: 'text', placeholder: t('common.signal'), style: { width: '90px' } });
   const summary = el('div', { class: 'row' });
@@ -255,7 +262,7 @@ export async function render(main, params = {}) {
     const r = await runApi('/checks', { params: { status: fStatus.value, category: fCat.value, signal: fSig.value.trim(), batch: selBatch, limit: 2000 } });
     clear(tblHost); clear(summary);
     if (!r.ok) { tblHost.append(unavailableNote(r)); return; }
-    for (const [cat, s] of Object.entries(r.data.summary || {})) summary.append(chip(`${cat}: ${s.fail || 0} ${t('dq.fail')}, ${s.warn || 0} ${t('dq.warn')}, ${s.pass || 0} ${t('dq.pass')}`, s.fail ? 'fail' : s.warn ? 'warn' : 'ok'));
+    for (const [cat, s] of Object.entries(r.data.summary || {})) summary.append(chip(`${cat}: ${s.fail || 0} ${t('dq.fail')}, ${s.warn || 0} ${t('dq.warn')}, ${s.pass || 0} ${t('dq.pass')}` + (s.not_testable ? `, ${s.not_testable} ${t('dq.not_testable')}` : ''), s.fail ? 'fail' : s.warn ? 'warn' : s.pass ? 'ok' : ''));
     const rows = r.data.items || [];
     const tbl = table({
       columns: [
@@ -265,6 +272,8 @@ export async function render(main, params = {}) {
         { label: t('dq.type'), render: (c) => (c.check_type || '').replace(/_/g, ' ') },
         { label: t('common.signals'), render: (c) => refChips('signal', c.signals || []) },
         { label: t('common.severity'), render: (c) => el('span', { title: sevWords(c.severity), text: fmt.pct(c.severity) }), num: true },
+        // how sure the check itself is (e.g. a frozen-looking stretch in a slowly sampled signal is less certain)
+        { label: t('dq.checkConfidence'), render: (c) => { const v = c.values || {}; return v.confidence === undefined || v.confidence === null ? '' : el('span', { title: v.confidence_basis || '', text: fmt.pct(v.confidence) }); }, num: true },
         { label: t('dq.statement'), cls: 'wrap', render: (c) => { const tn = techNested(el('span', {}, linkifyRefs(cleanText(c.statement)), c.row_start !== null && c.row_start !== undefined ? el('span', { class: 'dim small', text: ` (${t('common.rows', { a: c.row_start, b: c.row_end })})` }) : null)); tn.classList.add('inline'); tn.addEventListener('click', (e) => e.stopPropagation()); return el('div', {}, el('div', { class: 'ck-plain' }, refLink('check', c.check_id, c.check_id.replace('CHK-', '#')), ' ', el('b', { text: checkPlain(c) })), tn); } },
         { label: t('dq.rule'), render: (c) => (c.rule_id ? refLink('rule', c.rule_id) : '') },
         { label: t('common.evidence'), render: (c) => evidenceButton(c.evidence_ids) },

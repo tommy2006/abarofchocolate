@@ -304,6 +304,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl td.wrap .preview { display: block; max-width: 420px; }
 .tbl tr.st-fail td:first-child { box-shadow: inset 3px 0 0 var(--fail); }
 .tbl tr.st-warn td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.tbl tr.st-not_testable td:first-child { box-shadow: inset 3px 0 0 var(--ink-3); }
 .tbl tr.st-pass td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 0 0; font-size: 12.5px; color: var(--ink-2); }
 
@@ -313,7 +314,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .st.pass::before, .st.ok::before, .st.done::before, .st.trusted::before { background: var(--ok); }
 .st.warn::before, .st.running::before { background: var(--warn); }
 .st.fail::before, .st.failed::before, .st.untrusted::before { background: var(--fail); }
-.st.pending::before, .st.skipped::before { background: transparent; border: 1.5px solid var(--ink-3); }
+.st.pending::before, .st.skipped::before, .st.not_testable::before { background: transparent; border: 1.5px solid var(--ink-3); }
 .st.running::before { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .inf { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12.5px; }

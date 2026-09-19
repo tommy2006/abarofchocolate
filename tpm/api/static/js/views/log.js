@@ -1,6 +1,6 @@
 /* View 6: decision log — filterable hash-chained table, verify chain, export, human decisions audit.
    Object ids and ids inside payloads are links. ?id=FLAG-000001 pre-filters. */
-import { state, t, el, clear, runApi, fmt, chip, section, table, viewHead, needRun, empty, hiddenHint, roleAllows, infStatus, evChips, toast, errText, notice, linkifyRefs, cleanText, refLink } from '../core.js';
+import { state, t, el, clear, runApi, fmt, chip, st, section, table, viewHead, needRun, empty, hiddenHint, roleAllows, infStatus, evChips, toast, errText, notice, linkifyRefs, cleanText, refLink } from '../core.js';
 import { summaryCard, techDetails } from '../brief.js';
 
 const TYPE_OF_OBJECT = { flag: 'flag', diagnosis: 'diagnosis', evidence: 'evidence', check: 'check', inference: 'inference', rule: 'rule', pattern: 'pattern', signal: 'signal', batch: 'batch', trust: 'batch', egress: 'egress' };
@@ -9,6 +9,11 @@ function objectRef(objectType, objectId) {
   const id = String(objectId || '');
   if (type && /^(?:[A-Z]{2,7}-[0-9A-Z]{1,7}|S\d{2,3}|B\d{4,6}|G?\d{1,6})$/.test(id)) return el('span', {}, `${objectType} `, refLink(type, id));
   return el('span', {}, `${objectType} `, linkifyRefs(id));
+}
+
+// is every decision logged? objects in the run's results vs objects with a log entry of their own
+function completenessSentence(d) {
+  return d.complete ? t('log.completeAll', { n: fmt.int(d.n_objects || 0) }) : t('log.completePart', { logged: fmt.int(d.n_logged || 0), n: fmt.int(d.n_objects || 0) });
 }
 
 export async function render(main, params = {}) {
@@ -25,11 +30,29 @@ export async function render(main, params = {}) {
   page.append(summaryCard('log'), verifyOut, tech);
   const view = tech.body;
   view.append(el('p', { class: 'hint', text: t('log.intro') }));
+  const comp = section(t('log.completeness'));
+  view.append(comp.root);
+  runApi('/log/completeness').then((r) => {
+    if (!comp.root.isConnected) return;
+    if (!r.ok) { comp.body.append(notice(errText(r), 'warn')); return; }
+    const d = r.data;
+    comp.body.append(notice(completenessSentence(d), d.complete ? 'ok' : 'warn'));
+    comp.body.append(table({ columns: [
+      { label: t('log.object'), render: (x) => x.label },
+      { label: t('log.inArtifacts'), render: (x) => fmt.int(x.n_artifacts || 0), num: true },
+      { label: t('log.logged'), render: (x) => (x.n_logged === null || x.n_logged === undefined ? '–' : fmt.int(x.n_logged)), num: true },
+      { label: t('log.notLogged'), cls: 'wrap', render: (x) => (x.n_logged === null || x.n_logged === undefined ? el('span', { class: 'small muted', text: x.note || '' })
+        : (x.n_missing ? el('span', {}, chip(fmt.int(x.n_missing), 'warn'), ' ', el('span', { class: 'small muted', text: (x.excluded || []).map((g) => g.reason).join('; ') })) : st('ok', t('log.allLogged')))) },
+    ], rows: d.rows || [] }));
+    comp.body.append(el('p', { class: 'small muted', text: t('log.neverLogged') }));
+  });
   verifyBtn.addEventListener('click', async () => {
     verifyBtn.disabled = true; clear(verifyOut); verifyOut.append(el('span', { class: 'dim', text: t('log.verifying') + '…' }));
     const r = await runApi('/log/verify'); verifyBtn.disabled = false; clear(verifyOut);
     if (!r.ok) { verifyOut.append(notice(errText(r), 'fail')); return; }
     verifyOut.append(notice(r.data.ok ? t('log.ok', { n: r.data.checked }) : t('log.bad', { seq: r.data.first_bad_seq, n: r.data.checked }), r.data.ok ? 'ok' : 'fail'));
+    const c = await runApi('/log/completeness');
+    if (c.ok && verifyOut.isConnected) verifyOut.append(notice(completenessSentence(c.data), c.data.complete ? 'ok' : 'warn'));
   });
 
   const first = await runApi('/log', { params: { limit: 1 } });

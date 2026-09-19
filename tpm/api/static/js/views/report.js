@@ -37,10 +37,10 @@ export async function render(main) {
     const btn = el('button', { class: 'btn', type: 'button', title: t('rep.exportHelp') }, label);
     btn.addEventListener('click', async () => {
       const lang = sel.value;
-      const what = `${kind === 'pdf' ? 'PDF' : 'PowerPoint'} (${lang.toUpperCase()})`;
+      const what = `${kind === 'pdf' ? 'PDF' : kind === 'summary' ? t('rep.summaryWhat') : 'PowerPoint'} (${lang.toUpperCase()})`;
       btn.disabled = true; btn.textContent = t('rep.exportGenerating');
       clear(exportStatus); exportStatus.append(el('span', { class: 'spinner', text: '● ' }), t('rep.exportWorking', { what }));
-      const r = await runApi(`/report.${kind}`, { params: { lang }, raw: true });
+      const r = await runApi(kind === 'summary' ? '/summary.pdf' : `/report.${kind}`, { params: { lang }, raw: true });
       btn.disabled = false; btn.textContent = label;
       if (!view.isConnected) return;
       if (!r.ok || !r.res) {
@@ -53,7 +53,7 @@ export async function render(main) {
       const blob = await r.res.blob();
       const cd = r.res.headers.get('content-disposition') || '';
       const m = cd.match(/filename="?([^";]+)"?/);
-      const name = m ? m[1] : `tpm_${state.run}_${lang}.${kind}`;
+      const name = m ? m[1] : `tpm_${state.run}_${lang}${kind === 'summary' ? '_summary.pdf' : '.' + kind}`;
       const url = URL.createObjectURL(blob);
       const a = el('a', { href: url, download: name, style: { display: 'none' } });
       document.body.append(a); a.click(); a.remove();
@@ -65,6 +65,9 @@ export async function render(main) {
   const fmt_bytes = (n) => (fmt.bytes ? fmt.bytes(n) : `${Math.round(n / 1024)} kB`);
   const pdfBtn = exportBtn('pdf', t('rep.downloadPdf'));
   const pptxBtn = exportBtn('pptx', t('rep.downloadPptx'));
+  // one A4 page to share (what was found, how sure, what to do next): the most useful download, so it comes first
+  const sumBtn = exportBtn('summary', t('rep.downloadSummary'));
+  sumBtn.title = t('rep.summaryHelp');
   const to = el('input', { type: 'email', required: true, placeholder: 'name@example.com', style: { width: '240px', maxWidth: '100%' } });
   const status = el('div', { class: 'stack', style: { gap: '6px', marginBottom: '10px' }, role: 'status', 'aria-live': 'polite' });
   const preview = el('iframe', { title: t('rep.preview'), class: 'report-frame' });
@@ -138,7 +141,7 @@ export async function render(main) {
   // the report itself is what this page is for: open / download sit above the technical part in every mode (in Basic
   // mode they are also where "Open the report" of the summary leads)
   const basic = !roleAllows('operator');
-  page.insertBefore(el('div', { class: 'report-actions', dataset: basic ? { briefSection: 'preview' } : undefined }, el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), openA, dlA, pdfBtn, pptxBtn, basic ? null : regen), exportStatus), tech);
+  page.insertBefore(el('div', { class: 'report-actions', dataset: basic ? { briefSection: 'preview' } : undefined }, el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), sumBtn, openA, dlA, pdfBtn, pptxBtn, basic ? null : regen), exportStatus), tech);
   const em = section(t('rep.email'));
   em.root.dataset.briefSection = 'email';
   view.append(em.root);
