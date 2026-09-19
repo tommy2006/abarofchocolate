@@ -15,6 +15,32 @@ from ..contracts import Diagnosis, Flag, PropagationStep, SignalContribution
 CAUSE_WORDS = {"process": "a process fault", "sensor": "a sensor fault", "data": "a data-quality issue", "mixed": "a mix of process and data problems", "unknown": "an unclassified deviation"}
 
 
+RECORD_WORDS = [
+    ("sensor fault on", "entry problem in column"), ("a sensor fault", "an entry problem in one column"),
+    ("froze at one value", "repeats the same value"), ("is frozen at a constant value", "repeats the same value"),
+    ("an instrument problem", "an entry or export problem in one column"), ("faulty instrument", "faulty entries"),
+    ("inspect the instrument behind", "check how the values of"), ("(wiring, freeze, calibration)", "are entered or exported"),
+    ("a process fault", "a change in the business process"), ("the process itself", "the business process itself"),
+]
+
+
+def is_sensor_data(ws) -> bool:
+    """True unless the profile says the table is clearly not a sensor stream (business records, event logs)."""
+    try:
+        dl = (ws.read_json("domain") or {}).get("domain_likelihood") or {}
+    except Exception:
+        return True
+    return not dl or float(dl.get("sensor_stream", 1.0)) >= 0.4
+
+
+def speak_domain(text: str, sensor: bool) -> str:
+    if sensor or not text:
+        return text
+    for a, b in RECORD_WORDS:
+        text = text.replace(a, b)
+    return text
+
+
 def _fault_type(main: Flag, pattern: Optional[dict[str, Any]], human_labels: list[dict[str, Any]]) -> tuple[str, Optional[str]]:
     """Pattern name if the operator named it, a human-labelled example if one matches (same leading signal
     and the same top-2 set), else a generic name. A human label overrides the code's cause class."""
@@ -161,6 +187,10 @@ def build_diagnosis(ws, diag_id: str, group: str, flags: list[Flag], onset_flag:
             if e not in evidence_ids:
                 evidence_ids.append(e)
     summary = plain_summary(fault_type, group, main, ranked, conf, chain)
+    sensor = is_sensor_data(ws)
+    if not sensor:  # business records / event logs: no sensors, instruments or process units in the wording
+        fault_type, summary = speak_domain(fault_type, False), speak_domain(summary, False)
+        steps = [speak_domain(x, False) for x in steps]
     return Diagnosis(id=diag_id, flag_ids=[f.id for f in flags] + ([onset_flag.id] if onset_flag is not None else []), group_id=group, pattern_id=main.pattern_id, fault_type=fault_type, cause_class=main.likely_cause_class, cause_detail=main.cause_detail, ranked_signals=ranked, propagation=chain, steps=steps, summary=summary, confidence=round(conf, 3), uncertainty=uncertainty, assumptions=assumptions[:8], evidence_ids=evidence_ids, narrative_source="template" if src is None else "human+template")
 
 

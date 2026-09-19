@@ -78,6 +78,12 @@ def structural_role(fp: dict[str, Any], redundancy: Optional[dict[str, Any]] = N
         return "counter", 0.7, "integer-valued, monotone (trend ~1) with tiny constant steps", ["continuous_measured"]
     if integer_valued and n_unique <= 10 and not bounded:
         return "categorical", 0.6, f"integer-coded with only {n_unique} distinct values", ["actuator_like (if the values are set points)"]
+    mean_v = fp.get("mean")
+    narrow = mean_v not in (None, 0) and std is not None and abs(float(std) / float(mean_v)) < 0.1
+    if integer_valued and narrow and n_unique >= 20 and count and n_unique / count <= 0.2 and abs(ac1) < 0.2 and stuck < 0.2:
+        # whole numbers in a narrow band far from zero that repeat in no order: a code (customer, product, operator id),
+        # not a counted quantity (quantities spread widely around their mean)
+        return "categorical", 0.55, f"whole numbers ({n_unique} distinct values) that repeat without any order from one row to the next (autocorrelation {ac1:.2f}): an identifier or category code, not a measurement", ["continuous_measured (a counted quantity)"]
     if stuck >= 0.4:
         strictly_regular = hold >= 2 and hold <= 20 and hold_reg >= 0.9  # every run has (almost) the same length: a sampling cadence
         loosely_regular = hold >= 2 and hold <= 20 and hold_reg >= 0.6 and lv_ac is not None and lv_ac >= 0.5
