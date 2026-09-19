@@ -284,6 +284,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
                     w = state.ws(run_id)
                     st = w.status()
                     st.state = "failed"
+                    st.error = str(job["error"])[:4000]
                     w.set_status(st)
                 except Exception:
                     pass
@@ -551,20 +552,34 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         return _wrap(d or {}, ok)
 
     @app.get("/api/runs/{run_id}/evidence")
-    def get_evidence(run_id: str, ids: str = Query(""), signal: str = Query(""), kind: str = Query(""), limit: int = Query(200, ge=1, le=5000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    def get_evidence(run_id: str, ids: str = Query(""), signal: str = Query(""), kind: str = Query(""), limit: int = Query(200, ge=1, le=5000), offset: int = Query(0, ge=0), lang: str = Query("en")) -> dict[str, Any]:
+        """Evidence with a plain-language sentence (`plain`) on every item. `ids` may name ANY citable object
+        (EV-, DIAG-, FLAG-, CHK-, INF-, RULE-, PATTERN-, EGR-, batch ids): non-evidence objects come back as
+        evidence-like items (kind = diagnosis | flag | check | ..., with their own evidence_ids to drill into)."""
+        from .evidence_plain import resolve_refs, with_plain
+
         ws = state.ws(run_id)
         if ids:
             wanted = [i.strip() for i in ids.split(",") if i.strip()]
-            found = [ws.evidence.get(i) for i in wanted]
-            items = [_jsonable(e) for e in found if e is not None]
-            return {"available": ws.exists("evidence"), "items": items, "n": len(items), "missing": [i for i, e in zip(wanted, found) if e is None]}
+            items, missing = resolve_refs(ws, wanted, lang=lang)
+            return {"available": ws.exists("evidence"), "items": _jsonable(items), "n": len(items), "missing": missing}
         items = ws.evidence.all()
         if signal:
             items = [e for e in items if signal in e.signals]
         if kind:
             items = [e for e in items if e.kind == kind]
         total = len(items)
-        return {"available": ws.exists("evidence"), "items": [_jsonable(e) for e in items[offset: offset + limit]], "n": total, "offset": offset, "limit": limit}
+        return {"available": ws.exists("evidence"), "items": [with_plain(_jsonable(e), lang) for e in items[offset: offset + limit]], "n": total, "offset": offset, "limit": limit}
+
+    @app.get("/api/runs/{run_id}/object/{object_id}")
+    def get_object(run_id: str, object_id: str, lang: str = Query("en")) -> dict[str, Any]:
+        """One citable object of the run (any id prefix) as an evidence-like item with `plain`; 404 when unknown."""
+        from .evidence_plain import resolve_ref
+
+        item = resolve_ref(state.ws(run_id), object_id, lang=lang)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"{object_id} was not found in run {run_id}")
+        return _jsonable(item)
 
     @app.get("/api/runs/{run_id}/inferences")
     def get_inferences(run_id: str, subject: str = Query(""), status: str = Query(""), stage: str = Query(""), ids: str = Query("")) -> dict[str, Any]:
@@ -1277,22 +1292,37 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
 
     # ---------- report ----------
     @app.get("/api/runs/{run_id}/report")
-    def get_report(run_id: str, lang: str = Query("en"), download: bool = Query(False)):
+    def get_report(run_id: str, lang: str = Query("en"), download: bool = Query(False), status: bool = Query(False), embed: bool = Query(False), refresh: bool = Query(False)):
+        """The HTML report in one language. It is cached per language and regenerated when artifacts change; the
+        template report is written first (seconds even for large runs) and never waits for the language model: the
+        model-written summary is added by a worker when it arrives. `status=1` answers JSON ({"llm": "ready" |
+        "pending" | "none", ...}) so the view can show progress; `embed=1` is the in-app preview (no auto-reload)."""
         ws = state.ws(run_id)
         lang = lang if lang in state.settings.report.languages else state.settings.report.default_language
         p = ws.dir / f"report_{lang}.html"
-        if not p.exists():
-            fn = _lazy("tpm.report:run_report")
-            if fn is None:
-                return _unavailable("tpm.report:run_report", f"No report_{lang}.html in this run and the report module is not available.")
+        ensure = _lazy("tpm.report:ensure_report")
+        if ensure is None and not p.exists():
+            return _unavailable("tpm.report:ensure_report", f"No report_{lang}.html in this run and the report module is not available.")
+        st: dict[str, Any] = {"lang": lang, "exists": p.exists(), "llm": "none"}
+        if ensure is not None:
             try:
-                ctx = {"source_path": ws.status().source_path, "options": {"language": lang, "languages": [lang]}, "progress": lambda *a, **k: None, "run_id": run_id}
-                fn(ws, state.settings, ctx)
+                st = ensure(ws, state.settings, lang, force=refresh)
             except Exception as e:
-                raise HTTPException(500, f"report generation failed: {e}")
-            if not p.exists():
-                return _unavailable("tpm.report:run_report", f"report_{lang}.html was not produced.")
-        headers = {"Content-Disposition": f'attachment; filename="{run_id}_report_{lang}.html"'} if download else {}
+                if status:
+                    return JSONResponse({"available": True, "ok": False, "lang": lang, "exists": p.exists(), "llm": "none", "error": f"report generation failed: {e}"}, status_code=200 if p.exists() else 500)
+                if not p.exists():
+                    raise HTTPException(500, f"report generation failed: {e}")
+        if not p.exists():
+            return _unavailable("tpm.report:ensure_report", f"report_{lang}.html was not produced.")
+        if status:
+            return JSONResponse({"available": True, "ok": True, **{k: v for k, v in st.items() if k != "path"}}, headers={"Cache-Control": "no-store"})
+        headers = {"Cache-Control": "no-store", "X-TPM-Report-LLM": str(st.get("llm", "none"))}
+        if download:
+            headers["Content-Disposition"] = f'attachment; filename="{run_id}_report_{lang}.html"'
+        if st.get("llm") == "pending" and not download and not embed:
+            # opened in its own tab while the model summary is still being written: reload until it is there
+            html = p.read_text(encoding="utf-8").replace('<meta charset="utf-8">', '<meta charset="utf-8">\n<meta http-equiv="refresh" content="15">', 1)
+            return HTMLResponse(html, headers=headers)
         return FileResponse(str(p), media_type="text/html", headers=headers)
 
     @app.post("/api/runs/{run_id}/report/email")

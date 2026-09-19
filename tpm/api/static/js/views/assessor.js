@@ -17,6 +17,30 @@ function actionLabel(a) {
   const parts = Object.entries(p).filter(([, v]) => v !== null && v !== undefined && v !== '').map(([kk, v]) => `${kk} ${typeof v === 'object' ? JSON.stringify(v) : v}`);
   return parts.length ? `${base} (${parts.join(', ')})` : base;
 }
+/* The verdict word (Yes / No / Unclear) is shown once, as the headline of a card, the chip of an evaluation or
+   the lead of a chat answer. The generated reasons used to repeat it ("Yes" + "Yes: 5 duplicate rows ...",
+   "Removing bad data helps: Yes: ..."); reason() returns the reason as a sentence of its own. */
+const LEAD_RE = /^\s*(?:yes|no|unclear|uncertain|kyllä|ei|epäselvä|ja|nej|oklart)\s*[:.,;!–—-]\s*/i;
+const ECHO_RE = /^\s*(?:removing bad data helps|adding more data helps|more data helps|less data helps)\s*[:.]\s*/i;
+const MID_RE = /([:.;]\s+)(?:yes|no|unclear|uncertain|kyllä|ei|epäselvä|ja|nej|oklart)\s*:\s*(\S)/gi;
+const capFirst = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+export function reason(text) {
+  let s = cleanText(text || '').replace(ECHO_RE, '');
+  for (let prev = null; prev !== s;) { prev = s; s = s.replace(LEAD_RE, ''); }
+  s = s.replace(MID_RE, (m, sep, ch) => sep + (sep.trim() === '.' ? ch.toUpperCase() : ch));
+  return capFirst(s.trim());
+}
+/** Chat answers keep one lead word: "Yes. Yes: 5 rows ..." -> "Yes. 5 rows ...". */
+export function singleLead(text) {
+  const s = cleanText(text || '');
+  const m = s.match(LEAD_RE);
+  if (!m) return s;
+  const rest = reason(s.slice(m[0].length));
+  return rest ? m[0].trim().replace(/[:,;!–—-]$/, '.') + ' ' + rest : s;
+}
+/** The summary line repeats both verdicts ("More data: yes. Less data: yes."); the cards above already say it. */
+function summaryWithoutVerdicts(text) { return cleanText(text || '').replace(/\b(?:More|Less) data:\s*(?:yes|no|unclear)\.\s*/gi, '').trim(); }
+
 /** One view-model for the real assessor.json and the older fixture shape. */
 function normalize(a) {
   const fit = a.fitness || {}; const cov = a.coverage || {}; const dq = a.dq_scores || {};
@@ -34,7 +58,7 @@ function normalize(a) {
   const wmd = a.would_more_data_help;
   const more = a.more_data_verdict ? { ...a.more_data_verdict, metric: primary } : wmd ? { would_help: /^y/i.test(wmd.answer || '') ? true : /^n/i.test(wmd.answer || '') ? false : null, why: wmd.explanation, estimated_gain: wmd.expected_gain, evidence_ids: wmd.evidence_ids || [], confidence: wmd.confidence, metric: primary } : null;
   const less = a.less_data_verdict ? { ...a.less_data_verdict, metric: 'overall' } : null;
-  const recs = (a.recommendations || []).map((r) => ({ id: r.id, text: cleanText(r.text || r.rationale || ''), rationale: r.text ? cleanText(r.rationale || '') : '', action: r.action, actionLabel: actionLabel(r.action), effect: r.expected_effect || null, gain: r.expected_gain, confidence: r.confidence, evidence_ids: r.evidence_ids || [], status: r.status, applicable: r.applicable }));
+  const recs = (a.recommendations || []).map((r) => ({ id: r.id, text: reason(r.text || r.rationale || ''), rationale: r.text ? reason(r.rationale || '') : '', action: r.action, actionLabel: actionLabel(r.action), effect: r.expected_effect || null, gain: r.expected_gain, confidence: r.confidence, evidence_ids: r.evidence_ids || [], status: r.status, applicable: r.applicable }));
   return { score, components, curve, fit, primary, regimes, thin, cov, dq, dqCats, more, less, recs, summary: a.summary || a.verdict || '', experiments: a.experiments || [], evaluations: a.evaluations || [], hasReal };
 }
 function verdictCard(title, v, { gainLabel } = {}) {
@@ -42,7 +66,8 @@ function verdictCard(title, v, { gainLabel } = {}) {
   if (!v) { box.append(empty(t('common.notYet'))); return box; }
   const yes = v.would_help === true ? 'yes' : v.would_help === false ? 'no' : 'unclear';
   box.append(el('div', { class: 'row' }, el('span', { class: 'answer ' + yes, text: t('ass.answer.' + yes) }), v.estimated_gain !== undefined && v.estimated_gain !== null ? chip(`${gainLabel || t('ass.expectedGain')} ${fmt.pp(v.estimated_gain)}`, v.estimated_gain > 0 ? 'ok' : '', { title: t('ass.gainHelp', { n: (Number(v.estimated_gain) * 100).toFixed(1), metric: metricName(v.metric) }) }) : null, v.confidence !== undefined && v.confidence !== null ? conf(v.confidence, { words: true }) : null));
-  if (v.why) box.append(el('p', { class: 'prose' }, linkifyRefs(cleanText(v.why))));
+  const why = reason(v.why);
+  if (why) box.append(el('p', { class: 'prose' }, linkifyRefs(why)));
   if (v.estimated_gain !== undefined && v.estimated_gain !== null) box.append(el('p', { class: 'small muted', text: t('ass.gainHelp', { n: (Number(v.estimated_gain) * 100).toFixed(1), metric: metricName(v.metric) }) }));
   if ((v.evidence_ids || []).length) box.append(el('div', { class: 'row small' }, el('span', { class: 'dim', text: t('common.evidence') + ':' }), evChips(v.evidence_ids)));
   return box;
@@ -82,7 +107,8 @@ export async function render(main) {
     scoreBox.append(el('p', { class: 'small muted', text: t('ass.compHelp') }));
   } else scoreBox.append(empty(t('common.notYet')));
   head.append(scoreBox);
-  if (a.summary) view.append(el('div', { class: 'statement', style: { marginTop: '16px' } }, linkifyRefs(cleanText(a.summary))));
+  const summary = a.more || a.less ? summaryWithoutVerdicts(a.summary) : cleanText(a.summary);
+  if (summary) view.append(el('div', { class: 'statement', style: { marginTop: '16px' } }, linkifyRefs(summary)));
 
   // ---- charts
   const cs = section(t('ass.charts'));
@@ -140,7 +166,7 @@ export async function render(main) {
       el('div', { class: 'decisions' }, rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', disabled: rec.status === 'approved' || rec.status === 'applied', onClick: async () => { if (!(await confirmDialog(t('ass.applyConfirm', { action: rec.actionLabel })))) return; const rr = await runApi('/assessor/apply', { method: 'POST', body: { action: rec.id, actor_name: actorName(), role: actorRole() } }); if (rr.ok) { rec.status = 'approved'; setStatus(); toast(t('decision.recorded', { seq: rr.data.log_seq }), 'ok'); } else toast(errText(rr), 'fail'); } }, t('ass.applyAfterApproval'))));
     rs.body.append(row);
   }
-  if (roleAllows('engineer') && a.evaluations.length) rs.body.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('ass.evaluations') }), el('ul', { class: 'list small prose' }, a.evaluations.map((e) => el('li', {}, chip(e.recommendation || '', e.recommendation === 'recommend' ? 'ok' : e.recommendation === 'reject' ? 'fail' : ''), ' ', el('b', { text: actionLabel(e.action) }), ': ', linkifyRefs(cleanText(e.rationale || '')), e.seconds ? el('span', { class: 'dim', text: ` (${fmt.sec(e.seconds)})` }) : null))));
+  if (roleAllows('engineer') && a.evaluations.length) rs.body.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('ass.evaluations') }), el('ul', { class: 'list small prose' }, a.evaluations.map((e) => el('li', {}, chip(e.recommendation || '', e.recommendation === 'recommend' ? 'ok' : e.recommendation === 'reject' ? 'fail' : ''), ' ', el('b', { text: actionLabel(e.action) }), ': ', linkifyRefs(reason(e.rationale || '')), e.seconds ? el('span', { class: 'dim', text: ` (${fmt.sec(e.seconds)})` }) : null))));
   if (roleAllows('engineer') && a.experiments.length) rs.body.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('ass.experiments') }), el('ul', { class: 'list small' }, a.experiments.map((e) => el('li', {}, linkifyRefs(`${e.id}: ${e.question} — ${e.result} (${fmt.sec(e.seconds)})`)))));
 
   // ---- question box (chat with the assessor)
@@ -158,7 +184,7 @@ export async function render(main) {
     busy.remove();
     if (rr.ok && rr.data.answer) {
       const x = rr.data.answer;
-      const m = el('div', { class: 'msg assistant' }, linkifyRefs(cleanText(x.text || '')));
+      const m = el('div', { class: 'msg assistant' }, linkifyRefs(singleLead(x.text || '')));
       m.append(el('span', { class: 'src', text: !x.source || x.source === 'template' ? t('chat.source.template') : x.source.startsWith('llm-external') ? `${t('chat.source.external')} ${x.model || ''}` : `${t('chat.source.local')} ${x.model || x.source.split(':')[1] || ''}` }), (x.evidence_ids || []).length ? evChips(x.evidence_ids) : null);
       ans.prepend(m);
       if ((x.followups || []).length) ans.prepend(el('div', { class: 'row' }, x.followups.slice(0, 4).map((f) => el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => ask(f) }, f))));

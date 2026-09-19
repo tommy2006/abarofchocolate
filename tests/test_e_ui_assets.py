@@ -32,8 +32,16 @@ def test_node_check(path: Path):
     node = shutil.which("node")
     if not node:
         pytest.skip("node is not installed")
-    r = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr or r.stdout
+    # The frontend files are ES modules. `node --check file.js` parses them as scripts and accepts some broken
+    # modules (a string literal split over lines once blanked the whole UI and still exited 0), so check a copy
+    # with the .mjs extension, which forces a strict module parse.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        mjs = Path(td) / (path.stem + ".mjs")
+        mjs.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        r = subprocess.run([node, "--check", str(mjs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"{path.name}: {r.stderr or r.stdout}"
 
 
 def _load(lang: str) -> dict[str, str]:

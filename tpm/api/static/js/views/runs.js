@@ -126,12 +126,7 @@ export async function render(main) {
       el('div', { class: 'budget' }, el('span', { text: `${t('common.elapsed')} ${fmt.sec(elapsed)}` }), el('span', { class: 'bar' }, el('i', { style: { width: Math.min(100, elapsed / budget * 100) + '%', background: elapsed > budget ? 'var(--fail)' : '' } })), el('span', { text: `${t('common.timeBudget')} ${fmt.sec(budget)}` })));
     // the job error lives in memory only until the server restarts; status.error is the persisted copy
     const runError = (s.job && s.job.error) || s.error || (s.status && s.status.error);
-    if (runError) progress.body.append(el('pre', { class: 'notice fail small', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' }, text: String(runError).split('
-')[0] + '
-
-' + String(runError).split('
-').slice(1).join('
-') }));
+    if (runError) progress.body.append(el('pre', { class: 'notice fail small', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' }, text: String(runError) }));
   };
 
   const renderStream = async () => {

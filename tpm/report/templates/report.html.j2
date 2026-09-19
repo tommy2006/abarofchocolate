@@ -3,13 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{% if report_meta %}<meta name="tpm-report" content="{{ report_meta }}">
+{% endif %}
 <title>{{ t('title') }} — {{ run_id }}</title>
 <style>
 :root { --ink:#1f2937; --muted:#6b7280; --grid:#e5e7eb; --primary:#1a4d8f; --soft:#eef4fb; --pass:#2e7d32; --warn:#ed6c02; --fail:#c62828; --box:#f9fafb; }
 * { box-sizing: border-box; }
 html { font-size: 15px; }
 body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--ink); background:#fff; line-height:1.45; }
-.page { max-width: 1080px; margin: 0 auto; padding: 24px 28px 60px; }
+.page { max-width: 1080px; margin: 0 auto; padding: 24px 28px 60px; overflow-wrap: break-word; }
 header.top { border-bottom: 3px solid var(--primary); padding-bottom: 12px; margin-bottom: 18px; }
 header.top h1 { margin: 0 0 4px; font-size: 1.7rem; color: var(--primary); }
 header.top .sub { color: var(--muted); margin: 0 0 8px; }
@@ -23,16 +25,24 @@ h3 { font-size: 1.05rem; margin: 18px 0 6px; }
 h4 { font-size: .98rem; margin: 12px 0 4px; }
 p.intro { color: #374151; margin: 4px 0 12px; }
 p.na { color: var(--muted); font-style: italic; background: var(--box); border-left: 3px solid var(--grid); padding: 6px 10px; }
-table { border-collapse: collapse; width: 100%; font-size: .88rem; margin: 6px 0 12px; }
-th, td { border: 1px solid var(--grid); padding: 4px 7px; vertical-align: top; text-align: left; }
+table { border-collapse: collapse; width: 100%; max-width: 100%; font-size: .88rem; margin: 6px 0 12px; }
+/* overflow-wrap:anywhere lets a cell shrink below its longest token, so no table can be wider than the page */
+th, td { border: 1px solid var(--grid); padding: 4px 7px; vertical-align: top; text-align: left; overflow-wrap: anywhere; word-break: normal; }
+th { hyphens: auto; }
+td.id, td.conf, .badge { white-space: nowrap; overflow-wrap: normal; }
+table.fixed { table-layout: fixed; }
+table.fixed td.id, table.fixed td.conf { white-space: normal; overflow-wrap: anywhere; }
+thead { display: table-header-group; }
 th { background: var(--box); font-weight: 600; }
 tr:nth-child(even) td { background: #fcfcfd; }
 .badge { display:inline-block; color:#fff; border-radius: 10px; padding: 0 8px; font-size: .78rem; line-height: 1.5; }
 .b-pass { background: var(--pass); } .b-warn { background: var(--warn); } .b-fail { background: var(--fail); } .b-muted { background: var(--muted); } .b-primary { background: var(--primary); } .b-ext { background:#7b1fa2; }
 .card { border: 1px solid var(--grid); border-radius: 8px; padding: 10px 14px; margin: 10px 0; background: #fff; page-break-inside: avoid; }
 .card h4 { margin-top: 4px; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; }
-.kv { display:grid; grid-template-columns: max-content 1fr; gap: 2px 14px; font-size: .9rem; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 20px; }
+.grid2 > * { min-width: 0; }
+.kv { display:grid; grid-template-columns: fit-content(45%) minmax(0, 1fr); gap: 2px 14px; font-size: .9rem; }
+.kv > div { overflow-wrap: anywhere; min-width: 0; }
 .kv div:nth-child(odd) { color: var(--muted); }
 ul.tight { margin: 4px 0 6px 18px; padding: 0; } ul.tight li { margin: 2px 0; }
 ol.steps li { margin: 4px 0; }
@@ -41,7 +51,16 @@ ol.steps li { margin: 4px 0; }
 .overview li { margin: 4px 0; }
 .spark { display:block; height: 96px; margin: 4px 0 10px; }
 .timeline-card { border: 1px solid var(--grid); border-radius: 6px; padding: 4px 8px; margin: 6px 0; page-break-inside: avoid; }
-.llm { background: #fffbeb; border: 1px dashed var(--warn); border-radius: 8px; padding: 10px 14px; white-space: pre-wrap; }
+.llm { background: #fffbeb; border: 1px dashed var(--warn); border-radius: 8px; padding: 10px 16px; max-width: 100%; }
+.llm p { margin: 6px 0; max-width: 78ch; }
+.llm p.lead { font-size: 1.04rem; }
+.llm h4 { margin: 12px 0 2px; color: var(--primary); }
+.llm .refs a, a.ref { color: var(--primary); text-decoration: none; }
+.llm .by { margin: 0 0 6px; }
+.tech { display: block; color: var(--muted); font-size: .8rem; }
+.plain { display: block; font-size: .86rem; margin-top: 3px; }
+.det { border-bottom: 1px dotted var(--muted); cursor: help; }
+svg { max-width: 100%; }
 .stmt { background: var(--soft); border-left: 4px solid var(--primary); padding: 8px 12px; margin: 8px 0; }
 .conf { font-variant-numeric: tabular-nums; }
 footer { margin-top: 40px; border-top: 1px solid var(--grid); padding-top: 10px; font-size: .82rem; color: var(--muted); }
@@ -52,7 +71,9 @@ details summary { cursor: pointer; color: var(--primary); }
   nav.toc { display:none; }
   section { page-break-before: always; }
   section.first { page-break-before: auto; }
-  .card, table, .timeline-card { page-break-inside: avoid; }
+  .card, .timeline-card, tr, .llm h4 { page-break-inside: avoid; }
+  .det { border-bottom: 0; }
+  a { color: inherit; text-decoration: none; }
   details { display:block; } details summary { display:none; }
 }
 </style>
@@ -88,9 +109,25 @@ details summary { cursor: pointer; color: var(--primary); }
   {% for s in overview %}<li>{{ s }}</li>{% endfor %}
   </ul>
   {% if llm %}
-  <h3>{{ t('section_llm') }}</h3>
-  <p class="small">{{ t('llm_label', source=llm.source) }}</p>
-  <div class="llm">{{ llm.text }}</div>
+  <h3 id="model-summary">{{ t('section_llm') }}</h3>
+  <div class="llm">
+    <p class="small by">{{ t('llm_label', source=llm.source) }}</p>
+    {% for p in llm.summary %}<p class="lead">{{ p }}</p>
+    {% endfor %}
+    {% for s in llm.sections %}
+    {% if s.heading %}<h4>{{ s.heading }}</h4>{% endif %}
+    {% for p in s.paragraphs %}<p>{{ p }}</p>
+    {% endfor %}
+    {% if s.refs %}<p class="small refs">{{ t('llm_refs') }}: {% for r in s.refs %}{% if r.anchor %}<a class="mono" href="#{{ r.id }}">{{ r.id }}</a>{% else %}<span class="mono">{{ r.id }}</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+    {% endfor %}
+    {% if llm.uncertainty %}
+    <h4>{{ t('llm_uncertainty') }}</h4>
+    {% if llm.uncertainty|length == 1 %}<p>{{ llm.uncertainty[0] }}</p>{% else %}<ul class="tight">{% for u in llm.uncertainty %}<li>{{ u }}</li>{% endfor %}</ul>{% endif %}
+    {% endif %}
+    <p class="small">{{ t('llm_source_line', source=llm.source) }}{% if llm.generated_at %} · {{ llm.generated_at }}{% endif %}{% if llm.confidence is not none %} · {{ t('llm_confidence') }}: {{ llm.confidence|pct }}{% endif %}{% if llm.truncated %} · {{ t('llm_truncated') }}{% endif %}</p>
+  </div>
+  {% elif llm_state == 'pending' %}
+  <p class="small" id="model-summary">{{ t('llm_pending') }}</p>
   {% else %}
   <p class="small">{{ t('llm_not_used') }}</p>
   {% endif %}
@@ -111,7 +148,7 @@ details summary { cursor: pointer; color: var(--primary); }
   {% if dataset %}
   <div class="grid2">
     <div class="kv">
-      <div>{{ t('rows') }}</div><div>{{ '{:,}'.format(dataset.n_rows|int) }}</div>
+      <div>{{ t('rows') }}</div><div>{{ dataset.n_rows|thousands(lang) }}</div>
       <div>{{ t('columns') }}</div><div>{{ dataset.n_cols }}</div>
       <div>{{ t('format') }}</div><div>{{ dataset.format }}{% if dataset.delimiter %} ({{ dataset.delimiter|e }}){% endif %}{% if dataset.transposed %}, transposed{% endif %}</div>
       <div>{{ t('s1_time_column') }}</div><div>{{ dataset.time_column or t('none') }}</div>
@@ -167,7 +204,7 @@ details summary { cursor: pointer; color: var(--primary); }
         <ul class="tight">{% for h in s.hypotheses %}<li>{{ h.claim }} <span class="small conf">[{{ h.status }}, {{ h.confidence|pct }}, {{ h.source }}{% if h.human_status %}, {{ t('human_status')|lower }}: {{ h.human_status }}{% endif %}]</span></li>{% endfor %}</ul>
         {% endif %}
         <b>{{ t('evidence_statements') }}</b>
-        {% if s.evidence %}<ul class="tight">{% for e in s.evidence %}<li>{{ e }}</li>{% endfor %}</ul>{% else %}<p class="na">{{ t('not_available') }}</p>{% endif %}
+        {% if s.evidence %}<ul class="tight">{% for e in s.evidence %}<li>{% if e.plain %}{{ e.plain }}<span class="tech">{{ e.technical }}{% if e.id %} <span class="mono">[{{ e.id }}]</span>{% endif %}</span>{% else %}{{ e.technical }}{% if e.id %} <span class="small mono">[{{ e.id }}]</span>{% endif %}{% endif %}</li>{% endfor %}</ul>{% else %}<p class="na">{{ t('not_available') }}</p>{% endif %}
         <b>{{ t('uncertain') }}</b>
         <ul class="tight">{% for u in s.uncertain %}<li>{{ u }}</li>{% endfor %}</ul>
       </div>
@@ -190,9 +227,9 @@ details summary { cursor: pointer; color: var(--primary); }
   <h3>{{ t('s2_failed_checks') }}</h3>
   {% if quality.failed %}
   <table>
-    <tr><th>{{ t('id') }}</th><th>{{ t('status') }}</th><th>{{ t('category') }}</th><th>{{ t('check_type') }}</th><th>{{ t('signals') }}</th><th>{{ t('batch') }}</th><th>{{ t('row_range') }}</th><th>{{ t('severity') }}</th><th>{{ t('message') }}</th><th>{{ t('traceability') }}</th></tr>
+    <thead><tr><th>{{ t('id') }}</th><th>{{ t('status') }}</th><th>{{ t('category') }}</th><th>{{ t('check_type') }}</th><th>{{ t('signals') }}</th><th>{{ t('batch') }}</th><th>{{ t('row_range') }}</th><th>{{ t('severity') }}</th><th>{{ t('message') }}</th><th>{{ t('traceability') }}</th></tr></thead>
     {% for c in quality.failed %}
-    <tr><td class="mono">{{ c.check_id }}</td><td><span class="badge b-{{ c.status }}">{{ t.status(c.status) }}</span></td><td>{{ t.cat(c.category) }}</td><td>{{ c.check_type }}</td><td class="mono">{{ (c.signals or [])|join(', ') }}</td><td class="mono">{{ c.batch_id }}</td><td class="conf">{% if c.row_start is not none %}{{ c.row_start }}–{{ c.row_end }}{% endif %}</td><td class="conf">{{ c.severity|num }}</td><td>{{ c.statement }}</td><td class="mono">{{ c.rule_id or '' }} {{ (c.evidence_ids or [])|join(', ') }}</td></tr>
+    <tr><td class="mono id">{{ c.check_id }}</td><td><span class="badge b-{{ c.status }}">{{ t.status(c.status) }}</span></td><td>{{ t.cat(c.category) }}</td><td>{{ c.check_type }}</td><td class="mono">{{ (c.signals or [])|join(', ') }}</td><td class="mono">{{ c.batch_id }}</td><td class="conf">{% if c.row_start is not none %}{{ c.row_start }}–{{ c.row_end }}{% endif %}</td><td class="conf">{{ c.severity|num }}</td><td>{{ c.statement }}</td><td class="mono">{{ c.rule_id or '' }} {{ (c.evidence_ids or [])|join(', ') }}</td></tr>
     {% endfor %}
   </table>
   {% if quality.n_failed_total > quality.failed|length %}<p class="small">{{ t('more', n=quality.n_failed_total - quality.failed|length) }}</p>{% endif %}
@@ -206,7 +243,7 @@ details summary { cursor: pointer; color: var(--primary); }
   <table>
     <tr><th>{{ t('id') }}</th><th>{{ t('rule_text') }}</th><th>{{ t('rule_status') }}</th><th>{{ t('compiled_check') }}</th><th>{{ t('compile_source') }}</th><th>{{ t('confidence') }}</th><th>{{ t('count') }}</th></tr>
     {% for r in quality.rules %}
-    <tr><td class="mono">{{ r.id }}</td><td>{{ r.text }}{% if r.explanation %} <span class="small">— {{ r.explanation }}</span>{% endif %}</td><td>{{ r.status }}</td><td class="mono">{{ r.compiled or t('na_short') }}</td><td>{{ r.compile_source }}</td><td class="conf">{{ r.compile_confidence|pct }}</td><td class="conf">{{ r.n_checks }}</td></tr>
+    <tr><td class="mono">{{ r.id }}</td><td>{{ r.text }}{% if r.explanation_text %} <span class="small">— {{ r.explanation_text }}</span>{% endif %}</td><td>{{ r.status }}</td><td class="mono">{{ r.compiled or t('na_short') }}</td><td>{{ r.compile_source }}</td><td class="conf">{{ r.compile_confidence|pct }}</td><td class="conf">{{ r.n_checks }}</td></tr>
     {% endfor %}
   </table>
   {% else %}<p class="na">{{ t('s2_no_rules') }}</p>{% endif %}
@@ -215,12 +252,13 @@ details summary { cursor: pointer; color: var(--primary); }
   <p class="small">{{ t('s2_trust_note', threshold=quality.threshold) }}</p>
   {% if quality.trust %}
   {% if quality.untrusted %}
-  <h4>{{ t('s2_untrusted_batches') }} ({{ quality.untrusted|length }})</h4>
+  <h4>{{ t('s2_untrusted_batches') }} ({{ quality.n_untrusted_total }})</h4>
+  {% if quality.n_untrusted_total > quality.untrusted|length %}<p class="small">{{ t('capped_untrusted', shown=quality.untrusted|length, total=quality.n_untrusted_total) }}</p>{% endif %}
   <table><tr><th>{{ t('batch') }}</th><th>{{ t('trust_score') }}</th><th>{{ t('untrusted_signals') }}</th><th>{{ t('reasons') }}</th></tr>
   {% for x in quality.untrusted %}<tr><td class="mono">{{ x.batch_id }}</td><td class="conf"><span class="badge b-fail">{{ x.trust_score|num }}</span></td><td class="mono">{{ (x.untrusted_signals or [])|join(', ') }}</td><td>{{ (x.reasons or [])|join('; ') }} {{ x.statement }}</td></tr>{% endfor %}
   </table>
   {% else %}<p class="na">{{ t('s2_no_untrusted') }}</p>{% endif %}
-  <details><summary>{{ t('s2_trust') }} — {{ quality.trust|length }} {{ t('batches') }}</summary>
+  <details><summary>{{ t('s2_trust') }} — {{ quality.trust|length }}{% if quality.n_trust_total > quality.trust|length %} / {{ quality.n_trust_total }}{% endif %} {{ t('batches') }}</summary>
   <table><tr><th>{{ t('batch') }}</th><th>{{ t('status') }}</th><th>{{ t('trust_score') }}</th><th>{{ t('untrusted_signals') }}</th><th>{{ t('message') }}</th></tr>
   {% for x in quality.trust %}<tr><td class="mono">{{ x.batch_id }}</td><td><span class="badge {{ 'b-pass' if x.trusted else 'b-fail' }}">{{ t('trusted') if x.trusted else t('untrusted') }}</span></td><td class="conf">{{ x.trust_score|num }}</td><td class="mono">{{ (x.untrusted_signals or [])|join(', ') }}</td><td>{{ x.statement }}</td></tr>{% endfor %}
   </table></details>
@@ -255,15 +293,20 @@ details summary { cursor: pointer; color: var(--primary); }
   {% if detect.timelines.n_groups > detect.timelines.shown %}<p class="small">{{ t('more', n=detect.timelines.n_groups - detect.timelines.shown) }}</p>{% endif %}
   {% else %}<p class="na">{{ t('s3_no_scores') }}</p>{% endif %}
 
-  <h3>{{ t('s3_flags') }} ({{ detect.n_flags }})</h3>
+  <h3>{{ t('s3_flags') }} ({{ detect.n_flags|thousands(lang) }})</h3>
   {% if detect.flags %}
-  <table>
-    <tr><th>{{ t('id') }}</th><th>{{ t('kind') }}</th><th>{{ t('group') }}</th><th>{{ t('batch') }}</th><th>{{ t('row_range') }}</th><th>{{ t('score') }} / {{ t('threshold') }}</th><th>{{ t('severity') }}</th><th>{{ t('responsible_signals') }}</th><th>{{ t('cause_class') }}</th><th>{{ t('confidence') }}</th><th>{{ t('detector') }}</th><th>{{ t('message') }}</th><th>{{ t('human_status') }}</th></tr>
+  {% if detect.n_flags > detect.flags|length %}<p class="stmt small">{{ t('capped_flags', shown=detect.flags|length, total=detect.n_flags|thousands(lang)) }}</p>{% endif %}
+  {% if detect.flags_by_kind %}<p class="small">{{ t('kind') }}: {% for k, n in detect.flags_by_kind %}{{ k }} {{ n|thousands(lang) }}{% if not loop.last %} · {% endif %}{% endfor %}{% if detect.flags_by_cause %} — {{ t('cause_class') }}: {% for k, n in detect.flags_by_cause %}{{ k }} {{ n|thousands(lang) }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}</p>{% endif %}
+  <table class="fixed flags">
+    <colgroup><col style="width:11%"><col style="width:9%"><col style="width:11%"><col style="width:10%"><col style="width:15%"><col style="width:11%"><col style="width:33%"></colgroup>
+    <thead><tr><th>{{ t('id') }}</th><th>{{ t('kind') }}</th><th>{{ t('group') }} / {{ t('batch') }} / {{ t('row_range') }}</th><th>{{ t('score') }} / {{ t('threshold') }}<br>{{ t('severity') }}</th><th>{{ t('responsible_signals') }}</th><th>{{ t('cause_class') }}<br>{{ t('confidence') }}</th><th>{{ t('message') }}</th></tr></thead>
+    <tbody>
     {% for f in detect.flags %}
-    <tr><td class="mono">{{ f.id }}{% if f.pattern_id %}<br><span class="small">{{ f.pattern_id }}</span>{% endif %}</td><td>{{ f.kind_label }}</td><td class="mono">{{ f.group_id or '' }}</td><td class="mono">{{ f.batch_id or '' }}</td><td class="conf">{{ f.row_start }}–{{ f.row_end }}</td><td class="conf">{{ f.score|num }}{% if f.threshold is not none %} / {{ f.threshold|num }}{% endif %}</td><td class="conf">{{ f.severity|num }}</td><td class="mono">{{ f.signals|join('<br>')|safe }}</td><td>{{ f.cause_label }}</td><td class="conf">{{ f.confidence|pct }}</td><td class="small">{{ f.detector }}</td><td>{{ f.statement }}{% for e in f.ev %}<br><span class="small">{{ e }}</span>{% endfor %}</td><td>{{ f.human_status or '' }}{% if f.human_note %}<br><span class="small">{{ f.human_note }}</span>{% endif %}</td></tr>
+    <tr id="{{ f.id }}"><td class="mono id">{{ f.id }}{% if f.pattern_id %}<br><span class="small">{{ f.pattern_id }}</span>{% endif %}{% if f.human_status %}<br><span class="badge b-primary">{{ f.human_status }}</span>{% endif %}</td><td>{{ f.kind_label }}</td><td class="mono small">{{ f.group_id or '' }}{% if f.batch_id %}<br>{{ f.batch_id }}{% endif %}<br>{{ f.row_start }}–{{ f.row_end }}</td><td class="conf">{{ f.score|num }}{% if f.threshold is not none %} / {{ f.threshold|num }}{% endif %}<br><span class="small">{{ t('severity')|lower }} {{ f.severity|num }}</span></td><td class="mono small">{{ f.signals|join('<br>')|safe }}</td><td>{{ f.cause_label }}<br><span class="conf small">{{ f.confidence|pct }}</span></td><td>{{ f.statement }}{% for e in f.ev %}{% if e.plain %}<span class="plain">{{ e.plain }}</span>{% endif %}<span class="tech">{{ e.technical }}</span>{% endfor %}{% if f.det.short %}<span class="tech">{{ t('detector') }}: <span class="det" title="{{ f.det.full }}">{{ f.det.short }}</span></span>{% endif %}{% if f.human_note %}<span class="tech">{{ t('note') }}: {{ f.human_note }}</span>{% endif %}</td></tr>
     {% endfor %}
+    </tbody>
   </table>
-  {% if detect.n_flags > detect.flags|length %}<p class="small">{{ t('more', n=detect.n_flags - detect.flags|length) }}</p>{% endif %}
+  {% if detect.detector_legend %}<p class="small">{{ t('detector_legend') }}: {% for d in detect.detector_legend %}<b>{{ d.short }}</b> = {{ d.family }}{% if d.parts %}: {{ d.parts|join(', ') }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
   {% else %}<p class="na">{{ t('s3_no_flags') }}</p>{% endif %}
 
   <h3>{{ t('s3_patterns') }}</h3>
@@ -279,14 +322,15 @@ details summary { cursor: pointer; color: var(--primary); }
   <h2>{{ t('section_4') }}</h2>
   <p class="intro">{{ t('s4_intro') }}</p>
   {% if diagnoses %}
-  {% for d in diagnoses %}
-  <div class="card">
+  {% if n_diag_total > diagnoses|length %}<p class="stmt small">{{ t('capped_diagnoses', shown=diagnoses|length, total=n_diag_total|thousands(lang)) }}</p>{% endif %}
+  {% for d in diagnoses if not d.compact %}
+  <div class="card" id="{{ d.id }}">
     <h4><span class="mono">{{ d.id }}</span> — {{ t('fault_type') }}: <b>{{ d.fault_type }}</b> · {{ t('cause_class') }}: {{ d.cause_label }} · <span class="conf">{{ t('confidence') }} {{ d.confidence|pct }}</span>
       {% if d.critique %}<span class="badge {{ 'b-pass' if d.critique.verdict == 'supported' else ('b-fail' if d.critique.verdict == 'rejected' else 'b-warn') }}">{{ t('critique') }}: {{ d.verdict_label }}</span>{% endif %}
       {% if d.human_status %}<span class="badge b-primary">{{ t('human_status') }}: {{ d.human_status }}</span>{% endif %}
     </h4>
     <div class="kv">
-      <div>{{ t('group') }}</div><div>{{ d.group_id or t('na_short') }} · {{ t('flags_ref') }}: <span class="mono">{{ (d.flag_ids or [])|join(', ') }}</span>{% if d.pattern_id %} · {{ t('pattern') }}: {{ d.pattern_id }}{% endif %}</div>
+      <div>{{ t('group') }}</div><div>{{ d.group_id or t('na_short') }} · {{ t('flags_ref') }}: <span class="mono">{% for fid in (d.flag_ids or []) %}<a class="ref" href="#{{ fid }}">{{ fid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% if d.pattern_id %} · {{ t('pattern') }}: {{ d.pattern_id }}{% endif %}</div>
       {% if d.summary %}<div>{{ t('summary') }}</div><div>{{ d.summary }}</div>{% endif %}
     </div>
     <div class="grid2">
@@ -304,7 +348,7 @@ details summary { cursor: pointer; color: var(--primary); }
         {% if d.steps %}<ol class="steps">{% for s in d.steps %}<li>{{ s }}</li>{% endfor %}</ol>{% else %}<p class="na">{{ t('not_available') }}</p>{% endif %}
         {% if d.uncertainty %}<b>{{ t('uncertainty') }}</b><ul class="tight">{% for u in d.uncertainty %}<li>{{ u }}</li>{% endfor %}</ul>{% endif %}
         {% if d.assumptions %}<b>{{ t('assumptions') }}</b><ul class="tight">{% for u in d.assumptions %}<li>{{ u }}</li>{% endfor %}</ul>{% endif %}
-        {% if d.ev %}<b>{{ t('evidence') }}</b><ul class="tight">{% for e in d.ev %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+        {% if d.ev %}<b>{{ t('evidence') }}</b><ul class="tight">{% for e in d.ev %}<li>{% if e.plain %}{{ e.plain }}<span class="tech">{{ e.technical }}{% if e.id %} <span class="mono">[{{ e.id }}]</span>{% endif %}</span>{% else %}{{ e.technical }}{% if e.id %} <span class="small mono">[{{ e.id }}]</span>{% endif %}{% endif %}</li>{% endfor %}</ul>{% endif %}
       </div>
     </div>
     {% if d.critique %}
@@ -317,7 +361,19 @@ details summary { cursor: pointer; color: var(--primary); }
     <p class="small">{{ t('narrative_source') }}: {{ d.narrative_source }}{% if d.human_note %} · {{ t('note') }}: {{ d.human_note }}{% endif %}</p>
   </div>
   {% endfor %}
-  {% if n_diag_total > diagnoses|length %}<p class="small">{{ t('more', n=n_diag_total - diagnoses|length) }}</p>{% endif %}
+  {% set compact = diagnoses|selectattr('compact')|list %}
+  {% if compact %}
+  <h3>{{ t('s4_compact', n=compact|length) }}</h3>
+  <table class="fixed">
+    <colgroup><col style="width:12%"><col style="width:10%"><col style="width:17%"><col style="width:12%"><col style="width:12%"><col style="width:37%"></colgroup>
+    <thead><tr><th>{{ t('id') }}</th><th>{{ t('group') }}</th><th>{{ t('fault_type') }}</th><th>{{ t('cause_class') }}<br>{{ t('confidence') }}</th><th>{{ t('critique') }}</th><th>{{ t('summary') }}</th></tr></thead>
+    <tbody>
+    {% for d in compact %}
+    <tr id="{{ d.id }}"><td class="mono id">{{ d.id }}{% if d.pattern_id %}<br><span class="small">{{ d.pattern_id }}</span>{% endif %}</td><td class="mono small">{{ d.group_id or '' }}</td><td>{{ d.fault_type }}</td><td>{{ d.cause_label }}<br><span class="conf small">{{ d.confidence|pct }}</span></td><td>{% if d.critique %}<span class="badge {{ 'b-pass' if d.critique.verdict == 'supported' else ('b-fail' if d.critique.verdict == 'rejected' else 'b-warn') }}">{{ d.verdict_label }}</span>{% endif %}{% if d.human_status %} <span class="badge b-primary">{{ d.human_status }}</span>{% endif %}</td><td>{{ d.summary }}<span class="tech">{{ t('flags_ref') }}: {% for fid in d.flag_ids %}<a class="ref mono" href="#{{ fid }}">{{ fid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
   {% else %}<p class="na">{{ t('s4_no_diag') }}</p>{% endif %}
 </section>
 
@@ -430,7 +486,8 @@ details summary { cursor: pointer; color: var(--primary); }
   <h2>{{ t('section_assessor') }}</h2>
   <p class="intro">{{ t('assessor_intro') }}</p>
   {% if assessor %}
-  {% if assessor.summary %}<div class="stmt">{{ assessor.summary }}</div>{% endif %}
+  {% for v in assessor.verdicts %}<div class="stmt"><b>{{ v.question }}</b> <span class="badge b-{{ v.state }}">{{ v.answer }}</span>{% if v.gain is not none %} <span class="small conf">({{ t('expected_gain')|lower }} {{ v.gain|num(3) }})</span>{% endif %}{% if v.why %}<br>{{ v.why }}{% endif %}</div>{% endfor %}
+  {% if assessor.summary %}<p>{{ assessor.summary }}</p>{% endif %}
   <div class="grid2">
     <div class="kv">{% for k, v in assessor.scalars %}{% if k != 'summary' %}<div>{{ k }}</div><div class="conf">{{ v|num if v is number else v }}</div>{% endif %}{% endfor %}</div>
     <div>{% if assessor.curve_svg %}<b>{{ t('learning_curve') }}</b><br>{{ assessor.curve_svg|safe }}{% endif %}</div>
@@ -438,7 +495,7 @@ details summary { cursor: pointer; color: var(--primary); }
   {% if assessor.recommendations %}
   <h4>{{ t('recommendations') }}</h4>
   <table><tr><th>{{ t('action') }}</th><th>{{ t('expected_gain') }}</th><th>{{ t('evidence') }}</th></tr>
-  {% for r in assessor.recommendations %}<tr><td>{{ r.action or r.title or r.text }}</td><td class="conf">{{ r.expected_gain|num if r.expected_gain is number else (r.expected_gain or '') }}</td><td>{{ r.evidence or r.reason or '' }}</td></tr>{% endfor %}
+  {% for r in assessor.recommendations %}<tr><td>{% if r.id %}<span class="mono small">{{ r.id }}</span> {% endif %}<b>{{ r.action }}</b>{% if r.text %}<br>{{ r.text }}{% endif %}</td><td class="conf">{{ r.gain|num(3) if r.gain is number else (r.gain or '') }}</td><td class="mono small">{{ r.evidence }}</td></tr>{% endfor %}
   </table>
   {% endif %}
   {% else %}<p class="na">{{ t('assessor_no') }}</p>{% endif %}
@@ -450,7 +507,7 @@ details summary { cursor: pointer; color: var(--primary); }
   <p class="small">{{ t('s6_appendix_note', shown=log.shown, total=log.total) }} — {{ log.chain_text }}</p>
   {% if log.appendix %}
   <table>
-    <tr><th>{{ t('seq') }}</th><th>{{ t('when') }}</th><th>{{ t('actor') }}</th><th>{{ t('action') }}</th><th>{{ t('object') }}</th><th>{{ t('payload') }}</th><th>{{ t('evidence') }}</th><th>hash</th></tr>
+    <thead><tr><th>{{ t('seq') }}</th><th>{{ t('when') }}</th><th>{{ t('actor') }}</th><th>{{ t('action') }}</th><th>{{ t('object') }}</th><th>{{ t('payload') }}</th><th>{{ t('evidence') }}</th><th>hash</th></tr></thead>
     {% for e in log.appendix %}
     <tr><td class="conf">{{ e.seq }}</td><td class="small">{{ e.ts }}</td><td class="mono small">{{ e.actor }}</td><td>{{ e.action }}</td><td class="mono small">{{ e.object }}</td><td class="mono small">{{ e.payload }}</td><td class="mono small">{{ e.evidence }}</td><td class="mono small">{{ e.hash }}</td></tr>
     {% endfor %}

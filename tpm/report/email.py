@@ -11,7 +11,7 @@ from typing import Any, Optional
 from ..config import Settings, get_settings
 from ..workspace import Workspace
 from .i18n import Translator, normalize_lang
-from .report import generate_report, report_path
+from .report import ensure_report, generate_report, report_path
 
 
 class SmtpNotConfigured(RuntimeError):
@@ -56,8 +56,11 @@ def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str 
         raise ValueError("no recipient given")
     cfg = smtp_config(settings)
     path = report_path(ws, lang)
-    if regenerate or not path.exists():
-        path = generate_report(ws, settings, lang, use_llm=use_llm)
+    if use_llm:  # explicit request: wait (bounded) for the model summary
+        if regenerate or not path.exists():
+            path = generate_report(ws, settings, lang, use_llm=True)
+    else:  # send a report that matches the artifacts; a stored model summary is kept, the model is not called
+        ensure_report(ws, settings, lang, use_llm=True, force=regenerate, ask_model=False)
     msg = build_message(ws, settings, recipients, lang, path, cfg["from"], subject)
     if cfg["port"] == 465:
         server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=30)

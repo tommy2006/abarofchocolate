@@ -1,0 +1,2487 @@
+{
+ "seed": 20260919,
+ "datasets": [
+  {
+   "file": "extra_small_batches.jsonl",
+   "description": "short batches, string batch ids, sub-second ISO-Z timestamps, JSON lines",
+   "seed": 20260919,
+   "n_rows": 1127,
+   "n_groups": 5,
+   "group_lengths": [
+    257,
+    260,
+    204,
+    246,
+    160
+   ],
+   "format": {
+    "kind": "jsonl",
+    "header": true,
+    "time_format": "isoz",
+    "period_s": 0.5
+   },
+   "columns": [
+    "batch",
+    "ts",
+    "torque_98",
+    "vib_78",
+    "temp_75",
+    "cfg_92",
+    "press_21",
+    "valve_07",
+    "dens_86",
+    "flow_58"
+   ],
+   "roles": {
+    "press_21": "measured",
+    "dens_86": "measured",
+    "temp_75": "measured",
+    "vib_78": "measured",
+    "torque_98": "measured",
+    "flow_58": "measured",
+    "valve_07": "actuator",
+    "cfg_92": "const",
+    "batch": "identifier",
+    "ts": "timestamp"
+   },
+   "label_kind": null,
+   "label_codes": null,
+   "relations": [
+    {
+     "signal": "press_21",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.9244022828406085,
+       "lag": 8
+      },
+      {
+       "driver": 0,
+       "w": -0.5352757297088011,
+       "lag": 3
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_07",
+      "b": 0.8337433386097048,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "dens_86",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.6232366432130682,
+       "lag": 1
+      },
+      {
+       "driver": 0,
+       "w": -1.3718845016118857,
+       "lag": 0
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "temp_75",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 1.026495490534774,
+       "lag": 3
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_07",
+      "b": 0.9152516578913177,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "vib_78",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 0.8430451396555886,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_07",
+      "b": 0.953830254353244,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "torque_98",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 0.843419412969872,
+       "lag": 2
+      },
+      {
+       "driver": 1,
+       "w": -1.1749713203298238,
+       "lag": 4
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "flow_58",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -1.4454073429784358,
+       "lag": 6
+      },
+      {
+       "driver": 1,
+       "w": 1.2651830209132353,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_07",
+      "b": -0.866071574650809,
+      "lag": 3
+     }
+    }
+   ],
+   "modes": null,
+   "normal_groups": [
+    "B-2223",
+    "B-9947"
+   ],
+   "episodes": [
+    {
+     "group": "B-1748",
+     "type": "stuck_sensor",
+     "class": "sensor",
+     "signals": [
+      "dens_86"
+     ],
+     "row_start": 109,
+     "row_end": 256,
+     "onset_in_group": 109,
+     "persists_to_group_end": true,
+     "magnitude_sd": 4.11
+    },
+    {
+     "group": "B-3658",
+     "type": "noise_burst",
+     "class": "process",
+     "signals": [
+      "press_21",
+      "dens_86",
+      "temp_75",
+      "torque_98",
+      "flow_58"
+     ],
+     "row_start": 579,
+     "row_end": 720,
+     "onset_in_group": 62,
+     "persists_to_group_end": true,
+     "magnitude_sd": 5.98,
+     "driver": 1
+    },
+    {
+     "group": "B-9453",
+     "type": "sensor_bias",
+     "class": "sensor",
+     "signals": [
+      "flow_58"
+     ],
+     "row_start": 891,
+     "row_end": 966,
+     "onset_in_group": 170,
+     "persists_to_group_end": true,
+     "magnitude_sd": 5.44
+    }
+   ],
+   "dq": [
+    {
+     "type": "missing_block",
+     "signal": "vib_78",
+     "row_start": 457,
+     "row_end": 571
+    },
+    {
+     "type": "spike_out_of_range",
+     "signal": "dens_86",
+     "rows": [
+      752
+     ]
+    },
+    {
+     "type": "scattered_missing",
+     "signal": "press_21",
+     "rate": 0.0081,
+     "n_rows": 11
+    }
+   ]
+  },
+  {
+   "file": "extra_uneven_headerless.dat",
+   "description": "very uneven run lengths, whitespace-separated, no header, numeric only (NaN tokens)",
+   "seed": 20260920,
+   "n_rows": 5869,
+   "n_groups": 14,
+   "group_lengths": [
+    789,
+    273,
+    361,
+    710,
+    505,
+    852,
+    447,
+    279,
+    203,
+    201,
+    246,
+    410,
+    458,
+    135
+   ],
+   "format": {
+    "kind": "dat",
+    "header": false,
+    "time_format": null,
+    "period_s": null
+   },
+   "columns": [
+    "run",
+    "sample",
+    "c7",
+    "c10",
+    "c5",
+    "c8",
+    "c4",
+    "c11",
+    "c0",
+    "c2",
+    "c3",
+    "c12",
+    "c9",
+    "c6",
+    "c1"
+   ],
+   "roles": {
+    "c0": "measured",
+    "c1": "measured",
+    "c2": "measured",
+    "c3": "measured",
+    "c4": "measured",
+    "c5": "measured",
+    "c6": "measured",
+    "c7": "measured",
+    "c8": "measured",
+    "c9": "actuator",
+    "c10": "actuator",
+    "c11": "held",
+    "c12": "quantized",
+    "run": "identifier",
+    "sample": "counter"
+   },
+   "label_kind": null,
+   "label_codes": null,
+   "relations": [
+    {
+     "signal": "c0",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -1.0953443498143272,
+       "lag": 2
+      },
+      {
+       "driver": 2,
+       "w": 1.3407739366882823,
+       "lag": 4
+      }
+     ],
+     "actuator": {
+      "actuator": "c10",
+      "b": 0.9452134322656254,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "c1",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 1.3715982488932978,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "c9",
+      "b": 0.322909480953135,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "c2",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -0.8245645690294069,
+       "lag": 2
+      }
+     ],
+     "actuator": {
+      "actuator": "c10",
+      "b": -0.408803678534304,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "c3",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.840150592598844,
+       "lag": 6
+      },
+      {
+       "driver": 2,
+       "w": 1.3473182432889832,
+       "lag": 6
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "c4",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.590774922714102,
+       "lag": 1
+      },
+      {
+       "driver": 0,
+       "w": 0.5968568276790206,
+       "lag": 2
+      }
+     ],
+     "actuator": {
+      "actuator": "c9",
+      "b": -0.7152444525293244,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "c5",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.3156393936161415,
+       "lag": 7
+      },
+      {
+       "driver": 1,
+       "w": -0.9673218914225906,
+       "lag": 6
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "c6",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.066615468184366,
+       "lag": 7
+      },
+      {
+       "driver": 1,
+       "w": 0.6266360243350225,
+       "lag": 7
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "c7",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.7169959026951325,
+       "lag": 2
+      }
+     ],
+     "actuator": {
+      "actuator": "c9",
+      "b": 0.9701048095759606,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "c8",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 1.3171316904113473,
+       "lag": 4
+      },
+      {
+       "driver": 1,
+       "w": -0.510146008848522,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "c11",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": -0.8477094109421598,
+       "lag": 7
+      }
+     ],
+     "actuator": {
+      "actuator": "c9",
+      "b": 0.589627253452546,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "c12",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 1.0108310997477146,
+       "lag": 4
+      },
+      {
+       "driver": 0,
+       "w": 0.7699890066445457,
+       "lag": 1
+      }
+     ],
+     "actuator": {
+      "actuator": "c9",
+      "b": -0.607689674514064,
+      "lag": 3
+     }
+    }
+   ],
+   "modes": null,
+   "normal_groups": [
+    1,
+    2,
+    4,
+    10,
+    11,
+    12,
+    13
+   ],
+   "episodes": [
+    {
+     "group": 3,
+     "type": "gain_change",
+     "class": "actuator",
+     "signals": [
+      "c1",
+      "c4",
+      "c7",
+      "c11",
+      "c12"
+     ],
+     "row_start": 1222,
+     "row_end": 1422,
+     "onset_in_group": 160,
+     "persists_to_group_end": true,
+     "magnitude_sd": 5.91,
+     "actuator": "c9",
+     "factor": 0.2
+    },
+    {
+     "group": 5,
+     "type": "corr_break",
+     "class": "sensor",
+     "signals": [
+      "c0"
+     ],
+     "row_start": 2430,
+     "row_end": 2492,
+     "onset_in_group": 297,
+     "persists_to_group_end": false,
+     "magnitude_sd": 5.54
+    },
+    {
+     "group": 6,
+     "type": "sensor_drift",
+     "class": "sensor",
+     "signals": [
+      "c5"
+     ],
+     "row_start": 3037,
+     "row_end": 3489,
+     "onset_in_group": 399,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.32
+    },
+    {
+     "group": 7,
+     "type": "noise_burst",
+     "class": "process",
+     "signals": [
+      "c0",
+      "c2",
+      "c4",
+      "c12"
+     ],
+     "row_start": 3690,
+     "row_end": 3936,
+     "onset_in_group": 200,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.09,
+     "driver": 0
+    },
+    {
+     "group": 8,
+     "type": "ramp",
+     "class": "process",
+     "signals": [
+      "c0",
+      "c2",
+      "c4",
+      "c12"
+     ],
+     "row_start": 4109,
+     "row_end": 4215,
+     "onset_in_group": 172,
+     "persists_to_group_end": true,
+     "magnitude_sd": 5.88,
+     "driver": 0
+    },
+    {
+     "group": 9,
+     "type": "stuck_sensor",
+     "class": "sensor",
+     "signals": [
+      "c4"
+     ],
+     "row_start": 4351,
+     "row_end": 4418,
+     "onset_in_group": 135,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.27
+    },
+    {
+     "group": 14,
+     "type": "step",
+     "class": "process",
+     "signals": [
+      "c0",
+      "c2",
+      "c4",
+      "c12"
+     ],
+     "row_start": 5802,
+     "row_end": 5829,
+     "onset_in_group": 68,
+     "persists_to_group_end": false,
+     "magnitude_sd": 5.46,
+     "driver": 0
+    }
+   ],
+   "dq": [
+    {
+     "type": "frozen_block",
+     "signal": "c2",
+     "row_start": 3112,
+     "row_end": 3165
+    },
+    {
+     "type": "unit_shift",
+     "signal": "c3",
+     "transform": "x1000",
+     "row_start": 1905,
+     "row_end": 2012
+    },
+    {
+     "type": "scattered_missing",
+     "signal": "c7",
+     "rate": 0.0072,
+     "n_rows": 44
+    },
+    {
+     "type": "spike_out_of_range",
+     "signal": "c2",
+     "rows": [
+      753,
+      1319,
+      1493,
+      1576
+     ]
+    }
+   ],
+   "note": "headerless file: 'columns' gives the hidden names in file column order"
+  },
+  {
+   "file": "extra_wide_labeled.tsv",
+   "description": "wide tag-style schema, equal runs, numeric run-level label (whole faulty run carries its class), some subtle faults",
+   "seed": 20260921,
+   "n_rows": 14403,
+   "n_groups": 30,
+   "group_lengths": [
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480,
+    480
+   ],
+   "format": {
+    "kind": "tsv",
+    "header": true,
+    "time_format": null,
+    "period_s": null
+   },
+   "columns": [
+    "RunNo",
+    "Step",
+    "AI-784.PV",
+    "AT-557.PV",
+    "AT-690.PV",
+    "LT-819.PV",
+    "TT-394.PV",
+    "TT-453.PV",
+    "TT-350.PV",
+    "AI-457.PV",
+    "AT-773.PV",
+    "TT-395.PV",
+    "FT-840.PV",
+    "TT-813.PV",
+    "FV-461.OP",
+    "LT-216.PV",
+    "HS-290.SP",
+    "FT-723.PV",
+    "AT-401.PV",
+    "FV-878.OP",
+    "PT-486.PV",
+    "LT-303.PV",
+    "AT-265.PV",
+    "FT-547.PV",
+    "TT-300.PV",
+    "FY-418.CV",
+    "FY-180.CV",
+    "LT-635.PV",
+    "ST-522.PV",
+    "PT-891.PV",
+    "LT-815.PV",
+    "PT-464.PV",
+    "FV-245.OP",
+    "ST-604.PV",
+    "FV-696.OP",
+    "fault_class"
+   ],
+   "roles": {
+    "FT-723.PV": "measured",
+    "LT-303.PV": "measured",
+    "PT-486.PV": "measured",
+    "TT-350.PV": "measured",
+    "AT-557.PV": "measured",
+    "PT-891.PV": "measured",
+    "FT-840.PV": "measured",
+    "PT-464.PV": "measured",
+    "ST-522.PV": "measured",
+    "AT-265.PV": "measured",
+    "TT-394.PV": "measured",
+    "LT-635.PV": "measured",
+    "TT-395.PV": "measured",
+    "LT-216.PV": "measured",
+    "ST-604.PV": "measured",
+    "TT-300.PV": "measured",
+    "AT-690.PV": "measured",
+    "LT-819.PV": "measured",
+    "TT-453.PV": "measured",
+    "TT-813.PV": "measured",
+    "FT-547.PV": "measured",
+    "LT-815.PV": "measured",
+    "AT-773.PV": "measured",
+    "AT-401.PV": "measured",
+    "FV-878.OP": "actuator",
+    "FV-696.OP": "actuator",
+    "FV-245.OP": "actuator",
+    "FV-461.OP": "actuator",
+    "AI-784.PV": "held",
+    "AI-457.PV": "held",
+    "HS-290.SP": "const",
+    "FY-180.CV": "derived",
+    "FY-418.CV": "derived",
+    "RunNo": "identifier",
+    "Step": "counter",
+    "fault_class": "label"
+   },
+   "label_kind": "group_numeric",
+   "label_codes": {
+    "step": 1,
+    "ramp": 2,
+    "oscillation": 3,
+    "noise_burst": 4,
+    "stuck_sensor": 5,
+    "sensor_bias": 6,
+    "sensor_drift": 7,
+    "sensor_noise": 8,
+    "corr_break": 9,
+    "gain_change": 10
+   },
+   "relations": [
+    {
+     "signal": "FT-723.PV",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": -1.252895921347037,
+       "lag": 8
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "LT-303.PV",
+     "drivers": [
+      {
+       "driver": 5,
+       "w": 0.8977108117961137,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-245.OP",
+      "b": -0.6694318734630593,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "PT-486.PV",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.221434124145758,
+       "lag": 1
+      },
+      {
+       "driver": 1,
+       "w": 0.5498807568785122,
+       "lag": 7
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "TT-350.PV",
+     "drivers": [
+      {
+       "driver": 5,
+       "w": -1.4650867592627819,
+       "lag": 2
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-878.OP",
+      "b": -0.8155686811630105,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "AT-557.PV",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.6364958469603249,
+       "lag": 3
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "PT-891.PV",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.5174472628532486,
+       "lag": 1
+      },
+      {
+       "driver": 0,
+       "w": -0.8531366617968524,
+       "lag": 7
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-461.OP",
+      "b": -0.3765102805057575,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "FT-840.PV",
+     "drivers": [
+      {
+       "driver": 5,
+       "w": -1.430003459078816,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-245.OP",
+      "b": -0.6585941356732137,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "PT-464.PV",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": -1.375313180984034,
+       "lag": 3
+      },
+      {
+       "driver": 2,
+       "w": 0.6358193235245675,
+       "lag": 4
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "ST-522.PV",
+     "drivers": [
+      {
+       "driver": 5,
+       "w": -0.9397147385541191,
+       "lag": 3
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-461.OP",
+      "b": -0.3988727920223399,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "AT-265.PV",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 0.5065914557735817,
+       "lag": 7
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-878.OP",
+      "b": 0.36787718043406237,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "TT-394.PV",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 0.6637774777272417,
+       "lag": 2
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "LT-635.PV",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.0858270952571742,
+       "lag": 6
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "TT-395.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 0.9447943254031103,
+       "lag": 1
+      },
+      {
+       "driver": 4,
+       "w": 1.2223693624022696,
+       "lag": 7
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-245.OP",
+      "b": -0.32553982982172247,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "LT-216.PV",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": -0.6697296114323973,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-878.OP",
+      "b": 0.6078273931333207,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "ST-604.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 1.3853458506568201,
+       "lag": 0
+      },
+      {
+       "driver": 2,
+       "w": -1.2670306742137698,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-696.OP",
+      "b": 0.4448171268650154,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "TT-300.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 1.24655851151323,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-878.OP",
+      "b": -0.5685961945641376,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "AT-690.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 0.8920776018624245,
+       "lag": 0
+      },
+      {
+       "driver": 0,
+       "w": -0.7028139780835115,
+       "lag": 4
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "LT-819.PV",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -0.8474918404423851,
+       "lag": 2
+      },
+      {
+       "driver": 4,
+       "w": -1.0406586126848016,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "TT-453.PV",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 1.1788840472778117,
+       "lag": 2
+      },
+      {
+       "driver": 0,
+       "w": -0.9260069918980156,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "TT-813.PV",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": -1.14409935546422,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "FT-547.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 1.0045684575870584,
+       "lag": 0
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-878.OP",
+      "b": 0.8401797245076272,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "LT-815.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 0.9767394704402318,
+       "lag": 7
+      },
+      {
+       "driver": 1,
+       "w": -0.9100670036283484,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-696.OP",
+      "b": -0.6159773197007539,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "AT-773.PV",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 0.5881530201570293,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-696.OP",
+      "b": 0.6892776216677019,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "AT-401.PV",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 0.959414894890915,
+       "lag": 3
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "AI-784.PV",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -1.171948273453589,
+       "lag": 0
+      },
+      {
+       "driver": 4,
+       "w": -0.8046923399780413,
+       "lag": 4
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-461.OP",
+      "b": -0.3054568484711786,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "AI-457.PV",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 1.1722344121473185,
+       "lag": 3
+      },
+      {
+       "driver": 5,
+       "w": -1.3751085522559356,
+       "lag": 1
+      }
+     ],
+     "actuator": {
+      "actuator": "FV-461.OP",
+      "b": -0.314489733042377,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "FY-180.CV",
+     "derived_from": [
+      "AT-773.PV",
+      "AT-265.PV"
+     ],
+     "sign": 1
+    },
+    {
+     "signal": "FY-418.CV",
+     "derived_from": [
+      "ST-522.PV",
+      "AT-401.PV"
+     ],
+     "sign": -1
+    }
+   ],
+   "modes": null,
+   "normal_groups": [
+    3,
+    5,
+    7,
+    8,
+    15,
+    16,
+    18,
+    23,
+    27
+   ],
+   "episodes": [
+    {
+     "group": 1,
+     "type": "sensor_bias",
+     "class": "sensor",
+     "signals": [
+      "TT-300.PV"
+     ],
+     "row_start": 79,
+     "row_end": 479,
+     "onset_in_group": 79,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.75
+    },
+    {
+     "group": 2,
+     "type": "stuck_sensor",
+     "class": "sensor",
+     "signals": [
+      "LT-815.PV"
+     ],
+     "row_start": 655,
+     "row_end": 959,
+     "onset_in_group": 175,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.79
+    },
+    {
+     "group": 4,
+     "type": "oscillation",
+     "class": "process",
+     "signals": [
+      "TT-395.PV",
+      "ST-604.PV",
+      "TT-300.PV",
+      "AT-690.PV",
+      "FT-547.PV",
+      "LT-815.PV",
+      "AT-401.PV"
+     ],
+     "row_start": 1591,
+     "row_end": 1919,
+     "onset_in_group": 151,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.12,
+     "driver": 3
+    },
+    {
+     "group": 6,
+     "type": "step",
+     "class": "process",
+     "signals": [
+      "PT-891.PV",
+      "TT-394.PV",
+      "AT-690.PV",
+      "LT-819.PV",
+      "TT-453.PV",
+      "AT-773.PV",
+      "AI-784.PV"
+     ],
+     "row_start": 2525,
+     "row_end": 2879,
+     "onset_in_group": 125,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.4,
+     "driver": 0
+    },
+    {
+     "group": 9,
+     "type": "noise_burst",
+     "class": "process",
+     "signals": [
+      "LT-303.PV",
+      "TT-350.PV",
+      "FT-840.PV",
+      "ST-522.PV",
+      "AI-457.PV"
+     ],
+     "row_start": 4063,
+     "row_end": 4319,
+     "onset_in_group": 223,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.49,
+     "driver": 5
+    },
+    {
+     "group": 10,
+     "type": "sensor_noise",
+     "class": "sensor",
+     "signals": [
+      "TT-453.PV"
+     ],
+     "row_start": 4539,
+     "row_end": 4799,
+     "onset_in_group": 219,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.35
+    },
+    {
+     "group": 11,
+     "type": "sensor_drift",
+     "class": "sensor",
+     "signals": [
+      "ST-522.PV"
+     ],
+     "row_start": 4928,
+     "row_end": 5279,
+     "onset_in_group": 128,
+     "persists_to_group_end": true,
+     "magnitude_sd": 1.53
+    },
+    {
+     "group": 12,
+     "type": "gain_change",
+     "class": "actuator",
+     "signals": [
+      "TT-350.PV",
+      "AT-265.PV",
+      "LT-216.PV",
+      "TT-300.PV",
+      "FT-547.PV"
+     ],
+     "row_start": 5387,
+     "row_end": 5759,
+     "onset_in_group": 107,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.88,
+     "actuator": "FV-878.OP",
+     "factor": 2.5
+    },
+    {
+     "group": 13,
+     "type": "ramp",
+     "class": "process",
+     "signals": [
+      "TT-395.PV",
+      "ST-604.PV",
+      "TT-300.PV",
+      "AT-690.PV",
+      "FT-547.PV",
+      "LT-815.PV",
+      "AT-401.PV"
+     ],
+     "row_start": 5918,
+     "row_end": 6239,
+     "onset_in_group": 158,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.16,
+     "driver": 3
+    },
+    {
+     "group": 14,
+     "type": "corr_break",
+     "class": "sensor",
+     "signals": [
+      "AT-773.PV"
+     ],
+     "row_start": 6329,
+     "row_end": 6722,
+     "onset_in_group": 89,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.78
+    },
+    {
+     "group": 17,
+     "type": "sensor_bias",
+     "class": "sensor",
+     "signals": [
+      "PT-486.PV"
+     ],
+     "row_start": 7768,
+     "row_end": 8162,
+     "onset_in_group": 85,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.32
+    },
+    {
+     "group": 19,
+     "type": "stuck_sensor",
+     "class": "sensor",
+     "signals": [
+      "LT-635.PV"
+     ],
+     "row_start": 8696,
+     "row_end": 9122,
+     "onset_in_group": 53,
+     "persists_to_group_end": true,
+     "magnitude_sd": 4.68
+    },
+    {
+     "group": 20,
+     "type": "oscillation",
+     "class": "process",
+     "signals": [
+      "TT-395.PV",
+      "ST-604.PV",
+      "TT-300.PV",
+      "AT-690.PV",
+      "FT-547.PV",
+      "LT-815.PV",
+      "AT-401.PV"
+     ],
+     "row_start": 9321,
+     "row_end": 9602,
+     "onset_in_group": 198,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.85,
+     "driver": 3
+    },
+    {
+     "group": 21,
+     "type": "step",
+     "class": "process",
+     "signals": [
+      "PT-486.PV",
+      "PT-464.PV",
+      "AT-265.PV",
+      "LT-635.PV",
+      "ST-604.PV",
+      "TT-453.PV",
+      "AI-457.PV"
+     ],
+     "row_start": 9757,
+     "row_end": 10082,
+     "onset_in_group": 154,
+     "persists_to_group_end": true,
+     "magnitude_sd": 1.62,
+     "driver": 2
+    },
+    {
+     "group": 22,
+     "type": "noise_burst",
+     "class": "process",
+     "signals": [
+      "LT-303.PV",
+      "TT-350.PV",
+      "FT-840.PV",
+      "ST-522.PV",
+      "AI-457.PV"
+     ],
+     "row_start": 10297,
+     "row_end": 10562,
+     "onset_in_group": 214,
+     "persists_to_group_end": true,
+     "magnitude_sd": 4.04,
+     "driver": 5
+    },
+    {
+     "group": 24,
+     "type": "sensor_noise",
+     "class": "sensor",
+     "signals": [
+      "TT-300.PV"
+     ],
+     "row_start": 11175,
+     "row_end": 11522,
+     "onset_in_group": 132,
+     "persists_to_group_end": true,
+     "magnitude_sd": 2.13
+    },
+    {
+     "group": 25,
+     "type": "sensor_drift",
+     "class": "sensor",
+     "signals": [
+      "TT-394.PV"
+     ],
+     "row_start": 11631,
+     "row_end": 12002,
+     "onset_in_group": 108,
+     "persists_to_group_end": true,
+     "magnitude_sd": 4.35
+    },
+    {
+     "group": 26,
+     "type": "gain_change",
+     "class": "actuator",
+     "signals": [
+      "LT-303.PV",
+      "FT-840.PV",
+      "TT-395.PV"
+     ],
+     "row_start": 12231,
+     "row_end": 12482,
+     "onset_in_group": 228,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.93,
+     "actuator": "FV-245.OP",
+     "factor": 0.2
+    },
+    {
+     "group": 28,
+     "type": "ramp",
+     "class": "process",
+     "signals": [
+      "PT-486.PV",
+      "PT-464.PV",
+      "AT-265.PV",
+      "LT-635.PV",
+      "ST-604.PV",
+      "TT-453.PV",
+      "AI-457.PV"
+     ],
+     "row_start": 13042,
+     "row_end": 13442,
+     "onset_in_group": 79,
+     "persists_to_group_end": true,
+     "magnitude_sd": 1.77,
+     "driver": 2
+    },
+    {
+     "group": 29,
+     "type": "corr_break",
+     "class": "sensor",
+     "signals": [
+      "TT-300.PV"
+     ],
+     "row_start": 13522,
+     "row_end": 13922,
+     "onset_in_group": 79,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.58
+    },
+    {
+     "group": 30,
+     "type": "sensor_bias",
+     "class": "sensor",
+     "signals": [
+      "TT-350.PV"
+     ],
+     "row_start": 14077,
+     "row_end": 14402,
+     "onset_in_group": 154,
+     "persists_to_group_end": true,
+     "magnitude_sd": 4.43
+    }
+   ],
+   "dq": [
+    {
+     "type": "duplicate_rows",
+     "signal": null,
+     "row_start": 6430,
+     "row_end": 6432
+    },
+    {
+     "type": "spike_out_of_range",
+     "signal": "AT-773.PV",
+     "rows": [
+      1814,
+      1817,
+      3231,
+      4417
+     ]
+    },
+    {
+     "type": "missing_block",
+     "signal": "LT-819.PV",
+     "row_start": 10749,
+     "row_end": 10935
+    }
+   ]
+  },
+  {
+   "file": "extra_modes_rowlabels.csv",
+   "description": "operating modes shift the process (not faults), row-level string labels, jittered epoch timestamps, heavy DQ issues",
+   "seed": 20260922,
+   "n_rows": 29963,
+   "n_groups": 16,
+   "group_lengths": [
+    1988,
+    2255,
+    1590,
+    1853,
+    1733,
+    1406,
+    1516,
+    2287,
+    1508,
+    1830,
+    1916,
+    2380,
+    2339,
+    1431,
+    1821,
+    2123
+   ],
+   "format": {
+    "kind": "csv",
+    "header": true,
+    "time_format": "epoch",
+    "period_s": 20.0
+   },
+   "columns": [
+    "Campaign",
+    "Time",
+    "Operating mode",
+    "State",
+    "Cooler current [A]",
+    "Header pressure [bar]",
+    "Feed speed [rpm]",
+    "Outlet valve position [%]",
+    "Line 2 density [kg/m3]",
+    "Mixer density [kg/m3]",
+    "Mixer analyser [mg/l]",
+    "Cooler speed [rpm]",
+    "Tank density [kg/m3]",
+    "Pump current [A]",
+    "Total speed [rpm]",
+    "Tank counter [pcs]",
+    "Mixer speed [rpm]",
+    "Mixer valve position [%]",
+    "Reactor temperature [°C]"
+   ],
+   "roles": {
+    "Feed speed [rpm]": "measured",
+    "Mixer density [kg/m3]": "measured",
+    "Tank density [kg/m3]": "measured",
+    "Cooler speed [rpm]": "measured",
+    "Cooler current [A]": "measured",
+    "Mixer speed [rpm]": "measured",
+    "Header pressure [bar]": "measured",
+    "Pump current [A]": "measured",
+    "Line 2 density [kg/m3]": "measured",
+    "Reactor temperature [°C]": "measured",
+    "Mixer valve position [%]": "actuator",
+    "Outlet valve position [%]": "actuator",
+    "Mixer analyser [mg/l]": "held",
+    "Total speed [rpm]": "derived",
+    "Tank counter [pcs]": "quantized",
+    "Campaign": "identifier",
+    "Time": "timestamp",
+    "Operating mode": "operating_mode",
+    "State": "label"
+   },
+   "label_kind": "row_string",
+   "label_codes": null,
+   "relations": [
+    {
+     "signal": "Feed speed [rpm]",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 1.250246937028197,
+       "lag": 0
+      },
+      {
+       "driver": 0,
+       "w": 1.4390375452397395,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Mixer density [kg/m3]",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": 1.3500289765633822,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Tank density [kg/m3]",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.195506964632997,
+       "lag": 3
+      }
+     ],
+     "actuator": {
+      "actuator": "Outlet valve position [%]",
+      "b": 0.4586127929359297,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "Cooler speed [rpm]",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.9253371040985608,
+       "lag": 7
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Cooler current [A]",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -0.5117271137897687,
+       "lag": 6
+      },
+      {
+       "driver": 0,
+       "w": 0.6434246450611698,
+       "lag": 0
+      }
+     ],
+     "actuator": {
+      "actuator": "Mixer valve position [%]",
+      "b": -0.34051069340659945,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "Mixer speed [rpm]",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -1.3364238405573579,
+       "lag": 2
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Header pressure [bar]",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 0.7886960898575821,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "Outlet valve position [%]",
+      "b": 0.7494534710798542,
+      "lag": 1
+     }
+    },
+    {
+     "signal": "Pump current [A]",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": -1.4317388426940563,
+       "lag": 6
+      }
+     ],
+     "actuator": {
+      "actuator": "Mixer valve position [%]",
+      "b": 0.8469915480001093,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "Line 2 density [kg/m3]",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.1782381948252043,
+       "lag": 8
+      },
+      {
+       "driver": 3,
+       "w": 1.3095083838503048,
+       "lag": 4
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Reactor temperature [°C]",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": -0.839868263679572,
+       "lag": 7
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Mixer analyser [mg/l]",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -0.9206160322525899,
+       "lag": 0
+      },
+      {
+       "driver": 1,
+       "w": -0.8825666768325878,
+       "lag": 8
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "Tank counter [pcs]",
+     "drivers": [
+      {
+       "driver": 3,
+       "w": -0.5046968910202794,
+       "lag": 3
+      }
+     ],
+     "actuator": {
+      "actuator": "Outlet valve position [%]",
+      "b": 0.8448000092787795,
+      "lag": 2
+     }
+    },
+    {
+     "signal": "Total speed [rpm]",
+     "derived_from": [
+      "Reactor temperature [°C]",
+      "Tank density [kg/m3]"
+     ],
+     "sign": -1
+    }
+   ],
+   "modes": {
+    "names": [
+     "idle",
+     "run",
+     "boost"
+    ],
+    "shift": [
+     [
+      1.57,
+      1.83,
+      0.21,
+      -1.64
+     ],
+     [
+      0.82,
+      0.84,
+      2.07,
+      1.1
+     ],
+     [
+      -0.99,
+      -1.92,
+      1.46,
+      1.39
+     ]
+    ]
+   },
+   "normal_groups": [
+    4,
+    5,
+    7,
+    12,
+    13,
+    15
+   ],
+   "episodes": [
+    {
+     "group": 1,
+     "type": "stuck_sensor",
+     "class": "sensor",
+     "signals": [
+      "Cooler current [A]"
+     ],
+     "row_start": 1373,
+     "row_end": 1861,
+     "onset_in_group": 1373,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.04
+    },
+    {
+     "group": 2,
+     "type": "step",
+     "class": "process",
+     "signals": [
+      "Feed speed [rpm]",
+      "Cooler speed [rpm]",
+      "Reactor temperature [°C]",
+      "Mixer analyser [mg/l]"
+     ],
+     "row_start": 2680,
+     "row_end": 3164,
+     "onset_in_group": 692,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.79,
+     "driver": 1
+    },
+    {
+     "group": 3,
+     "type": "sensor_noise",
+     "class": "sensor",
+     "signals": [
+      "Header pressure [bar]"
+     ],
+     "row_start": 4795,
+     "row_end": 5084,
+     "onset_in_group": 552,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.66
+    },
+    {
+     "group": 6,
+     "type": "gain_change",
+     "class": "actuator",
+     "signals": [
+      "Cooler current [A]",
+      "Pump current [A]"
+     ],
+     "row_start": 9946,
+     "row_end": 10123,
+     "onset_in_group": 527,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.53,
+     "actuator": "Mixer valve position [%]",
+     "factor": 0.2
+    },
+    {
+     "group": 8,
+     "type": "oscillation",
+     "class": "process",
+     "signals": [
+      "Mixer density [kg/m3]",
+      "Pump current [A]",
+      "Line 2 density [kg/m3]",
+      "Tank counter [pcs]"
+     ],
+     "row_start": 13944,
+     "row_end": 14635,
+     "onset_in_group": 1595,
+     "persists_to_group_end": true,
+     "magnitude_sd": 5.52,
+     "driver": 3
+    },
+    {
+     "group": 9,
+     "type": "ramp",
+     "class": "process",
+     "signals": [
+      "Feed speed [rpm]",
+      "Cooler speed [rpm]",
+      "Reactor temperature [°C]",
+      "Mixer analyser [mg/l]"
+     ],
+     "row_start": 15114,
+     "row_end": 15399,
+     "onset_in_group": 478,
+     "persists_to_group_end": false,
+     "magnitude_sd": 5.79,
+     "driver": 1
+    },
+    {
+     "group": 10,
+     "type": "noise_burst",
+     "class": "process",
+     "signals": [
+      "Feed speed [rpm]",
+      "Cooler speed [rpm]",
+      "Reactor temperature [°C]",
+      "Mixer analyser [mg/l]"
+     ],
+     "row_start": 17162,
+     "row_end": 17973,
+     "onset_in_group": 1018,
+     "persists_to_group_end": true,
+     "magnitude_sd": 3.13,
+     "driver": 1
+    },
+    {
+     "group": 11,
+     "type": "corr_break",
+     "class": "sensor",
+     "signals": [
+      "Pump current [A]"
+     ],
+     "row_start": 19117,
+     "row_end": 19380,
+     "onset_in_group": 1143,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.96
+    },
+    {
+     "group": 14,
+     "type": "sensor_bias",
+     "class": "sensor",
+     "signals": [
+      "Pump current [A]"
+     ],
+     "row_start": 25234,
+     "row_end": 25500,
+     "onset_in_group": 625,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.35
+    },
+    {
+     "group": 16,
+     "type": "sensor_drift",
+     "class": "sensor",
+     "signals": [
+      "Tank density [kg/m3]"
+     ],
+     "row_start": 29196,
+     "row_end": 29499,
+     "onset_in_group": 1356,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.04
+    }
+   ],
+   "dq": [
+    {
+     "type": "duplicate_rows",
+     "signal": null,
+     "row_start": 10155,
+     "row_end": 10162
+    },
+    {
+     "type": "missing_rows",
+     "signal": null,
+     "first_row_after_gap": 26324,
+     "n_rows_dropped": 21
+    },
+    {
+     "type": "missing_block",
+     "signal": "Cooler current [A]",
+     "row_start": 23969,
+     "row_end": 23998
+    },
+    {
+     "type": "scattered_missing",
+     "signal": "Reactor temperature [°C]",
+     "rate": 0.0238,
+     "n_rows": 764
+    },
+    {
+     "type": "spike_out_of_range",
+     "signal": "Mixer density [kg/m3]",
+     "rows": [
+      15296,
+      16878,
+      17036
+     ]
+    },
+    {
+     "type": "frozen_block",
+     "signal": "Pump current [A]",
+     "row_start": 7494,
+     "row_end": 7598
+    },
+    {
+     "type": "unit_shift",
+     "signal": "Cooler speed [rpm]",
+     "transform": "x1.8+32",
+     "row_start": 1726,
+     "row_end": 1939
+    },
+    {
+     "type": "sentinel_values",
+     "signal": "Mixer speed [rpm]",
+     "value": -9999.0,
+     "rows": [
+      4116,
+      4153,
+      4214,
+      4218,
+      4254,
+      4342,
+      4469,
+      4498,
+      4515,
+      4604,
+      4654,
+      4694,
+      4736,
+      4757,
+      4781,
+      4892,
+      4944,
+      5058,
+      5060,
+      5097,
+      5143,
+      5264,
+      5346,
+      5397,
+      5417,
+      5689,
+      5718,
+      5725,
+      5835,
+      6052,
+      6084,
+      6215,
+      6322,
+      6423,
+      6444,
+      6577,
+      6592,
+      6699
+     ]
+    },
+    {
+     "type": "timestamp_gap",
+     "signal": "Time",
+     "row_start": 20571,
+     "row_end": 20571,
+     "gap_seconds": 1100.0
+    },
+    {
+     "type": "timestamp_disorder",
+     "signal": "Time",
+     "row_start": 13043,
+     "row_end": 13066
+    }
+   ]
+  },
+  {
+   "file": "extra_long_continuous_eu.csv",
+   "description": "one continuous run, no group column, daily seasonality, 7 transient fault episodes, ';' + decimal comma + day-first timestamps",
+   "seed": 20260923,
+   "n_rows": 39966,
+   "n_groups": 1,
+   "group_lengths": [
+    40000
+   ],
+   "format": {
+    "kind": "csv_eu",
+    "header": true,
+    "time_format": "eu",
+    "period_s": 10.0
+   },
+   "columns": [
+    "aikaleima",
+    "dens_22",
+    "speed_99",
+    "torque_30",
+    "flow_98",
+    "analyzer_82",
+    "valve_27",
+    "humid_13",
+    "setp_76",
+    "ph_52",
+    "ph_05",
+    "total_70",
+    "ph_85"
+   ],
+   "roles": {
+    "flow_98": "measured",
+    "ph_52": "measured",
+    "ph_85": "measured",
+    "dens_22": "measured",
+    "torque_30": "measured",
+    "speed_99": "measured",
+    "ph_05": "measured",
+    "humid_13": "measured",
+    "valve_27": "actuator",
+    "setp_76": "actuator",
+    "analyzer_82": "held",
+    "total_70": "derived",
+    "aikaleima": "timestamp"
+   },
+   "label_kind": null,
+   "label_codes": null,
+   "relations": [
+    {
+     "signal": "flow_98",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.5740101051143613,
+       "lag": 2
+      },
+      {
+       "driver": 0,
+       "w": -1.4227430050908714,
+       "lag": 8
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "ph_52",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -0.7643439625408235,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_27",
+      "b": -0.8846034672854408,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "ph_85",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": -0.7727526543517709,
+       "lag": 8
+      },
+      {
+       "driver": 2,
+       "w": -0.9221083166351768,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_27",
+      "b": -0.3820462156596559,
+      "lag": 0
+     }
+    },
+    {
+     "signal": "dens_22",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": 0.5352791606300341,
+       "lag": 5
+      },
+      {
+       "driver": 1,
+       "w": -1.3352985955792653,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "torque_30",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 0.7346685663606318,
+       "lag": 4
+      },
+      {
+       "driver": 2,
+       "w": -1.327447243134618,
+       "lag": 5
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_27",
+      "b": -0.7909457078974356,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "speed_99",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 1.1729689541661499,
+       "lag": 5
+      },
+      {
+       "driver": 2,
+       "w": 0.8684906015321002,
+       "lag": 1
+      }
+     ],
+     "actuator": {
+      "actuator": "valve_27",
+      "b": 0.9140827102420623,
+      "lag": 3
+     }
+    },
+    {
+     "signal": "ph_05",
+     "drivers": [
+      {
+       "driver": 2,
+       "w": -1.2594950774163451,
+       "lag": 8
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "humid_13",
+     "drivers": [
+      {
+       "driver": 0,
+       "w": 0.6548050064587108,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "analyzer_82",
+     "drivers": [
+      {
+       "driver": 1,
+       "w": 0.8906567313264971,
+       "lag": 1
+      }
+     ],
+     "actuator": null
+    },
+    {
+     "signal": "total_70",
+     "derived_from": [
+      "ph_85",
+      "flow_98"
+     ],
+     "sign": 1
+    }
+   ],
+   "modes": null,
+   "normal_groups": [],
+   "episodes": [
+    {
+     "group": 1,
+     "type": "gain_change",
+     "class": "actuator",
+     "signals": [
+      "ph_52",
+      "ph_85",
+      "torque_30",
+      "speed_99"
+     ],
+     "row_start": 7424,
+     "row_end": 9067,
+     "onset_in_group": 7458,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.16,
+     "actuator": "valve_27",
+     "factor": 2.5
+    },
+    {
+     "group": 1,
+     "type": "step",
+     "class": "process",
+     "signals": [
+      "flow_98",
+      "ph_52",
+      "ph_85",
+      "torque_30",
+      "speed_99",
+      "humid_13"
+     ],
+     "row_start": 13256,
+     "row_end": 14757,
+     "onset_in_group": 13290,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.88,
+     "driver": 0
+    },
+    {
+     "group": 1,
+     "type": "sensor_noise",
+     "class": "sensor",
+     "signals": [
+      "ph_85"
+     ],
+     "row_start": 16666,
+     "row_end": 19085,
+     "onset_in_group": 16700,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.5
+    },
+    {
+     "group": 1,
+     "type": "sensor_drift",
+     "class": "sensor",
+     "signals": [
+      "flow_98"
+     ],
+     "row_start": 22756,
+     "row_end": 23951,
+     "onset_in_group": 22790,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.06
+    },
+    {
+     "group": 1,
+     "type": "oscillation",
+     "class": "process",
+     "signals": [
+      "ph_85",
+      "dens_22",
+      "torque_30",
+      "speed_99",
+      "ph_05"
+     ],
+     "row_start": 26939,
+     "row_end": 28370,
+     "onset_in_group": 26973,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.81,
+     "driver": 2
+    },
+    {
+     "group": 1,
+     "type": "corr_break",
+     "class": "sensor",
+     "signals": [
+      "ph_85"
+     ],
+     "row_start": 30444,
+     "row_end": 32994,
+     "onset_in_group": 30478,
+     "persists_to_group_end": false,
+     "magnitude_sd": 4.94
+    },
+    {
+     "group": 1,
+     "type": "stuck_sensor",
+     "class": "sensor",
+     "signals": [
+      "speed_99"
+     ],
+     "row_start": 36707,
+     "row_end": 38581,
+     "onset_in_group": 36741,
+     "persists_to_group_end": false,
+     "magnitude_sd": 3.87
+    }
+   ],
+   "dq": [
+    {
+     "type": "missing_rows",
+     "signal": null,
+     "first_row_after_gap": 2726,
+     "n_rows_dropped": 34
+    },
+    {
+     "type": "timestamp_gap",
+     "signal": "aikaleima",
+     "row_start": 32721,
+     "row_end": 32721,
+     "gap_seconds": 860.0
+    },
+    {
+     "type": "frozen_block",
+     "signal": "humid_13",
+     "row_start": 15689,
+     "row_end": 15749
+    },
+    {
+     "type": "unit_shift",
+     "signal": "dens_22",
+     "transform": "x1000",
+     "row_start": 8038,
+     "row_end": 8271
+    },
+    {
+     "type": "sentinel_values",
+     "signal": "humid_13",
+     "value": -9999.0,
+     "rows": [
+      20515,
+      20880,
+      21092,
+      21395,
+      22210,
+      22655,
+      22910,
+      24274,
+      24928,
+      25225
+     ]
+    },
+    {
+     "type": "text_tokens",
+     "signal": "dens_22",
+     "rows": [
+      26793,
+      26812,
+      26923,
+      27233,
+      28144,
+      28268,
+      28767,
+      28951,
+      29037,
+      29473,
+      29829,
+      30133,
+      30837,
+      31924
+     ],
+     "tokens": [
+      "#N/A",
+      "?",
+      "BAD",
+      "ERR",
+      "n/a"
+     ]
+    }
+   ]
+  }
+ ]
+}

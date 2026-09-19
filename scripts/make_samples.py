@@ -135,7 +135,9 @@ def make_all(out_dir: str | Path, force: bool = False) -> dict[str, Path]:
             "| demo_process.csv | 20 groups x 400 rows, header, timestamps, injected faults (step, ramp, stuck sensor, correlation break, oscillation, noise burst) and DQ issues (missing block, spike, frozen block, unit shift, duplicates, timestamp gap); no labels | the default demo (`python -m tpm demo`) |\n"
             "| demo_process_labeled.csv | 12 groups x 300 rows with a `fault_label` column | shows label auto-detection, exclusion from detection, and the evaluation section |\n"
             "| demo_headerless.dat | whitespace-separated, no header, numeric only | shows blind-mode ingestion (aliases S01..Snn) |\n"
-            "| demo_records.csv | order-like business records with manual-entry errors (cents-instead-of-euros, price-table drift, missing ids, negative quantities, duplicates, late-entered batch, copy-paste frozen field) | shows the same pipeline on non-sensor data (docs/ADAPTABILITY.md) |\n",
+            "| demo_records.csv | order-like business records with manual-entry errors (cents-instead-of-euros, price-table drift, missing ids, negative quantities, duplicates, late-entered batch, copy-paste frozen field) | shows the same pipeline on non-sensor data (docs/ADAPTABILITY.md) |\n\n"
+            "Five more randomized datasets (`extra_*`, different lengths / schemas / formats, ground truth in `extra_truth.json`) come from "
+            "`python scripts/make_extra_samples.py`; see README_extra.md.\n",
             encoding="utf-8",
         )
     return paths

@@ -284,6 +284,22 @@ export function refLink(type, id, label) {
   const href = ROUTE_OF[type] ? ROUTE_OF[type](id) : '#';
   return el('a', { href, class: 'ref ref-' + type, dataset: { refType: type, refId: id }, title: t('ref.' + type) + ' ' + id + ' — ' + t('ref.open') }, label === undefined ? id : label);
 }
+/** Kind of object an id names, from its prefix: 'DIAG-000005' -> 'diagnosis', 'B00008' -> 'batch'. Unknown -> 'evidence'. */
+export function refTypeOfId(id) {
+  const s = String(id || '').trim().toUpperCase();
+  const m = /^([A-Z]+)-/.exec(s);
+  if (m && OBJ_TYPE[m[1]]) return OBJ_TYPE[m[1]];
+  if (m && m[1] === 'RULE') return 'rule';
+  if (m && m[1] === 'PATTERN') return 'pattern';
+  return /^B\d{4,6}$/.test(s) ? 'batch' : 'evidence';
+}
+/** Citation link: labelled by what the id really is, and a click opens its popover (content, plain sentence,
+    "Open in ..." and the object's own evidence) instead of leaving the current view. Ctrl-click opens the owning view. */
+export function citeLink(id, label) {
+  const type = refTypeOfId(id);
+  const href = ROUTE_OF[type] ? ROUTE_OF[type](id) : '#';
+  return el('a', { href, class: 'ref ref-' + type, dataset: { refType: 'cite', refId: id }, title: t('ref.' + type) + ' ' + id + ' — ' + t('ref.open') }, label === undefined ? id : label);
+}
 /** Turn every reference token in a text into a link. Returns a DocumentFragment. */
 export function linkifyRefs(text) {
   const f = document.createDocumentFragment();
@@ -431,32 +447,75 @@ export function valuesLine(values, max = 10) {
   if (!ents.length) return null;
   return el('div', { class: 'meta values' }, `${t('common.values')}: `, ents.slice(0, max).map(([k, v], i) => el('span', { class: 'val' }, i ? ', ' : '', el('span', { class: 'k', text: k }), '=', fmtValue(v))), ents.length > max ? el('span', { class: 'dim', text: ` … +${ents.length - max}` }) : null);
 }
-/** Evidence by ids: {items, missing}. Never throws. */
+/** Evidence by ids: {items, missing}. Never throws. The ids may name ANY citable object (EV-, DIAG-, FLAG-,
+    CHK-, INF-, RULE-, PATTERN-, EGR-, batch ids): the server answers evidence-like items, each with a
+    plain-language sentence (`plain`), its technical `statement`, `ref_type`, `open` (owning view) and its own
+    `evidence_ids`. Found items are cached per run and language; missing ids are always asked again. */
 export async function fetchEvidenceFull(ids) {
-  ids = (ids || []).filter(Boolean);
+  ids = [...new Set((ids || []).filter(Boolean).map(String))];
   if (!ids.length) return { items: [], missing: [] };
-  const r = await runApi('/evidence', { params: { ids: ids.join(',') } });
-  if (!r.ok) { console.warn('evidence fetch failed', r.status, r.data); return { items: [], missing: ids, error: errText(r) }; }
-  const items = r.data.items || [];
-  const missing = r.data.missing || ids.filter((i) => !items.some((e) => e.id === i));
-  if (missing.length) console.warn('evidence ids not in the registry of this run:', missing.join(', '));
-  return { items, missing };
+  const key = (id) => `${state.run}:ev:${state.lang}:${id}`;
+  const need = ids.filter((id) => !state.cache.has(key(id)));
+  let missing = []; let error;
+  for (let i = 0; i < need.length; i += 60) {
+    const part = need.slice(i, i + 60);
+    const r = await runApi('/evidence', { params: { ids: part.join(','), lang: state.lang } });
+    if (!r.ok) { console.warn('evidence fetch failed', r.status, r.data); error = errText(r); missing = missing.concat(part); continue; }
+    const got = r.data.items || [];
+    for (const e of got) { state.cache.set(key(e.id), e); if (e.requested_id) state.cache.set(key(e.requested_id), e); }
+    missing = missing.concat(r.data.missing || part.filter((id) => !got.some((e) => e.id === id || e.requested_id === id)));
+  }
+  const seen = new Set();
+  const items = ids.map((id) => state.cache.get(key(id))).filter((e) => e && !seen.has(e.id) && seen.add(e.id));
+  if (missing.length) console.warn('ids not found in this run:', missing.join(', '));
+  return error ? { items, missing, error } : { items, missing };
 }
 export async function fetchEvidence(ids) { return (await fetchEvidenceFull(ids)).items; }
+/** Footer of a non-evidence item (diagnosis, flag, check, ...): "Open in <view>" + its own evidence, loaded on demand. */
+function objectFooter(e) {
+  const row = el('div', { class: 'row', style: { marginTop: '6px', flexWrap: 'wrap', alignItems: 'flex-start' } });
+  const open = e.open;
+  if (open && open.view) {
+    const viewName = t('nav.' + open.view) === 'nav.' + open.view ? open.view : t('nav.' + open.view);
+    row.append(el('a', { class: 'btn btn-sm', href: hashFor(open.view, open.params), onClick: (ev) => { if (ev.ctrlKey || ev.metaKey) return; ev.preventDefault(); closeAllModals(); navigate(open.view, open.params); } }, t('ref.openIn', { view: viewName })));
+  }
+  const ids = (e.evidence_ids || []).concat(e.inference_ids || []).filter(Boolean);
+  if (ids.length) {
+    const nested = el('details', { class: 'evnested', style: { flex: '1 1 260px', minWidth: '0' } }, el('summary', { class: 'small', style: { cursor: 'pointer', padding: '4px 0' } }, t('evidence.behind', { n: ids.length })));
+    let loaded = false;
+    nested.addEventListener('toggle', () => { if (nested.open && !loaded) { loaded = true; nested.append(el('div', { style: { paddingLeft: '12px', borderLeft: '2px solid var(--line)' } }, evidencePanel(ids, { heading: false }))); } });
+    row.append(nested);
+  }
+  return row.childNodes.length ? row : null;
+}
+/** One evidence (or evidence-like) item: the plain-language sentence first; the original technical statement,
+    provenance and values sit under "Technical detail" (collapsed for operators, open for engineers/reviewers). */
 export function evidenceItem(e) {
+  const type = e.ref_type || refTypeOfId(e.id);
+  const isObj = type !== 'evidence';
+  const stmt = cleanText(e.statement);
+  const plain = cleanText(e.plain || '');
   const sigs = e.signals && e.signals.length ? refChips('signal', e.signals) : null;
-  return el('li', {},
-    el('div', { class: 'evline' }, refLink('evidence', e.id, e.id), ' ', el('span', { class: 'stmt' }, linkifyRefs(cleanText(e.statement)))),
-    el('div', { class: 'meta' }, [e.kind ? el('span', { text: e.kind }) : null, sigs, e.n_samples ? el('span', { text: `${fmt.int(e.n_samples)} ${t('common.n_samples')}` }) : null, e.computed_by ? el('span', { text: `${t('common.computedBy')} ${e.computed_by}` }) : null, e.group_id ? el('span', {}, `${t('common.group')} `, refLink('group', e.group_id)) : null, e.batch_id ? refLink('batch', e.batch_id) : null].filter(Boolean).flatMap((x, i) => (i ? [' — ', x] : [x]))),
-    valuesLine(e.values));
+  const meta = [!isObj && e.kind ? el('span', { text: e.kind }) : null, sigs, e.n_samples ? el('span', { text: `${fmt.int(e.n_samples)} ${t('common.n_samples')}` }) : null, e.computed_by ? el('span', { text: `${t('common.computedBy')} ${e.computed_by}` }) : null, e.group_id ? el('span', {}, `${t('common.group')} `, refLink('group', e.group_id)) : null, e.batch_id && type !== 'batch' ? refLink('batch', e.batch_id) : null].filter(Boolean).flatMap((x, i) => (i ? [' — ', x] : [x]));
+  const engineer = roleAllows('engineer');
+  const tech = el('details', { class: 'evtech', open: engineer, style: { marginTop: '3px' } },
+    el('summary', { class: 'small dim', style: { cursor: 'pointer' } }, t('evidence.technical')),
+    plain && stmt ? el('div', { class: 'small muted techstmt', style: { margin: '2px 0', overflowWrap: 'anywhere' } }, linkifyRefs(stmt)) : null,
+    meta.length ? el('div', { class: 'meta' }, meta) : null,
+    engineer ? valuesLine(e.values) : null);
+  return el('li', { dataset: { refType: type, evId: e.id } },
+    el('div', { class: 'evline' }, isObj ? citeLink(e.id) : refLink('evidence', e.id, e.id), ' ', isObj ? [chip(t('ref.' + type) === 'ref.' + type ? type : t('ref.' + type)), ' '] : null, el('span', { class: 'stmt plain' }, linkifyRefs(plain || stmt || '–'))),
+    tech.childNodes.length > 1 ? tech : null,
+    isObj ? objectFooter(e) : null);
 }
 /** Evidence list; `missing` ids are named so a stale registry never looks like "no evidence". */
 export function evidenceList(items, { missing = [], expected, error } = {}) {
   items = items || [];
   const wrap = el('div', { class: 'evwrap' });
   if (items.length) wrap.append(el('ul', { class: 'evlist' }, items.map(evidenceItem)));
+  const names = missing.slice(0, 6).join(', ') + (missing.length > 6 ? ` +${missing.length - 6}` : '');
   if (error) wrap.append(notice(error, 'fail'));
-  else if (missing.length) wrap.append(notice(t('evidence.missing', { ids: missing.slice(0, 6).join(', ') + (missing.length > 6 ? ` +${missing.length - 6}` : '') }), 'warn'));
+  else if (missing.length) wrap.append(notice(t(missing.every((i) => refTypeOfId(i) === 'evidence') ? 'evidence.missing' : 'evidence.missingAny', { ids: names }), 'warn'));
   else if (!items.length) wrap.append(empty(expected === 0 || expected === undefined ? t('evidence.noneCited') : t('common.none')));
   return wrap;
 }
@@ -481,8 +540,13 @@ export async function showEvidenceModal(ids, title) {
   const { items, missing, error } = await fetchEvidenceFull(ids);
   clear(body).append(evidenceList(items, { missing, expected: ids.length, error }));
 }
-/** Clickable evidence ids (each opens its own popover). */
-export function evChips(ids) { return refChips('evidence', ids, { max: 8 }); }
+/** Clickable cited ids (each opens its own popover). Citations are not always EV- ids: answers and log entries
+    also cite DIAG-, FLAG-, CHK-, INF-... so every chip is typed by its prefix. */
+export function evChips(ids, { max = 8 } = {}) {
+  ids = [...new Set((ids || []).filter(Boolean).map(String))];
+  return el('span', { class: 'evs' }, ids.slice(0, max).map((id) => citeLink(id)), ids.length > max ? el('span', { class: 'dim small', text: ` +${ids.length - max}` }) : null);
+}
+bus.on('decision', () => { for (const k of [...state.cache.keys()]) if (k.includes(':ev:')) state.cache.delete(k); });
 
 // ---------------------------------------------------------------- reference popovers (evidence / check / inference / rule / egress)
 async function findCheck(id) {
@@ -521,18 +585,34 @@ export function egressCard(r) {
     kv([[t('flow.task'), r.task], [t('flow.artifacts'), (r.artifact_types || []).join(', ')], [t('flow.bytes'), fmt.bytes(r.payload_bytes)], [t('log.ts'), fmt.ts(r.ts)], [t('flow.guardResult'), r.guard_reason], [t('common.status'), r.ok ? 'ok' : (r.error || 'error')]]),
     r.payload_preview ? el('pre', { class: 'small preview', text: r.payload_preview }) : null);
 }
+/** Popover for any cited id. The title names what the id really is (a DIAG- id cited as "evidence" is a
+    diagnosis). Evidence, diagnoses, flags, patterns and batches show the evidence-like item of /evidence (plain
+    sentence, technical detail, "Open in ...", own evidence); checks, inferences, rules and model calls keep
+    their detailed cards with the plain sentence on top, and fall back to the generic item when the card's
+    source does not know the id. */
 export async function showRefModal(type, id) {
+  const actual = type === 'cite' || type === 'evidence' || !type ? refTypeOfId(id) : type;
   const body = el('div', { class: 'refbox' }, spinner());
-  modal({ title: `${t('ref.' + type)} ${id}`, body, wide: true });
+  modal({ title: `${t('ref.' + actual)} ${id}`, body, wide: true });
   let node;
   try {
     if (!state.run) node = notice(t('runs.noRunHint'), 'warn');
-    else if (type === 'evidence') { const { items, missing, error } = await fetchEvidenceFull([id]); node = evidenceList(items, { missing, expected: 1, error }); }
-    else if (type === 'inference') { const r = await runApi('/inferences', { params: { ids: id } }); const it = r.ok && r.data.items ? r.data.items[0] : null; node = it ? inferenceCard(it) : notice(t('ref.notFound', { id }), 'warn'); }
-    else if (type === 'check') { const c = await findCheck(id); node = c ? checkCard(c) : notice(t('ref.notFound', { id }), 'warn'); }
-    else if (type === 'rule') { const r = await runApi('/rules'); const rule = r.ok ? (r.data.rules || []).find((x) => x.id === id) : null; node = rule ? ruleCard(rule) : notice(t('ref.notFound', { id }), 'warn'); }
-    else if (type === 'egress') { const r = await runApi('/egress'); const rec = r.ok ? (r.data.ledger || []).find((x) => x.id === id) : null; node = rec ? egressCard(rec) : notice(t('ref.notFound', { id }), 'warn'); }
-    else node = notice(t('ref.notFound', { id }), 'warn');
+    else {
+      const { items, missing, error } = await fetchEvidenceFull([id]);
+      const generic = () => evidenceList(items, { missing, expected: 1, error });
+      const lead = items[0] && items[0].plain ? el('p', { class: 'stmt prose plain-lead' }, linkifyRefs(cleanText(items[0].plain))) : null;
+      let card = null;
+      if (actual === 'inference') { const r = await runApi('/inferences', { params: { ids: id } }); const it = r.ok && r.data.items ? r.data.items[0] : null; card = it ? inferenceCard(it) : null; }
+      else if (actual === 'check') { const c = await findCheck(id); card = c ? checkCard(c) : null; }
+      else if (actual === 'rule') { const r = await runApi('/rules'); const rule = r.ok ? (r.data.rules || []).find((x) => x.id === id) : null; card = rule ? ruleCard(rule) : null; }
+      else if (actual === 'egress') { const r = await runApi('/egress'); const rec = r.ok ? (r.data.ledger || []).find((x) => x.id === id) : null; card = rec ? egressCard(rec) : null; }
+      if (card && lead && (actual === 'check' || actual === 'inference')) {
+        // the card's own statement is the technical wording: keep it, smaller, under the plain sentence
+        const s = card.querySelector('p.stmt');
+        if (s) { s.className = 'small muted techstmt'; s.prepend(el('span', { class: 'dim', text: t('evidence.technical') + ': ' })); }
+      }
+      node = card ? frag(lead, card) : generic();
+    }
   } catch (e) { node = notice(String(e && e.message ? e.message : e), 'fail'); }
   clear(body).append(node);
 }

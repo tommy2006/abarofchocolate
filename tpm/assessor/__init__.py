@@ -57,6 +57,19 @@ def _candidate_actions(ws: Any, settings: Any, dq: dict[str, Any], coverage: dic
     return cands
 
 
+_LEAD_RE = _re.compile(r"^\s*(?:yes|no|unclear|uncertain)\s*[:.,;!–—-]\s*", _re.I)
+
+
+def _strip_lead(text: Any) -> str:
+    """'Yes: 5 duplicate rows ...' -> '5 duplicate rows ...'. The verdict word is shown once, as the headline of a
+    verdict card or as the lead of a chat answer; the reason that follows must read as a sentence of its own."""
+    s = "" if text is None else str(text).strip()
+    out = _LEAD_RE.sub("", s, count=1).lstrip()
+    if not out or out == s:
+        return s
+    return out[0].upper() + out[1:]
+
+
 def _verdicts(dq: dict[str, Any], coverage: dict[str, Any], fitness: dict[str, Any], evaluations: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     thin = coverage.get("thin_regimes") or []
     more: dict[str, Any] = {"would_help": None, "why": "", "estimated_gain": None, "evidence_ids": list(fitness.get("evidence_ids") or []) + list(coverage.get("evidence_ids") or [])}
@@ -72,7 +85,7 @@ def _verdicts(dq: dict[str, Any], coverage: dict[str, Any], fitness: dict[str, A
             if thin:
                 more["why"] += f" More data from the thin regime(s) {', '.join(thin)} would still improve coverage."
         else:
-            more["why"] = f"Uncertain: estimated gain {fitness.get('estimated_gain_more_data'):+.3f} with uncertainty +/-{(fitness.get('slope_uncertainty') or 0) * 0.5:.3f}; the experiments are too noisy to call it."
+            more["why"] = f"The estimated gain is {fitness.get('estimated_gain_more_data'):+.3f} with uncertainty +/-{(fitness.get('slope_uncertainty') or 0) * 0.5:.3f}; the experiments are too noisy to call it."
             if thin:
                 more["why"] += f" Coverage-wise, data from the thin regime(s) {', '.join(thin)} would help regardless."
     else:
@@ -85,10 +98,10 @@ def _verdicts(dq: dict[str, Any], coverage: dict[str, Any], fitness: dict[str, A
     if less_recs:
         gains = [e["expected_effect"].get("dq_scores", {}).get("overall", {}).get("delta", 0) or 0 for e in less_recs]
         less["estimated_gain"] = round(max(gains), 4) if gains else None
-        less["why"] = "Removing bad data helps: " + " ".join(e["rationale"] for e in less_recs[:3])
+        less["why"] = " ".join(_strip_lead(e["rationale"]) for e in less_recs[:3])
     else:
         down = next((e for e in evaluations if e["action"]["type"] == "downsample"), None)
-        less["why"] = "No removal is supported by the evidence: no duplicates, no signal or group is bad enough to drop." + (" " + down["rationale"] if down else "")
+        less["why"] = "The evidence supports no removal: there are no duplicates, and no signal or group is bad enough to drop." + (" " + _strip_lead(down["rationale"]) if down else "")
     return more, less
 
 
@@ -117,7 +130,7 @@ def run_assess(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) -> 
     recommendations = []
     for i, e in enumerate(evaluations):
         if e["recommendation"] == "recommend":
-            recommendations.append({"id": f"REC-{len(recommendations) + 1:03d}", "text": e["rationale"], "action": e["action"], "expected_effect": e.get("expected_effect", {}), "confidence": e["confidence"], "evidence_ids": e.get("evidence_ids", [])})
+            recommendations.append({"id": f"REC-{len(recommendations) + 1:03d}", "text": _strip_lead(e["rationale"]), "action": e["action"], "expected_effect": e.get("expected_effect", {}), "confidence": e["confidence"], "evidence_ids": e.get("evidence_ids", [])})
     more, less = _verdicts(dq, coverage, fitness, evaluations)
     fit_score = fitness.get("fitness_score")
     cov_score = coverage.get("coverage_score")
@@ -147,7 +160,7 @@ def _template_answer(question: str, action: Optional[dict[str, Any]], evaluation
             base += f" Current assessment: {s} More data: {more.get('why', '')} Less data: {less.get('why', '')}"
         return base
     lead = {"recommend": "Yes.", "advise_against": "No.", "neutral": "Unclear."}[evaluation["recommendation"]]
-    txt = f"{lead} {evaluation['rationale']}"
+    txt = f"{lead} {_strip_lead(evaluation['rationale'])}"
     eff = evaluation.get("expected_effect") or {}
     fit = eff.get("fitness")
     if isinstance(fit, dict) and fit.get("available") and fit.get("delta") is not None and "stability" not in evaluation["rationale"]:

@@ -1,18 +1,27 @@
 """HTML report generation (agent F).
 
     run_report(ws, settings, ctx)            pipeline stage: writes report_<lang>.html
-    generate_report(ws, settings, lang)      any language; returns the path
+    generate_report(ws, settings, lang)      any language; returns the path (waits a bounded time for the model summary)
+    ensure_report(ws, settings, lang)        what the API calls: cached per language, regenerated when artifacts change,
+                                             never waits for the language model (it is added when it arrives)
+    report_status(ws, lang)                  state of the report on disk: fresh / stale, model summary ready / pending / none
     collect(ws, settings, lang)              the template context (also useful for the API)
 
-Template-first: every sentence is composed from the i18n dictionaries. If tpm.llm.complete("report_narrative")
-returns ok=True, its text is added as a clearly labelled "model-written summary". Every artifact is optional:
-missing ones render as "not available in this run".
+Template-first: every sentence is composed from the i18n dictionaries and the template report is always written
+first. The optional "model-written summary" (tpm.llm.complete("report_narrative")) runs in a worker thread with a
+time budget; its JSON is parsed into prose (lead paragraph, short sections, open points, references) and cached per
+language in report_llm_<lang>.json. JSON is never printed: when the reply cannot be parsed the section is omitted.
+Every artifact is optional: missing ones render as "not available in this run". Very large runs are capped to the
+most severe rows, with the totals stated, so the HTML stays small.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import re
+import threading
 import time
 from collections import Counter, OrderedDict
 from pathlib import Path
@@ -25,15 +34,25 @@ from ..contracts import now_iso
 from ..workspace import Workspace, dumps
 from . import charts
 from .i18n import Translator, available_languages, normalize_lang
+from .prose import clean_text, detector_label, parse_narrative, strip_lead, whole_sentences
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+REPORT_VERSION = "3"  # bump when the template or the context changes shape: cached reports are then regenerated
 MAX_SIGNALS = 400
-MAX_FLAGS = 200
-MAX_DIAGNOSES = 60
+MAX_FLAGS = 300
+MAX_DIAGNOSES = 100
+MAX_DIAG_CARDS = 30  # full cards for the most severe; the rest of the top MAX_DIAGNOSES as compact table rows
 MAX_CHECK_ROWS = 300
-MAX_LOG_APPENDIX = 1500
+MAX_UNTRUSTED = 100
+MAX_LOG_APPENDIX = 300
 MAX_TIMELINES = 24
 TIMELINE_POINTS = 160
+LLM_MAX_TOKENS = 1600  # the narrative JSON needs ~600-1000 tokens; 700 cut it mid-sentence
+LLM_WAIT_S = 75.0  # blocking callers (pipeline stage, CLI) wait at most this long for the model summary
+LLM_RETRY_S = 600.0  # after a failed model call, do not try again for this long (unless the artifacts change)
+# artifacts whose change makes a cached report stale / a cached model summary stale
+_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger")
+_NARRATIVE_INPUTS = ("schema", "signals", "checks", "trust", "flags", "patterns", "diagnoses")
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -81,6 +100,15 @@ def _pct(v: Any) -> str:
         return ""
 
 
+def _thousands(v: Any, lang: str = "en") -> str:
+    """12345 -> '12,345' (en) / '12 345' with a no-break space (fi, sv)."""
+    try:
+        out = f"{int(v):,}"
+    except Exception:
+        return "" if v is None else str(v)
+    return out if lang == "en" else out.replace(",", "\u00a0")
+
+
 def _short(s: Any, n: int = 140) -> str:
     s = "" if s is None else str(s)
     return s if len(s) <= n else s[: n - 1] + "…"
@@ -107,6 +135,43 @@ def _natural_key(s: str) -> list[Any]:
     return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", str(s))]
 
 
+def _plain_explainer():
+    """tpm.api.evidence_plain.explain(evidence: dict) -> str, when that module exists (it is optional)."""
+    try:
+        from ..api.evidence_plain import explain  # type: ignore
+
+        return explain if callable(explain) else None
+    except Exception:  # ImportError, or a half-written module: the report must still render
+        return None
+
+
+def _same_text(a: str, b: str) -> bool:
+    norm = lambda x: re.sub(r"[^a-z0-9]+", " ", (x or "").lower()).strip()  # noqa: E731
+    return norm(a) == norm(b)
+
+
+def _ev_item(ev: dict[str, Any], explain) -> dict[str, Any]:
+    """One evidence statement for the template: the plain sentence first (when available), the technical one under it."""
+    tech = clean_text(ev.get("statement"))
+    plain = ""
+    if explain is not None:
+        try:
+            plain = str(explain(ev) or "").strip()
+        except Exception:
+            plain = ""
+    if plain and _same_text(plain, tech):
+        plain = ""
+    return {"id": ev.get("id"), "plain": plain, "technical": tech}
+
+
+def _ev_items(ids: Any, evidence: dict[str, dict[str, Any]], explain, limit: int) -> list[dict[str, Any]]:
+    out = []
+    for e in ids or []:
+        if e in evidence and len(out) < limit:
+            out.append(_ev_item(evidence[e], explain))
+    return out
+
+
 # ----------------------------------------------------------------------------- collection
 def _score_timelines(ws: Workspace, schema: Optional[dict[str, Any]], flags: list[dict[str, Any]], detect_meta: Optional[dict[str, Any]], t: Translator) -> Optional[dict[str, Any]]:
     """Per-group downsampled score series from scores.parquet via DuckDB. None when unavailable."""
@@ -114,6 +179,10 @@ def _score_timelines(ws: Workspace, schema: Optional[dict[str, Any]], flags: lis
         return None
     try:
         con = ws.duckdb()
+        try:
+            con = con.cursor()  # the connection is shared with API handlers; a cursor is safe to use from this thread
+        except Exception:
+            pass
         cols = [r[0] for r in con.execute("DESCRIBE scores").fetchall()]
         lc = {c.lower(): c for c in cols}
         score_col = next((lc[c] for c in ("score", "ensemble", "ensemble_score", "anomaly_score", "oof_score", "ensemble_raw") if c in lc), None)
@@ -223,7 +292,7 @@ def _dataflow_statement(ws: Workspace, settings: Settings, t: Translator, summ: 
     return t("statement_external", profile=settings.profile, n_external=summ["n_external"], external_model=settings.external_llm.model, provider=settings.external_llm.provider, bytes=summ["bytes_external"], n_blocked=summ["n_blocked"], n_local=summ["n_local"], local_model=settings.local_llm.model)
 
 
-def _signal_rows(signals: list[dict[str, Any]], evidence: dict[str, dict[str, Any]], inferences: list[dict[str, Any]], t: Translator) -> list[dict[str, Any]]:
+def _signal_rows(signals: list[dict[str, Any]], evidence: dict[str, dict[str, Any]], inferences: list[dict[str, Any]], t: Translator, explain=None) -> list[dict[str, Any]]:
     by_subject: dict[str, list[dict[str, Any]]] = {}
     for inf in inferences:
         by_subject.setdefault(str(inf.get("subject")), []).append(inf)
@@ -231,13 +300,17 @@ def _signal_rows(signals: list[dict[str, Any]], evidence: dict[str, dict[str, An
     for s in signals[:MAX_SIGNALS]:
         sid = str(s.get("id"))
         ev_ids = list(s.get("evidence_ids") or [])
-        ev_stmts = [evidence[e]["statement"] for e in ev_ids if e in evidence][:6]
+        ev_stmts = _ev_items(ev_ids, evidence, explain, 6)
+        seen = {x["technical"] for x in ev_stmts}
         hyps = []
         for inf in by_subject.get(sid, [])[:6]:
             hyps.append({"claim": inf.get("claim", ""), "status": inf.get("status", ""), "confidence": inf.get("confidence"), "reasoning": inf.get("reasoning", ""), "alternatives": inf.get("alternatives") or [], "source": inf.get("source", "code"), "id": inf.get("id"), "human_status": inf.get("human_status")})
             for e in inf.get("evidence_ids") or []:
-                if e in evidence and evidence[e]["statement"] not in ev_stmts and len(ev_stmts) < 8:
-                    ev_stmts.append(evidence[e]["statement"])
+                if e in evidence and len(ev_stmts) < 8:
+                    item = _ev_item(evidence[e], explain)
+                    if item["technical"] not in seen:
+                        seen.add(item["technical"])
+                        ev_stmts.append(item)
         unc = []
         sc = float(s.get("structural_confidence") or 0.0)
         if sc < 0.6:
@@ -302,10 +375,13 @@ def _human_rows(ws: Workspace, log_entries: list[dict[str, Any]], signals: list[
     return rows
 
 
-def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en", use_llm: bool = False, ctx: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en", use_llm: bool = False, ctx: Optional[dict[str, Any]] = None, narrative: Optional[dict[str, Any]] = None, llm_state: str = "none") -> dict[str, Any]:
+    """The template context. `narrative` is a parsed model summary (see _narrative_context); with use_llm=True and no
+    narrative given, the model is asked here, time-boxed (kept for callers that use collect() directly)."""
     settings = settings or ws.settings or get_settings()
     lang = normalize_lang(lang)
     t = Translator(lang)
+    explain = _plain_explainer()
     meta = ws.read_json("meta", {}) or {}
     status = _dump(ws.status())
     schema = ws.read_json("schema") or None
@@ -368,23 +444,38 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     checks_by_rule = Counter(str(c.get("rule_id")) for c in checks if c.get("rule_id"))
     for r in rules:
         comp = r.get("compiled")
-        rule_rows.append({"id": r.get("id"), "text": r.get("text"), "status": r.get("status"), "compiled": _short(json.dumps(comp, ensure_ascii=False), 220) if comp else "", "compile_source": r.get("compile_source"), "compile_confidence": r.get("compile_confidence"), "explanation": r.get("compile_explanation"), "n_checks": checks_by_rule.get(str(r.get("id")), 0)})
-    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "untrusted": untrusted, "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
+        rule_rows.append({"id": r.get("id"), "text": r.get("text"), "status": r.get("status"), "compiled": _short(json.dumps(comp, ensure_ascii=False), 220) if comp else "", "explanation_text": clean_text(r.get("compile_explanation")), "compile_source": r.get("compile_source"), "compile_confidence": r.get("compile_confidence"), "explanation": r.get("compile_explanation"), "n_checks": checks_by_rule.get(str(r.get("id")), 0)})
+    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
 
     # ---- detect
     tl = _score_timelines(ws, schema, flags, detect_meta, t)
     flag_rows = []
+    det_cache: dict[str, dict[str, Any]] = {}
     for f in sorted(flags, key=lambda f: -float(f.get("severity") or 0))[:MAX_FLAGS]:
-        flag_rows.append({**f, "kind_label": t.kind(f.get("kind")), "cause_label": t.cause(f.get("likely_cause_class")), "signals": [f"{s.get('signal')} ({_pct(s.get('contribution'))}{', ' + str(s.get('direction')) if s.get('direction') else ''})" for s in (f.get("signals_ranked") or [])[:5]], "ev": [evidence[e]["statement"] for e in (f.get("evidence_ids") or []) if e in evidence][:3]})
-    detect = {"baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(flags), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
+        det_key = str(f.get("detector") or "")
+        if det_key not in det_cache:
+            det_cache[det_key] = detector_label(det_key, t)
+        flag_rows.append({**f, "statement": clean_text(f.get("statement")), "kind_label": t.kind(f.get("kind")), "cause_label": t.cause(f.get("likely_cause_class")), "det": det_cache[det_key], "signals": [f"{s.get('signal')} ({_pct(s.get('contribution'))}{', ' + str(s.get('direction')) if s.get('direction') else ''})" for s in (f.get("signals_ranked") or [])[:5]], "ev": _ev_items(f.get("evidence_ids"), evidence, explain, 1 if len(flags) > MAX_FLAGS else 3)})
+    flags_by_kind = [(t.kind(k), n) for k, n in Counter(str(f.get("kind")) for f in flags).most_common(8)]
+    flags_by_cause = [(t.cause(k), n) for k, n in Counter(str(f.get("likely_cause_class")) for f in flags if f.get("likely_cause_class")).most_common(8)]
+    detect = {"flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(flags), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
 
     # ---- diagnoses
     diag_rows = []
-    for d in diags[:MAX_DIAGNOSES]:
+    flag_sev = {f.get("id"): float(f.get("severity") or 0) for f in flags}
+    diag_sev = {id(d): max([flag_sev.get(i, 0.0) for i in (d.get("flag_ids") or [])] or [0.0]) for d in diags}
+    diags_sorted = sorted(diags, key=lambda d: (-diag_sev[id(d)], -float(d.get("confidence") or 0))) if len(diags) > MAX_DIAGNOSES else diags
+    for i_d, d in enumerate(diags_sorted[:MAX_DIAGNOSES]):
+        if i_d >= MAX_DIAG_CARDS:  # compact row: what, where, how sure, and the first whole sentences of the summary
+            crit_c = d.get("critique") or None
+            diag_rows.append({"id": d.get("id"), "compact": True, "group_id": d.get("group_id"), "pattern_id": d.get("pattern_id"), "flag_ids": (d.get("flag_ids") or [])[:6], "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "cause_label": t.cause(d.get("cause_class")), "confidence": d.get("confidence"), "severity": diag_sev[id(d)], "critique": {"verdict": crit_c.get("verdict")} if crit_c else None, "verdict_label": t.verdict(crit_c.get("verdict")) if crit_c else "", "human_status": d.get("human_status"), "summary": whole_sentences(clean_text(d.get("summary")), 260) or _short(clean_text(d.get("summary")), 260)})
+            continue
         ranked = d.get("ranked_signals") or []
         svg = charts.hbars([(str(s.get("signal")), float(s.get("contribution") or 0), f"{_pct(s.get('contribution'))}{' ' + str(s.get('direction')) if s.get('direction') else ''}") for s in ranked[:8]])
         crit = d.get("critique") or None
-        diag_rows.append({**d, "cause_label": t.cause(d.get("cause_class")), "ranked_svg": svg, "ranked": ranked[:8], "critique": crit, "verdict_label": t.verdict(crit.get("verdict")) if crit else "", "ev": [evidence[e]["statement"] for e in (d.get("evidence_ids") or []) if e in evidence][:5]})
+        if crit:
+            crit = {**crit, "objections": [x for x in (clean_text(o) for o in (crit.get("objections") or [])) if x]}
+        diag_rows.append({**d, "compact": False, "summary": clean_text(d.get("summary")), "steps": [x for x in (clean_text(x) for x in (d.get("steps") or [])) if x], "uncertainty": [x for x in (clean_text(x) for x in (d.get("uncertainty") or [])) if x], "cause_label": t.cause(d.get("cause_class")), "severity": diag_sev[id(d)], "ranked_svg": svg, "ranked": ranked[:8], "critique": crit, "verdict_label": t.verdict(crit.get("verdict")) if crit else "", "ev": _ev_items(d.get("evidence_ids"), evidence, explain, 5)})
     crit_counts = Counter((d.get("critique") or {}).get("verdict") for d in diags)
 
     # ---- humans / log
@@ -418,7 +509,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         domain_items = _scalars(domain) + [(k, _pct(v)) for k, v in (domain.get("likelihood") or {}).items()] if isinstance(domain.get("likelihood"), dict) else _scalars(domain)
     overview = []
     if schema:
-        overview.append(t("overview_dataset", rows=f"{int(schema.get('n_rows') or 0):,}", cols=schema.get("n_cols"), source=Path(str(schema.get("source_path") or meta.get("source_path") or "")).name, format=schema.get("format"), n_signals=len(schema.get("signal_columns") or signals), n_excluded=n_excluded, groups=schema.get("n_groups"), method=schema.get("grouping_method"), batches=n_batches))
+        overview.append(t("overview_dataset", rows=_thousands(schema.get("n_rows") or 0, lang), cols=schema.get("n_cols"), source=Path(str(schema.get("source_path") or meta.get("source_path") or "")).name, format=schema.get("format"), n_signals=len(schema.get("signal_columns") or signals), n_excluded=n_excluded, groups=schema.get("n_groups"), method=schema.get("grouping_method"), batches=n_batches))
     else:
         overview.append(t("overview_dataset_missing"))
     if checks:
@@ -456,42 +547,288 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
                 elif isinstance(p, (list, tuple)) and len(p) >= 2:
                     pts.append((p[0], p[1]))
         recs = assessor.get("recommendations") or assessor.get("actions") or []
-        assess_ctx = {"scalars": _scalars(assessor), "summary": assessor.get("summary") or "", "curve_svg": charts.line_chart(pts, x_label=t("learning_curve")) if pts else "", "recommendations": [r if isinstance(r, dict) else {"action": str(r)} for r in recs][:12]}
+        if not pts and isinstance(assessor.get("fitness"), dict):
+            for pnt in assessor["fitness"].get("curve") or []:
+                if isinstance(pnt, dict) and pnt.get("fraction") is not None and (pnt.get("primary") if pnt.get("primary") is not None else pnt.get("score")) is not None:
+                    pts.append((pnt["fraction"], pnt.get("primary") if pnt.get("primary") is not None else pnt.get("score")))
+        rec_rows = []
+        for r in recs[:12]:
+            if not isinstance(r, dict):
+                rec_rows.append({"action": str(r), "text": "", "gain": None, "evidence": ""})
+                continue
+            act = r.get("action")
+            if isinstance(act, dict):
+                params = ", ".join(f"{k} {v if not isinstance(v, (list, tuple)) else ', '.join(str(x) for x in v)}" for k, v in (act.get("params") or {}).items() if v not in (None, "", [], {}))
+                act_label = str(act.get("type") or "").replace("_", " ") + (f" ({params})" if params else "")
+            else:
+                act_label = str(act or r.get("title") or "")
+            gain = r.get("expected_gain")
+            if gain is None and isinstance(r.get("expected_effect"), dict):
+                gain = r["expected_effect"].get("estimated_gain")
+                if gain is None:
+                    gain = ((r["expected_effect"].get("dq_scores") or {}).get("overall") or {}).get("delta")
+            ev = r.get("evidence") or r.get("reason") or ", ".join(str(x) for x in (r.get("evidence_ids") or [])[:6])
+            rec_rows.append({"id": r.get("id"), "action": act_label, "text": strip_lead(r.get("text") or r.get("rationale") or ""), "gain": gain, "evidence": ev})
+        verdicts = []
+        for key, label in (("more_data_verdict", "assessor_more_data"), ("less_data_verdict", "assessor_less_data")):
+            v = assessor.get(key)
+            if isinstance(v, dict):
+                wh = v.get("would_help")
+                verdicts.append({"question": t(label), "answer": t("yes") if wh is True else (t("no") if wh is False else t("unclear")), "state": "pass" if wh is True else ("muted" if wh is False else "warn"), "why": strip_lead(re.sub(r"^\s*Removing bad data helps\s*:\s*", "", str(v.get("why") or ""))), "gain": v.get("estimated_gain")})
+        summary_text = re.sub(r"\b(?:More|Less) data:\s*(?:yes|no|unclear)\.\s*", "", clean_text(assessor.get("summary") or "")) if verdicts else clean_text(assessor.get("summary") or "")
+        assess_ctx = {"scalars": _scalars(assessor), "summary": summary_text, "verdicts": verdicts, "curve_svg": charts.line_chart(pts, x_label=t("learning_curve")) if pts else "", "recommendations": rec_rows}
 
     # ---- optional model-written summary
-    llm = None
-    if use_llm:
-        llm = _llm_summary(ws, settings, lang, overview, flag_rows, diag_rows, quality, ctx)
+    anchors = {str(f.get("id")) for f in flag_rows} | {str(d.get("id")) for d in diag_rows}
+    known_ids = set(evidence) | {str(x.get("id")) for x in flags} | {str(x.get("id")) for x in diags} | {str(x.get("check_id")) for x in checks} | {str(x.get("id")) for x in inferences} | {str(x.get("id")) for x in rules} | {str(x.get("id")) for x in patterns}
+    llm_payload = _narrative_payload(lang, overview, flag_rows, diag_rows, quality)
+    if narrative is None and use_llm:
+        budget = LLM_WAIT_S
+        if ctx and ctx.get("t_start") and ctx.get("time_budget_s"):
+            budget = min(budget, max(0.0, float(ctx["time_budget_s"]) - (time.time() - float(ctx["t_start"]))))
+        narrative = _ask_model(ws, settings, lang, llm_payload, wait_s=budget)
+    llm = _narrative_context(narrative, known_ids, anchors)
+    if llm is not None:
+        llm_state = "ready"
+    elif llm_state == "ready":
+        llm_state = "none"
 
     return {
         "t": t, "lang": lang, "lang_name": t("lang_name"), "languages": available_languages(), "generated_at": _ts(now_iso()), "run_id": ws.run_id, "meta": meta, "status": status, "source_name": Path(str(meta.get("source_path") or status.get("source_path") or "")).name or t("unknown"), "source_path": meta.get("source_path") or status.get("source_path") or "",
-        "stages": stages, "overview": overview, "schema": schema, "dataset": dataset, "domain_items": domain_items, "signals": _signal_rows(signals, evidence, inferences, t), "n_signals_total": len(signals), "relations_count": (len(relations.get("pairs") or []) if isinstance(relations, dict) else (len(relations) if isinstance(relations, list) else 0)),
-        "quality": quality, "detect": detect, "diagnoses": diag_rows, "n_diag_total": len(diags), "human": human, "log": log, "dataflow": dataflow, "evaluation": eval_ctx, "assessor": assess_ctx, "llm": llm,
+        "stages": stages, "overview": overview, "schema": schema, "dataset": dataset, "domain_items": domain_items, "signals": _signal_rows(signals, evidence, inferences, t, explain), "n_signals_total": len(signals), "relations_count": (len(relations.get("pairs") or []) if isinstance(relations, dict) else (len(relations) if isinstance(relations, list) else 0)),
+        "quality": quality, "detect": detect, "diagnoses": diag_rows, "n_diag_total": len(diags), "human": human, "log": log, "dataflow": dataflow, "evaluation": eval_ctx, "assessor": assess_ctx, "llm": llm, "llm_state": llm_state, "llm_payload": llm_payload, "has_plain_evidence": explain is not None,
+        "caps": {"flags": (len(flag_rows), len(flags)), "diagnoses": (len(diag_rows), len(diags)), "untrusted": (min(len(untrusted), MAX_UNTRUSTED), len(untrusted))},
         "fmt": {"num": _num, "pct": _pct, "short": _short, "ts": _ts},
     }
 
 
-def _llm_summary(ws: Workspace, settings: Settings, lang: str, overview: list[str], flags: list[dict[str, Any]], diags: list[dict[str, Any]], quality: dict[str, Any], ctx: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Ask the LLM layer for a narrative built from derived artifacts only; None when unavailable."""
-    if ctx and ctx.get("t_start") and ctx.get("time_budget_s"):
-        if time.time() - float(ctx["t_start"]) > 0.9 * float(ctx["time_budget_s"]):
-            return None
+# ----------------------------------------------------------------------------- model-written summary
+_LANGUAGE_NAMES = {"en": "English", "fi": "Finnish (suomi)", "sv": "Swedish (svenska)"}
+
+
+def _narrative_payload(lang: str, overview: list[str], flags: list[dict[str, Any]], diags: list[dict[str, Any]], quality: dict[str, Any]) -> dict[str, Any]:
+    """Derived artifacts only, under keys the egress guard knows (report_sections / flags / diagnoses / meta)."""
+    name = _LANGUAGE_NAMES.get(lang, "English")
+    return {
+        "language": lang,
+        "instructions": (
+            f"Write for a plant operator, in {name}: the headings and every sentence must be in {name}. Keep it short: an executive "
+            "summary of 2 to 4 sentences, then at most 4 sections of 2 to 4 sentences each, then at most 3 uncertainty sentences. "
+            "Use complete sentences in plain prose: no lists, no markdown and no JSON inside the text fields. Keep every number exactly "
+            "as given and cite only ids that appear in the artifacts."
+        ),
+        "report_sections": {"overview": overview[:4], "quality": {k: quality[k] for k in ("n_checks", "n_pass", "n_warn", "n_fail", "n_batches") if k in quality}, "untrusted_batches": quality.get("n_untrusted_total", 0)},
+        "flags": [{"id": f.get("id"), "kind": f.get("kind"), "group_id": f.get("group_id"), "severity": f.get("severity"), "statement": whole_sentences(f.get("statement"), 320) or _short(f.get("statement"), 320), "signals": f.get("signals")} for f in flags[:8]],
+        "diagnoses": [{"id": d.get("id"), "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "confidence": d.get("confidence"), "summary": whole_sentences(d.get("summary"), 320) or _short(d.get("summary"), 320), "verdict": (d.get("critique") or {}).get("verdict")} for d in diags[:8]],
+    }
+
+
+def _call_model(ws: Workspace, settings: Settings, lang: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """One report_narrative call -> {"status": "ok", "narrative", "source", "model", "route"} or {"status": "failed", "error"}.
+    Never raises. The reply is parsed here so that only prose is ever stored."""
     try:
         from ..llm import complete
 
-        payload = {
-            "language": lang,
-            "overview": overview,
-            "quality": {k: quality[k] for k in ("n_checks", "n_pass", "n_warn", "n_fail")},
-            "top_flags": [{"id": f.get("id"), "kind": f.get("kind"), "group": f.get("group_id"), "statement": _short(f.get("statement"), 200), "signals": f.get("signals")} for f in flags[:8]],
-            "diagnoses": [{"id": d.get("id"), "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "confidence": d.get("confidence"), "summary": _short(d.get("summary"), 240), "verdict": (d.get("critique") or {}).get("verdict")} for d in diags[:8]],
-        }
-        res = complete("report_narrative", payload, purpose="report: model-written summary", ws=ws, settings=settings, language=lang, max_tokens=700)
-        if getattr(res, "ok", False) and (getattr(res, "text", "") or "").strip():
-            return {"text": res.text.strip(), "source": res.source or "llm", "model": getattr(res, "model", ""), "route": getattr(res, "route", "")}
+        res = complete("report_narrative", payload, purpose=f"report: model-written summary ({lang})", ws=ws, settings=settings, language=lang, max_tokens=LLM_MAX_TOKENS)
+        data, text = getattr(res, "data", None), (getattr(res, "text", "") or "")
+        if not (getattr(res, "ok", False) or data or text.strip()):
+            return {"status": "failed", "error": str(getattr(res, "error", "") or "no model available")[:300]}
+        parsed = parse_narrative(data, text)
+        if parsed is None:
+            return {"status": "failed", "error": "the model reply could not be read as a summary"}
+        return {"status": "ok", "narrative": parsed, "source": getattr(res, "source", "") or "llm", "model": getattr(res, "model", "") or "", "route": getattr(res, "route", "") or "", "latency_ms": getattr(res, "latency_ms", None)}
+    except Exception as e:  # the report never depends on the model
+        return {"status": "failed", "error": str(e)[:300]}
+
+
+def _ask_model(ws: Workspace, settings: Settings, lang: str, payload: dict[str, Any], wait_s: float) -> Optional[dict[str, Any]]:
+    """Time-boxed model call in a worker thread; None when it is not back within wait_s (the worker is abandoned)."""
+    if wait_s <= 0:
+        return None
+    box: dict[str, Any] = {}
+    th = threading.Thread(target=lambda: box.update(_call_model(ws, settings, lang, payload)), name=f"tpm-report-llm-{lang}", daemon=True)
+    th.start()
+    th.join(wait_s)
+    return box if box.get("status") == "ok" else None
+
+
+def _narrative_context(narrative: Optional[dict[str, Any]], known_ids: set[str], anchors: set[str]) -> Optional[dict[str, Any]]:
+    """Stored narrative -> template context; references are limited to ids that exist in this run (a model must not
+    invent evidence) and link to the row / card when it is rendered in this report."""
+    if not isinstance(narrative, dict) or narrative.get("status") != "ok" or not isinstance(narrative.get("narrative"), dict):
+        return None
+    n = narrative["narrative"]
+    ref = lambda i: {"id": i, "anchor": i in anchors}  # noqa: E731
+    sections = [{"heading": s.get("heading") or "", "paragraphs": list(s.get("paragraphs") or []), "refs": [ref(i) for i in (s.get("refs") or []) if i in known_ids]} for s in (n.get("sections") or []) if s.get("paragraphs")]
+    summary = list(n.get("summary") or [])
+    if not summary and not sections:
+        return None
+    return {"summary": summary, "sections": sections, "uncertainty": list(n.get("uncertainty") or []), "confidence": n.get("confidence"), "truncated": bool(n.get("truncated")), "source": narrative.get("source") or "llm", "model": narrative.get("model") or "", "route": narrative.get("route") or "", "generated_at": _ts(narrative.get("ts") or "")}
+
+
+# ----------------------------------------------------------------------------- cache: fingerprints, stored narrative, jobs
+_locks_guard = threading.Lock()
+_run_locks: dict[str, threading.RLock] = {}
+_jobs: dict[str, dict[str, Any]] = {}
+
+
+def _run_lock(ws: Workspace) -> threading.RLock:
+    key = str(ws.dir)
+    with _locks_guard:
+        if key not in _run_locks:
+            _run_locks[key] = threading.RLock()
+        return _run_locks[key]
+
+
+def _fingerprint(ws: Workspace, names: tuple[str, ...], extra: str = "") -> str:
+    h = hashlib.sha1(f"v{REPORT_VERSION}|{extra}".encode("utf-8"))
+    for name in names:
+        try:
+            st = ws.path(name).stat()
+            h.update(f"|{name}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8"))
+        except OSError:
+            h.update(f"|{name}:-".encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def _code_stamp() -> str:
+    """Size + mtime of the template, the dictionaries and this package: a cached report written by older code is stale."""
+    parts = []
+    for f in [TEMPLATE_DIR / "report.html.j2", *sorted((Path(__file__).resolve().parent / "i18n").glob("*.json")), *sorted(Path(__file__).resolve().parent.glob("*.py"))]:
+        try:
+            st = f.stat()
+            parts.append(f"{f.name}:{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            pass
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:10]
+
+
+def report_fingerprint(ws: Workspace) -> str:
+    """Changes when any artifact the report shows changes, when a human records a decision, or when the report code /
+    template / dictionaries change."""
+    try:
+        n_human = len(ws.log.entries(actor_prefix="human:", limit=1_000_000))
+    except Exception:
+        n_human = -1
+    return _fingerprint(ws, _REPORT_INPUTS, extra=f"human={n_human}|code={_code_stamp()}")
+
+
+def narrative_fingerprint(ws: Workspace) -> str:
+    """Changes when what the model summary talks about changes (findings), not on every log / ledger entry."""
+    return _fingerprint(ws, _NARRATIVE_INPUTS)
+
+
+def narrative_path(ws: Workspace, lang: str) -> Path:
+    return ws.dir / f"report_llm_{normalize_lang(lang)}.json"
+
+
+def _load_narrative(ws: Workspace, lang: str) -> Optional[dict[str, Any]]:
+    """The stored model summary (or stored failure) for this language, if it matches the current findings."""
+    try:
+        with open(narrative_path(ws, lang), "r", encoding="utf-8") as f:
+            d = json.load(f)
     except Exception:
         return None
-    return None
+    if not isinstance(d, dict) or d.get("fingerprint") != narrative_fingerprint(ws) or d.get("version") != REPORT_VERSION:
+        return None
+    if d.get("status") != "ok":
+        try:
+            if time.time() - float(d.get("epoch") or 0) > LLM_RETRY_S:
+                return None  # old failure: worth another try
+        except Exception:
+            return None
+    return d
+
+
+def _store_narrative(ws: Workspace, lang: str, fingerprint: str, result: dict[str, Any]) -> None:
+    try:
+        rec = {**result, "fingerprint": fingerprint, "version": REPORT_VERSION, "lang": normalize_lang(lang), "ts": now_iso(), "epoch": time.time()}
+        _atomic_write(narrative_path(ws, lang), json.dumps(rec, ensure_ascii=False, indent=1))
+    except Exception:
+        pass
+
+
+def _atomic_write(out: Path, text: str) -> None:
+    """Unique temp name (two writers never share it) + replace with retries (Windows refuses while a reader has it open)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(f"{out.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    for i in range(60):
+        try:
+            tmp.replace(out)
+            return
+        except PermissionError:
+            time.sleep(0.02 + 0.01 * i)
+    try:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(text)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+_META_RE = re.compile(r'<meta name="tpm-report" content="([^"]*)"')
+
+
+def _read_meta(path: Path) -> dict[str, str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            head = f.read(2048)
+    except OSError:
+        return {}
+    m = _META_RE.search(head)
+    if not m:
+        return {}
+    return dict(kv.split("=", 1) for kv in m.group(1).split(";") if "=" in kv)
+
+
+def _llm_enabled(use_llm: Optional[bool]) -> bool:
+    if os.environ.get("TPM_REPORT_LLM", "").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return bool(use_llm)
+
+
+def _job_key(ws: Workspace, lang: str) -> str:
+    return f"{ws.dir}|{normalize_lang(lang)}"
+
+
+def _job_running(ws: Workspace, lang: str) -> bool:
+    with _locks_guard:
+        j = _jobs.get(_job_key(ws, lang))
+    return bool(j and j["thread"].is_alive())
+
+
+def _start_job(ws: Workspace, settings: Settings, lang: str, payload: dict[str, Any], rerender: bool, out: Optional[Path] = None) -> dict[str, Any]:
+    """Ask the model in a daemon thread (one per run and language). The result is stored in report_llm_<lang>.json;
+    with rerender=True the report is rendered again when the summary arrives (API use). Never raises."""
+    key = _job_key(ws, lang)
+    with _locks_guard:
+        j = _jobs.get(key)
+        if j and j["thread"].is_alive():
+            j["rerender"] = j["rerender"] or rerender
+            return j
+        job: dict[str, Any] = {"done": threading.Event(), "rerender": rerender, "started": time.time(), "result": None, "out": out}
+
+        def work() -> None:
+            try:
+                fp = narrative_fingerprint(ws)
+                result = _call_model(ws, settings, lang, payload)
+                job["result"] = result
+                _store_narrative(ws, lang, fp, result)
+                if job["rerender"]:
+                    _render_to_disk(ws, settings, lang, use_llm=True, out_path=job["out"])
+            except Exception:
+                pass
+            finally:
+                job["done"].set()
+
+        job["thread"] = threading.Thread(target=work, name=f"tpm-report-llm-{normalize_lang(lang)}", daemon=True)
+        _jobs[key] = job
+        job["thread"].start()
+        return job
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -506,6 +843,7 @@ def _environment() -> Environment:
         _env.filters["pct"] = _pct
         _env.filters["short"] = _short
         _env.filters["ts"] = _ts
+        _env.filters["thousands"] = _thousands
     return _env
 
 
@@ -513,22 +851,110 @@ def render_html(context: dict[str, Any]) -> str:
     return _environment().get_template("report.html.j2").render(**context)
 
 
-def generate_report(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en", use_llm: bool = True, out_path: Optional[str | Path] = None, ctx: Optional[dict[str, Any]] = None) -> Path:
+def _render_to_disk(ws: Workspace, settings: Settings, lang: str, use_llm: bool, out_path: Optional[str | Path] = None, log: bool = True, pending: bool = False) -> dict[str, Any]:
+    """Collect + render + write, under the run lock. The stored model summary is included when it matches the current
+    findings; `pending` marks a report whose summary is still being written. Returns the context."""
+    with _run_lock(ws):
+        fp = report_fingerprint(ws)
+        narrative = _load_narrative(ws, lang) if use_llm else None
+        state = "pending" if (pending and not (narrative and narrative.get("status") == "ok")) else "none"
+        context = collect(ws, settings, lang, use_llm=False, narrative=narrative, llm_state=state)
+        caps = context["caps"]
+        context["report_meta"] = f"v={REPORT_VERSION};fp={fp};llm={context['llm_state']};flags={caps['flags'][0]}/{caps['flags'][1]};diagnoses={caps['diagnoses'][0]}/{caps['diagnoses'][1]}"
+        html = render_html(context)
+        out = Path(out_path) if out_path else report_path(ws, lang)
+        _atomic_write(out, html)
+        if log:
+            try:
+                ws.log.record("system:report", "report", "report", out.name, {"lang": lang, "bytes": out.stat().st_size, "llm_summary": bool(context.get("llm")), "flags_shown": caps["flags"][0], "flags_total": caps["flags"][1], "diagnoses_shown": caps["diagnoses"][0], "diagnoses_total": caps["diagnoses"][1]})
+            except Exception:
+                pass
+        context["out_path"] = out
+        return context
+
+
+def generate_report(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en", use_llm: bool = True, out_path: Optional[str | Path] = None, ctx: Optional[dict[str, Any]] = None, llm_wait_s: Optional[float] = None) -> Path:
+    """Write report_<lang>.html and return its path. The template report is written first; the model summary is then
+    awaited for at most llm_wait_s seconds (default LLM_WAIT_S, limited by the pipeline time budget) and the report is
+    rendered once more when it arrives. With llm_wait_s=0 the summary is added later by the worker (API use)."""
     settings = settings or ws.settings or get_settings()
     lang = normalize_lang(lang)
-    context = collect(ws, settings, lang, use_llm=use_llm, ctx=ctx)
-    html = render_html(context)
-    out = Path(out_path) if out_path else report_path(ws, lang)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(html)
-    tmp.replace(out)
-    try:
-        ws.log.record("system:report", "report", "report", out.name, {"lang": lang, "bytes": out.stat().st_size, "llm_summary": bool(context.get("llm"))})
-    except Exception:
-        pass
+    use_llm = _llm_enabled(use_llm)
+    wait = LLM_WAIT_S if llm_wait_s is None else max(0.0, float(llm_wait_s))
+    if ctx and ctx.get("t_start") and ctx.get("time_budget_s"):
+        wait = min(wait, max(0.0, 0.95 * float(ctx["time_budget_s"]) - (time.time() - float(ctx["t_start"]))))
+    progress = (ctx or {}).get("progress")
+    need_model = use_llm and _load_narrative(ws, lang) is None
+    context = _render_to_disk(ws, settings, lang, use_llm, out_path, pending=need_model)
+    out = context["out_path"]
+    if not need_model:
+        return out
+    blocking = wait > 0
+    job = _start_job(ws, settings, lang, context["llm_payload"], rerender=not blocking, out=Path(out_path) if out_path else None)
+    if not blocking:
+        return out
+    if callable(progress):
+        try:
+            progress(0.6, f"report written; waiting up to {wait:.0f} s for the model-written summary ({lang})")
+        except Exception:
+            pass
+    job["done"].wait(wait)
+    # arrived: include it; not arrived or failed: the report states that no model summary is included
+    _render_to_disk(ws, settings, lang, use_llm, out_path, log=bool(job["result"] and job["result"].get("status") == "ok"))
     return out
+
+
+def report_status(ws: Workspace, lang: str = "en") -> dict[str, Any]:
+    """{"exists", "fresh", "llm": ready|pending|none, "bytes", "generated_at", "flags", "diagnoses"} for report_<lang>.html."""
+    lang = normalize_lang(lang)
+    p = report_path(ws, lang)
+    if not p.exists():
+        return {"lang": lang, "exists": False, "fresh": False, "llm": "none", "bytes": 0}
+    meta = _read_meta(p)
+    st = p.stat()
+    llm = meta.get("llm", "none")
+    if llm == "pending" and not _job_running(ws, lang):
+        llm = "stalled"  # rendered while a worker was running that no longer exists (server restart)
+    return {"lang": lang, "exists": True, "fresh": bool(meta) and meta.get("v") == REPORT_VERSION and meta.get("fp") == report_fingerprint(ws), "llm": llm, "bytes": st.st_size, "generated_at": _ts(time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(st.st_mtime))) + " UTC", "flags": meta.get("flags", ""), "diagnoses": meta.get("diagnoses", "")}
+
+
+def ensure_report(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en", use_llm: bool = True, force: bool = False, ask_model: bool = True) -> dict[str, Any]:
+    """API entry point. Returns report_status() plus "path", "regenerated" and "seconds"; never waits for the model.
+
+    - cached per language: a fresh report_<lang>.html is served as it is;
+    - regenerated (template first, a few seconds at most) when it is missing, when an artifact changed, when a human
+      recorded a decision, or when the report code changed (REPORT_VERSION);
+    - the model summary is requested in a worker thread and the report is rendered again when it arrives; until then
+      the status says llm="pending". A failed model call is remembered for LLM_RETRY_S seconds;
+    - ask_model=False uses a stored summary but never starts the model (e-mail, export)."""
+    settings = settings or ws.settings or get_settings()
+    lang = normalize_lang(lang)
+    use_llm = _llm_enabled(use_llm)
+    t0 = time.time()
+    regenerated = False
+    with _run_lock(ws):
+        st = report_status(ws, lang)
+        stored = _load_narrative(ws, lang) if use_llm else None
+        have = bool(stored and stored.get("status") == "ok")
+        want_model = use_llm and ask_model and stored is None  # nothing stored (or an old failure): ask the model
+        running = _job_running(ws, lang)
+        stale = force or not st["exists"] or not st["fresh"]
+        # rendered without the summary although one is stored now (or the other way round after new findings)
+        mismatch = use_llm and st["exists"] and ((have and st["llm"] != "ready") or (not have and st["llm"] == "ready") or st["llm"] == "stalled" or (st["llm"] == "pending" and not want_model and not running))
+        if stale or mismatch:
+            context = _render_to_disk(ws, settings, lang, use_llm, pending=want_model or running)
+            regenerated = True
+            if want_model and not running:
+                _start_job(ws, settings, lang, context["llm_payload"], rerender=True)
+        elif want_model and not running:
+            context = collect(ws, settings, lang, use_llm=False)
+            _start_job(ws, settings, lang, context["llm_payload"], rerender=True)
+        st = report_status(ws, lang)
+    if use_llm and st["llm"] != "ready" and _job_running(ws, lang):
+        st["llm"] = "pending"
+    elif st["llm"] in ("pending", "stalled"):
+        st["llm"] = "none"
+    return {**st, "path": str(report_path(ws, lang)), "regenerated": regenerated, "seconds": round(time.time() - t0, 2)}
 
 
 def run_report(ws: Workspace, settings: Settings, ctx: dict[str, Any]) -> dict[str, Any]:
@@ -542,4 +968,5 @@ def run_report(ws: Workspace, settings: Settings, ctx: dict[str, Any]) -> dict[s
     out = generate_report(ws, settings, lang, use_llm=use_llm, ctx=ctx)
     if callable(progress):
         progress(1.0, "report written")
-    return {"message": f"report written: {out.name}", "path": str(out), "lang": lang}
+    llm = _read_meta(out).get("llm", "none")
+    return {"message": f"report written: {out.name}" + (" (with model-written summary)" if llm == "ready" else ""), "path": str(out), "lang": lang, "llm_summary": llm == "ready"}

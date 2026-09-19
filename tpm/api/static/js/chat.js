@@ -2,7 +2,7 @@
    Answers come from tpm.llm.agent.chat when a model exists, otherwise from the server's template
    answers; the source is always labelled. Every reference in an answer (FLAG-, EV-, S07, B00003...)
    is a link. */
-import { state, t, el, clear, runApi, errText, bus, chip, evChips, actorName, actorRole, kindChip, store, linkifyRefs, cleanText, refLink } from './core.js';
+import { state, t, el, clear, runApi, errText, bus, chip, evChips, evidencePanel, actorName, actorRole, kindChip, store, linkifyRefs, cleanText, refLink } from './core.js';
 
 const chat = { open: false, context: null, messages: [], busy: false };
 let drawer, msgsEl, ctxEl, inputEl;
@@ -78,13 +78,29 @@ function srcLabel(m) {
   return el('span', { class: cls, text: label + (m.note ? ' — ' + m.note : '') });
 }
 
+/** Citations of an answer. An answer cites whatever supports it: evidence (EV-) but also diagnoses (DIAG-),
+    flags (FLAG-), checks (CHK-), inferences (INF-)... Every chip is typed by its prefix and opens a popover
+    with the content; "What the sources say" lists all of them in plain language, loaded when opened. */
+const openSources = new Set();
+function citations(ids, key) {
+  ids = [...new Set((ids || []).filter(Boolean).map(String))];
+  const box = el('div', { class: 'cites' }, evChips(ids, { max: 10 }));
+  const det = el('details', { class: 'cite-sources', style: { marginTop: '4px' } }, el('summary', { class: 'small dim', style: { cursor: 'pointer' } }, t('evidence.sources', { n: ids.length })));
+  let loaded = false;
+  const load = () => { if (loaded) return; loaded = true; det.append(evidencePanel(ids, { heading: false })); };
+  det.addEventListener('toggle', () => { if (det.open) { openSources.add(key); load(); } else openSources.delete(key); });
+  if (openSources.has(key)) { det.open = true; load(); }  // keep it open across re-renders of the message list
+  box.append(det);
+  return box;
+}
+
 function renderMsgs() {
   clear(msgsEl);
   if (!chat.messages.length) msgsEl.append(el('div', { class: 'drawer-empty', text: t('chat.empty') }));
-  for (const m of chat.messages) {
+  for (const [i, m] of chat.messages.entries()) {
     const text = m.role === 'user' ? String(m.text || '') : cleanText(m.text);
     const n = el('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'assistant') }, m.role === 'user' ? text : linkifyRefs(text || '–'));
-    if (m.role !== 'user') { n.append(srcLabel(m)); if (m.evidence_ids && m.evidence_ids.length) n.append(evChips(m.evidence_ids)); }
+    if (m.role !== 'user') { n.append(srcLabel(m)); if (m.evidence_ids && m.evidence_ids.length) n.append(citations(m.evidence_ids, `${state.run}:${i}`)); }
     msgsEl.append(n);
     if (m.role !== 'user' && m.followups && m.followups.length && m === chat.messages[chat.messages.length - 1]) {
       msgsEl.append(el('div', { class: 'drawer-quick', style: { padding: '0' } }, m.followups.slice(0, 4).map((q) => el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => send(q) }, q))));
