@@ -15,7 +15,7 @@ from typing import Any, Optional
 from ..contracts import now_iso
 from ..workspace import ARTIFACTS, Workspace, dumps
 
-JSON_ARTIFACTS = ["meta", "status", "schema", "signals", "relations", "domain", "batches", "rules", "patterns", "baseline", "detect_meta", "evaluation", "assessor"]
+JSON_ARTIFACTS = ["meta", "status", "schema", "signals", "relations", "domain", "batches", "rules", "patterns", "baseline", "detect_meta", "evaluation", "assessor", "guard_demo.json"]
 JSONL_ARTIFACTS = ["evidence", "inferences", "checks", "trust", "flags", "diagnoses", "egress_ledger", "chat"]
 EXCLUDED = {"dataset", "scores", "decision_log"}
 
@@ -71,10 +71,13 @@ def export_run(ws: Workspace, out_dir: str | Path, languages: Optional[list[str]
         if errors:
             (folder / "EXPORT_ERROR.txt").write_text("\n".join(errors), encoding="utf-8")
 
-    # decision log + verification
+    # decision log + verification (hash chain, and what is logged per object type: tpm.log.completeness)
     ws.log.export_jsonl(folder / "decision_log.jsonl")
     verify = ws.log.verify_chain()
-    (folder / "verify.json").write_text(dumps({"run_id": ws.run_id, "verified_at": now_iso(), **verify}, indent=1), encoding="utf-8")
+    from .completeness import audit_safe
+
+    completeness = audit_safe(ws)
+    (folder / "verify.json").write_text(dumps({"run_id": ws.run_id, "verified_at": now_iso(), **verify, "completeness": completeness}, indent=1), encoding="utf-8")
 
     # derived artifacts
     for key in JSON_ARTIFACTS + JSONL_ARTIFACTS:

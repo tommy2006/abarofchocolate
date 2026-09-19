@@ -1,10 +1,17 @@
 """Egress ledger: every model call (local and external, attempted or completed) becomes an EgressRecord in
 workspace/<run>/egress_ledger.jsonl and a hash-chained decision-log entry (action "egress").
-With ws=None an in-memory ledger is kept so tests and ad-hoc calls still have a trail."""
+With ws=None an in-memory ledger is kept so tests and ad-hoc calls still have a trail.
+
+Records of `tpm guard-demo` carry guard_result "demo_allowed" / "demo_blocked": the guard's verdict on a payload that
+was shown, never sent. They are kept out of every count of real model calls (summary, usage, budget, statement).
+
+narrative_coverage(ws) says who wrote the explanations of a run: how many diagnoses / critiques / report summaries a
+model wrote (local or external, which model) and how many come from the evidence-based templates, and why."""
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from collections import Counter
 from typing import Any, Optional
@@ -16,6 +23,12 @@ _MEM: list[EgressRecord] = []
 _MEM_MAX = 1000
 _lock = threading.RLock()
 _counters: dict[str, int] = {}
+DEMO_RESULTS = ("demo_allowed", "demo_blocked")  # guard demonstration: shown, never sent
+
+
+def is_demo(r: Any) -> bool:
+    g = r.get("guard_result") if isinstance(r, dict) else getattr(r, "guard_result", None)
+    return str(g or "") in DEMO_RESULTS
 
 
 def sha256_of(obj: Any) -> str:
@@ -108,10 +121,15 @@ def clear_memory() -> None:
 
 
 def summary(ws: Any = None, last_n: int = 20) -> dict[str, Any]:
-    recs = read(ws)
+    """Counts of the real model calls of a run (guard-demonstration records are listed apart under "demo")."""
+    all_recs = read(ws)
+    recs = [r for r in all_recs if not is_demo(r)]
+    demo = [r for r in all_recs if is_demo(r)]
     by = lambda attr: dict(Counter(getattr(r, attr) or "" for r in recs))  # noqa: E731
     ext = [r for r in recs if r.route == "external"]
     return {
+        "n_demo": len(demo),
+        "demo": [{"id": r.id, "task": r.task, "guard_result": r.guard_result, "guard_reason": r.guard_reason, "purpose": r.purpose} for r in demo[-6:]],
         "n_records": len(recs),
         "n_external": len(ext),
         "n_external_sent": len([r for r in ext if r.guard_result == "allowed" and r.ok]),
@@ -135,8 +153,8 @@ def _avg(values: list[int]) -> Optional[int]:
 
 def usage(ws: Any = None, settings: Optional[Settings] = None) -> dict[str, Any]:
     """External-model use of one run, for the budget and the Data-flow view: calls, tokens, blocks, what is left of
-    the per-run call budget, and average latency per route (overall and per task)."""
-    recs = read(ws)
+    the per-run call budget, and average latency per route (overall and per task). Guard demonstrations are not calls."""
+    recs = [r for r in read(ws) if not is_demo(r)]
     if settings is None:
         settings = getattr(ws, "settings", None)
     ext = [r for r in recs if r.route == "external"]
@@ -175,10 +193,14 @@ def usage(ws: Any = None, settings: Optional[Settings] = None) -> dict[str, Any]
     }
 
 
-def data_flow_statement(ws: Any, settings: Settings, language: str = "en") -> str:
-    """Plain-language 'what left the operator environment, to which model, and why' for the Data-flow record."""
+def data_flow_statement(ws: Any, settings: Settings, language: str = "en", extras: bool = True) -> str:
+    """Plain-language 'what left the operator environment, to which model, and why' for the Data-flow record. With
+    extras=True (the UI) it ends with who wrote the explanations (narrative_coverage) and, when `tpm guard-demo` ran,
+    what the demonstration showed; the report renders those two in blocks of their own and passes extras=False."""
     s = summary(ws, last_n=0)
-    recs = read(ws)
+    all_recs = read(ws)
+    recs = [r for r in all_recs if not is_demo(r)]
+    extras = _statement_extras(ws, settings, all_recs, language) if extras else []
     prof = settings.active_profile
     lines: list[str] = []
     lines.append(f"Profile: {settings.profile} ({'external model allowed through the egress guard' if prof.allow_external else 'no network model calls allowed'}).")
@@ -194,7 +216,7 @@ def data_flow_statement(ws: Any, settings: Settings, language: str = "en") -> st
     lines.append("")
     if not recs:
         lines.append("No language-model calls have been made in this run. Nothing left the operator environment.")
-        return "\n".join(lines)
+        return "\n".join(lines + extras)
     lines.append(f"Model calls recorded: {s['n_records']} (local: {s['by_route'].get('local', 0)}, external attempts: {s['n_external']}).")
     if s["n_external_sent"]:
         tasks = Counter(r.task for r in recs if r.route == "external" and r.guard_result == "allowed" and r.ok)
@@ -221,7 +243,313 @@ def data_flow_statement(ws: Any, settings: Settings, language: str = "en") -> st
     if s["n_failed"]:
         lines.append(f"{s['n_failed']} call(s) failed (model unavailable or error) and were answered by code templates.")
     lines.append("")
-    lines.append("Why: local models may see raw rows (they run inside the operator environment); the external model only receives "
-                 "derived artifacts so that it can write hypotheses and explanations on top of them, citing evidence IDs. "
-                 "Every call, including blocked and failed ones, is in egress_ledger.jsonl and in the hash-chained decision log.")
-    return "\n".join(lines)
+    lines.append(local_why(recs))
+    return "\n".join(lines + extras)
+
+
+LOCAL_MAY_SEE_MORE = (
+    "Why local calls may see more: the local model runs on this machine and nothing it reads leaves it, so the guard removes "
+    "nothing from its prompts, and the chat's local tools may read exact rows to answer 'why this row?'."
+)
+_AUDIT_ON = " The guard still checks every local call in audit mode: its ledger record says what would have been removed had the call gone out."
+_AUDIT_OLD = " (This run's local calls were recorded before the guard's audit mode existed, so their records do not say what it would have removed.)"
+_WHY_TAIL = (" The external model only receives derived artifacts that passed the guard, so that it can write hypotheses and "
+             "explanations on top of them, citing evidence IDs. Every call, including blocked and failed ones, is in "
+             "egress_ledger.jsonl and in the hash-chained decision log.")
+
+
+def local_why(recs: list[EgressRecord]) -> str:
+    """Why local calls may see more, and whether this run's local records carry the guard's audit."""
+    local = [r for r in recs if r.route == "local" and r.guard_result == "n/a"]
+    audited = [r for r in local if (r.sanitizer or {}).get("mode") == "audit"]
+    return LOCAL_MAY_SEE_MORE + (_AUDIT_OLD if local and not audited else _AUDIT_ON) + _WHY_TAIL
+
+
+# ----------------------------------------------------------------------------------------------
+# who wrote the explanations: model or template, and why
+# ----------------------------------------------------------------------------------------------
+
+_SOURCE_RE = re.compile(r"llm-(local|external):([^+]+)")
+
+_COVERAGE_TEXT: dict[str, dict[str, str]] = {
+    "en": {
+        "none": "This run has no diagnoses, so no explanation was written.",
+        "all": "All {n_total} diagnoses have a model-written explanation ({models}).",
+        "head": "{n_model} of {n_total} diagnoses have a model-written explanation{models_paren}; the other {n_template} use the evidence-based template, {why}; the template states the same findings with their evidence IDs, and the chat explains any diagnosis on request.",
+        "head_zero": "None of the {n_total} diagnoses has a model-written explanation; all use the evidence-based template, {why}; the template states the same findings with their evidence IDs, and the chat explains any diagnosis on request.",
+        "why_local": "by design: a local model needs about {sec} s per explanation, so the diagnose stage spends at most half of its time budget ({allowance} s here) on the strongest diagnoses first",
+        "why_local_nosec": "by design: the diagnose stage lets the local model explain the strongest diagnoses first and stops when half of its time budget ({allowance} s here) is used",
+        "why_external": "by design: the external model explains at most {cap} diagnoses per run (external_llm.max_narratives_per_run), the strongest first",
+        "why_no_llm": "because this run was made with language models switched off (--no-llm)",
+        "why_no_model": "because no language model was reachable when the run was made (Ollama not running or no model pulled)",
+        "why_generic": "by design: a model explains the strongest diagnoses first while the stage's model time allowance lasts",
+        "local": "local model {m}", "external": "external model {m}",
+        "critiques": "{n_model} of {n_total} critiques (devil's advocate) were written with a model; the others are the code checks of the template.",
+        "reports": "Report summary: {items}.", "report_model": "{lang}: {m}", "report_template": "{lang}: template text only (no model summary)",
+    },
+    "fi": {
+        "none": "Tässä ajossa ei ole diagnooseja, joten selityksiä ei kirjoitettu.",
+        "all": "Kaikilla {n_total} diagnoosilla on kielimallin kirjoittama selitys ({models}).",
+        "head": "{n_model} diagnoosilla {n_total}:stä on kielimallin kirjoittama selitys{models_paren}; loput {n_template} käyttävät näyttöön perustuvaa valmispohjaa, {why}; pohja kertoo samat havainnot näyttötunnisteineen, ja keskustelu selittää minkä tahansa diagnoosin pyynnöstä.",
+        "head_zero": "Yhdelläkään {n_total} diagnoosista ei ole kielimallin kirjoittamaa selitystä; kaikki käyttävät näyttöön perustuvaa valmispohjaa, {why}; pohja kertoo samat havainnot näyttötunnisteineen, ja keskustelu selittää minkä tahansa diagnoosin pyynnöstä.",
+        "why_local": "tarkoituksella: paikallinen malli tarvitsee noin {sec} s selitystä kohden, joten diagnoosivaihe käyttää enintään puolet aikabudjetistaan (tässä {allowance} s) vahvimpiin diagnooseihin ensin",
+        "why_local_nosec": "tarkoituksella: diagnoosivaihe antaa paikallisen mallin selittää vahvimmat diagnoosit ensin ja lopettaa, kun puolet sen aikabudjetista (tässä {allowance} s) on käytetty",
+        "why_external": "tarkoituksella: ulkoinen malli selittää enintään {cap} diagnoosia ajoa kohden (external_llm.max_narratives_per_run), vahvimmat ensin",
+        "why_no_llm": "koska ajo tehtiin kielimallit pois päältä (--no-llm)",
+        "why_no_model": "koska yhtään kielimallia ei tavoitettu ajon aikana (Ollama ei käynnissä tai mallia ei ole ladattu)",
+        "why_generic": "tarkoituksella: malli selittää vahvimmat diagnoosit ensin niin kauan kuin vaiheen malliaikaa riittää",
+        "local": "paikallinen malli {m}", "external": "ulkoinen malli {m}",
+        "critiques": "{n_model}/{n_total} kriittisestä arviosta kirjoitettiin kielimallilla; muut ovat valmispohjan koodilla tehtyjä tarkistuksia.",
+        "reports": "Raportin yhteenveto: {items}.", "report_model": "{lang}: {m}", "report_template": "{lang}: vain valmispohjan teksti (ei mallin yhteenvetoa)",
+    },
+    "sv": {
+        "none": "Den här körningen har inga diagnoser, så ingen förklaring skrevs.",
+        "all": "Alla {n_total} diagnoser har en förklaring skriven av en språkmodell ({models}).",
+        "head": "{n_model} av {n_total} diagnoser har en förklaring skriven av en språkmodell{models_paren}; övriga {n_template} använder den evidensbaserade mallen, {why}; mallen anger samma fynd med sina evidens-id:n, och chatten förklarar vilken diagnos som helst på begäran.",
+        "head_zero": "Ingen av de {n_total} diagnoserna har en förklaring skriven av en språkmodell; alla använder den evidensbaserade mallen, {why}; mallen anger samma fynd med sina evidens-id:n, och chatten förklarar vilken diagnos som helst på begäran.",
+        "why_local": "avsiktligt: en lokal modell behöver cirka {sec} s per förklaring, så diagnossteget lägger högst halva sin tidsbudget ({allowance} s här) på de starkaste diagnoserna först",
+        "why_local_nosec": "avsiktligt: diagnossteget låter den lokala modellen förklara de starkaste diagnoserna först och slutar när halva tidsbudgeten ({allowance} s här) är förbrukad",
+        "why_external": "avsiktligt: den externa modellen förklarar högst {cap} diagnoser per körning (external_llm.max_narratives_per_run), de starkaste först",
+        "why_no_llm": "eftersom körningen gjordes med språkmodellerna avstängda (--no-llm)",
+        "why_no_model": "eftersom ingen språkmodell gick att nå när körningen gjordes (Ollama körs inte eller ingen modell är hämtad)",
+        "why_generic": "avsiktligt: en modell förklarar de starkaste diagnoserna först så länge stegets modelltid räcker",
+        "local": "lokal modell {m}", "external": "extern modell {m}",
+        "critiques": "{n_model} av {n_total} kritiska granskningar skrevs med en språkmodell; övriga är mallens kodkontroller.",
+        "reports": "Rapportsammanfattning: {items}.", "report_model": "{lang}: {m}", "report_template": "{lang}: endast malltext (ingen modellsammanfattning)",
+    },
+}
+
+
+def _model_of(source: Any) -> Optional[tuple[str, str]]:
+    """'llm-local:gemma4:e4b-it-qat+template' -> ('local', 'gemma4:e4b-it-qat'); template / human / code -> None."""
+    m = _SOURCE_RE.search(str(source or ""))
+    return (m.group(1), m.group(2).strip()) if m else None
+
+
+def _tally(sources: list[Any]) -> dict[str, Any]:
+    by: Counter = Counter()
+    for s in sources:
+        mm = _model_of(s)
+        if mm:
+            by[f"{mm[0]}:{mm[1]}"] += 1
+    n_model = int(sum(by.values()))
+    return {"total": len(sources), "model": n_model, "template": len(sources) - n_model, "by_model": dict(by)}
+
+
+def _fmt_int(n: Any, lang: str) -> str:
+    try:
+        out = f"{int(n):,}"
+    except Exception:
+        return str(n)
+    return out if lang == "en" else out.replace(",", " ")
+
+
+_COV_CACHE: dict[str, tuple[Any, dict[str, Any]]] = {}
+
+
+def _coverage_stamp(ws: Any) -> Any:
+    parts = []
+    try:
+        for p in [ws.path("diagnoses"), ws.path("egress_ledger"), ws.path("meta"), *sorted(ws.dir.glob("report_*"))]:
+            try:
+                st = p.stat()
+                parts.append((p.name, st.st_mtime_ns, st.st_size))
+            except OSError:
+                parts.append((getattr(p, "name", str(p)), None, None))
+    except Exception:
+        return None
+    return tuple(parts)
+
+
+def narrative_coverage(ws: Any, settings: Optional[Settings] = None) -> dict[str, Any]:
+    """Who wrote the explanations of a run: diagnoses, critiques and report summaries written by a model (local or
+    external, which model) vs by the evidence-based templates, and why the rest are templates:
+      reason = none | all | no_llm | no_model | external_cap | local_budget | generic
+    plus "sentence" (English, one plain sentence) and "details" (critiques, report summaries). coverage_sentence(cov,
+    lang) renders the sentence in en / fi / sv. Reads diagnoses.jsonl, report_llm_<lang>.json, the ledger and the
+    diagnose stage's note in the decision log; cached until one of those files changes. Never raises."""
+    s = settings or getattr(ws, "settings", None)
+    key = f"{getattr(ws, 'dir', '')}|{getattr(getattr(s, 'external_llm', None), 'max_narratives_per_run', '')}"
+    stamp = _coverage_stamp(ws)
+    hit = _COV_CACHE.get(key)
+    if stamp is not None and hit and hit[0] == stamp:
+        return json.loads(json.dumps(hit[1]))
+    cov = _narrative_coverage(ws, settings)
+    if stamp is not None:
+        _COV_CACHE[key] = (stamp, cov)
+    return json.loads(json.dumps(cov))
+
+
+def _narrative_coverage(ws: Any, settings: Optional[Settings] = None) -> dict[str, Any]:
+    settings = settings or getattr(ws, "settings", None)
+    try:
+        diags = [d for d in ws.read_jsonl("diagnoses") if isinstance(d, dict)]
+    except Exception:
+        diags = []
+    diag = _tally([d.get("narrative_source") for d in diags])
+    crit = _tally([(d.get("critique") or {}).get("source") for d in diags if isinstance(d.get("critique"), dict)])
+    reports: dict[str, Optional[str]] = {}
+    try:
+        for p in sorted(ws.dir.glob("report_*.html")):
+            reports[p.stem.split("_", 1)[1]] = None
+        for p in sorted(ws.dir.glob("report_llm_*.json")):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            lang = p.stem.rsplit("_", 1)[-1]
+            if isinstance(d, dict) and d.get("status") == "ok":
+                reports[lang] = str(d.get("source") or "llm")
+            else:
+                reports.setdefault(lang, None)
+    except Exception:
+        pass
+    rep = {"total": len(reports), "model": sum(1 for v in reports.values() if v), "by_language": {k: (v or "template") for k, v in sorted(reports.items())}}
+
+    # why the rest are templates
+    recs = [r for r in read(ws) if not is_demo(r)] if ws is not None else []
+    narr = [r for r in recs if r.task in ("diagnosis_narrative", "critique")]
+    opts = {}
+    try:
+        opts = (ws.read_json("meta", {}) or {}).get("options") or {}
+    except Exception:
+        pass
+    note = ""
+    try:
+        notes = [e.payload.get("note", "") for e in ws.log.entries(action="note", object_id="diagnose", limit=100_000)]
+        note = next((n for n in reversed(notes) if "LLM narrative" in n), "")
+    except Exception:
+        pass
+    m_allow = re.search(r"of a (\d+(?:\.\d+)?)s allowance", note)
+    m_time = re.search(r"LLM time (\d+(?:\.\d+)?)s", note)
+    allowance = float(m_allow.group(1)) if m_allow else None
+    llm_time = float(m_time.group(1)) if m_time else None
+    routes = {k.split(":", 1)[0] for k in diag["by_model"]}
+    cap = int(getattr(getattr(settings, "external_llm", None), "max_narratives_per_run", 12) or 12) if settings is not None else 12
+    sec = None
+    if llm_time and diag["model"]:
+        sec = llm_time / diag["model"]
+    else:
+        lat = [r.latency_ms for r in narr if r.route == "local" and r.ok and r.latency_ms]
+        if lat:
+            sec = 2 * (sum(lat) / len(lat)) / 1000.0  # narrative + critique per diagnosis
+    if not diags:
+        reason = "none"
+    elif diag["model"] == diag["total"]:
+        reason = "all"
+    elif diag["model"] == 0 and (opts.get("no_llm") or opts.get("use_llm") is False):
+        reason = "no_llm"
+    elif diag["model"] == 0 and narr and not any(r.ok for r in narr) and any(("reachable" in (r.error or "")) or ("pulled" in (r.error or "")) for r in narr):
+        reason = "no_model"
+    elif "external" in routes:
+        reason = "external_cap"
+    elif "local" in routes or allowance is not None:
+        reason = "local_budget"
+    else:
+        reason = "generic"
+    cov = {
+        "diagnoses": diag, "critiques": crit, "report_summaries": rep, "reason": reason,
+        "local_seconds_per_explanation": round(sec, 1) if sec else None, "model_time_allowance_s": allowance, "external_cap": cap,
+        "stage_note": note or None,
+    }
+    cov["sentence"] = coverage_sentence(cov, "en")
+    cov["details"] = coverage_details(cov, "en")
+    return cov
+
+
+def _models_text(by_model: dict[str, int], tx: dict[str, str]) -> str:
+    out = []
+    for key in sorted(by_model, key=lambda k: -by_model[k]):
+        route, model = key.split(":", 1)
+        out.append(tx.get(route, "{m}").format(m=model))
+    return ", ".join(out)
+
+
+def coverage_sentence(cov: dict[str, Any], lang: str = "en") -> str:
+    """One plain sentence: how many diagnoses have a model-written explanation, and why the others use the template."""
+    tx = _COVERAGE_TEXT.get(lang) or _COVERAGE_TEXT["en"]
+    d = cov.get("diagnoses") or {}
+    reason = cov.get("reason")
+    n_total, n_model = int(d.get("total") or 0), int(d.get("model") or 0)
+    models = _models_text(d.get("by_model") or {}, tx)
+    if reason == "none" or not n_total:
+        return tx["none"]
+    if reason == "all":
+        return tx["all"].format(n_total=_fmt_int(n_total, lang), models=models)
+    sec, allowance = cov.get("local_seconds_per_explanation"), cov.get("model_time_allowance_s")
+    if reason == "no_llm":
+        why = tx["why_no_llm"]
+    elif reason == "no_model":
+        why = tx["why_no_model"]
+    elif reason == "external_cap":
+        why = tx["why_external"].format(cap=cov.get("external_cap") or 12)
+    elif reason == "local_budget" and allowance is not None and sec:
+        why = tx["why_local"].format(sec=f"{sec:.0f}", allowance=f"{allowance:.0f}")
+    elif reason == "local_budget" and allowance is not None:
+        why = tx["why_local_nosec"].format(allowance=f"{allowance:.0f}")
+    else:
+        why = tx["why_generic"]
+    if n_model == 0:
+        return tx["head_zero"].format(n_total=_fmt_int(n_total, lang), why=why)
+    return tx["head"].format(n_model=_fmt_int(n_model, lang), n_total=_fmt_int(n_total, lang), n_template=_fmt_int(n_total - n_model, lang), models_paren=f" ({models})" if models else "", why=why)
+
+
+def coverage_details(cov: dict[str, Any], lang: str = "en") -> list[str]:
+    """Critiques and report summaries, one short sentence each."""
+    tx = _COVERAGE_TEXT.get(lang) or _COVERAGE_TEXT["en"]
+    out = []
+    c = cov.get("critiques") or {}
+    if c.get("total"):
+        out.append(tx["critiques"].format(n_model=_fmt_int(c.get("model", 0), lang), n_total=_fmt_int(c["total"], lang)))
+    r = (cov.get("report_summaries") or {}).get("by_language") or {}
+    if r:
+        items = []
+        for lg, src in r.items():
+            mm = _model_of(src)
+            items.append(tx["report_model"].format(lang=lg, m=tx.get(mm[0], "{m}").format(m=mm[1])) if mm else tx["report_template"].format(lang=lg))
+        out.append(tx["reports"].format(items="; ".join(items)))
+    return out
+
+
+# ----------------------------------------------------------------------------------------------
+# guard demonstration, as the data-flow statement tells it
+# ----------------------------------------------------------------------------------------------
+
+
+def demo_statement(ws: Any, recs: Optional[list[EgressRecord]] = None) -> Optional[str]:
+    """One or two sentences on the last `tpm guard-demo` of the run (from guard_demo.json, else from the ledger)."""
+    demo = None
+    try:
+        demo = ws.read_json("guard_demo.json", None) if ws is not None else None
+    except Exception:
+        demo = None
+    if isinstance(demo, dict) and demo.get("statement"):
+        return str(demo["statement"])
+    recs = [r for r in (recs if recs is not None else read(ws)) if is_demo(r)]
+    if not recs:
+        return None
+    allowed = [r for r in recs if r.guard_result == "demo_allowed"]
+    blocked = [r for r in recs if r.guard_result == "demo_blocked"]
+    parts = []
+    if allowed:
+        parts.append(f"{len(allowed)} real payload(s) of this run were cleaned by the guard and would have been allowed")
+    if blocked:
+        parts.append(f"{len(blocked)} deliberately unsafe test payload(s) were blocked ({blocked[-1].guard_reason[:160]})")
+    return "Guard demonstration (python -m tpm guard-demo): " + "; ".join(parts) + ". Nothing of the demonstration was sent."
+
+
+def _statement_extras(ws: Any, settings: Settings, all_recs: list[EgressRecord], language: str) -> list[str]:
+    out: list[str] = []
+    try:
+        cov = narrative_coverage(ws, settings)
+        if (cov.get("diagnoses") or {}).get("total"):
+            out += ["", "Who wrote the explanations: " + coverage_sentence(cov, "en")]
+    except Exception:
+        pass
+    try:
+        demo = demo_statement(ws, all_recs)
+        if demo:
+            out += ["", demo]
+    except Exception:
+        pass
+    return out

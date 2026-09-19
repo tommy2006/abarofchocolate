@@ -131,8 +131,9 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
     # persist flags: keep flags from other stages (dq/rule), replace ours
     existing = [f for f in ws.read_jsonl("flags") if f.get("kind") not in DETECT_KINDS]
     ws.rewrite_jsonl("flags", existing + [f.model_dump() for f in flags])
-    for f in flags[:2000]:
-        ws.log.record("system:detect", "flag", "flag", f.id, {"kind": f.kind, "group_id": f.group_id, "row_start": f.row_start, "row_end": f.row_end, "score": f.score, "cause": f.likely_cause_class, "pattern_id": f.pattern_id, "top_signals": [s.signal for s in f.signals_ranked[:3]]}, f.evidence_ids)
+    from ..log.stage_log import log_flags, log_stage_inferences  # decision log: EVERY flag gets its own entry (no cap), written in bulk
+
+    flag_log = log_flags(ws, flags)
     ws.write_json("propagation", {fid: [s.model_dump() for s in steps] for fid, steps in chains.items()})
     try:
         from .suspicious import build_suspicious_rows
@@ -173,7 +174,8 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
         "score_semantics": "scores.parquet: `ensemble` is normalized so that 1.0 is the calibrated threshold (is_flagged = ensemble >= 1); per-detector columns are score/threshold; top-k shares are the ensemble attribution.",
     }
     ws.write_json("detect_meta", meta)
-    ws.log.record("system:detect", "stage_summary", "dataset", "detect", {"n_flags": len(flags), "n_patterns": len(patterns), "detectors": selection["selected"], "seconds": round(time.time() - t_start, 1), "rows_flagged_fraction": meta["rows_flagged_fraction"]})
+    n_inf_logged = log_stage_inferences(ws, "detect")  # claims of the detect modules that have no entry of their own yet
+    ws.log.record("system:detect", "stage_summary", "dataset", "detect", {"n_flags": len(flags), "n_flags_logged": flag_log["n"], "log_seconds": flag_log["seconds"], "n_inferences_logged_at_end": n_inf_logged, "n_patterns": len(patterns), "detectors": selection["selected"], "seconds": round(time.time() - t_start, 1), "rows_flagged_fraction": meta["rows_flagged_fraction"]})
     progress(1.0, "done")
     msg = f"{len(flags)} flags ({ev_meta['n_groups_with_events']} of {ev_meta['n_groups']} groups), {len(patterns)} patterns, detectors {'+'.join(selection['selected'])}, baseline '{baseline.strategy}' (conf {baseline.confidence:.2f}), {time.time() - t_start:.0f}s"
     return {"message": msg, "n_flags": len(flags), "n_patterns": len(patterns), "detectors": selection["selected"], "baseline_strategy": baseline.strategy, "baseline_confidence": round(baseline.confidence, 3), "rows_flagged_fraction": meta["rows_flagged_fraction"], "seconds": round(time.time() - t_start, 1), "evaluation": None if evaluation is None else {c: r.get("auroc_ensemble") for c, r in evaluation.get("columns", {}).items()}}
@@ -317,7 +319,9 @@ def score_batch(ws, settings, batch_df, batch_id: str, trust: Optional[TrustVerd
     flags.extend(cascade_flags)
     for f in flags:
         ws.append_jsonl("flags", f.model_dump())
-        ws.log.record("system:detect", "flag", "flag", f.id, {"kind": f.kind, "batch_id": batch_id, "group_id": f.group_id, "row_start": f.row_start, "row_end": f.row_end, "score": f.score, "cause": f.likely_cause_class, "pattern_id": f.pattern_id}, f.evidence_ids)
+    from ..log.stage_log import log_flags  # one entry per flag, all of the batch in one transaction
+
+    log_flags(ws, flags)
     if chains:
         prop = ws.read_json("propagation", {}) or {}
         prop.update({fid: [s.model_dump() for s in steps] for fid, steps in chains.items()})
