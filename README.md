@@ -197,3 +197,13 @@ contracts: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Evaluation method: [doc
 ```
 .venv\Scripts\python.exe -m pytest tests -q
 ```
+
+## Validation on a large file
+
+The pipeline was run end-to-end on a 6 GB, 15.3-million-row industrial simulation file (57 columns, 21,000 runs) on a
+16 GB laptop with an 8 GB GPU: ingest 4.4 min, profile 1.8, quality 2.9, detect 9.3, diagnose 2.2, assessor 1.8,
+report 0.2 — about 20 minutes when the machine is otherwise idle. Labels present in that file were auto-detected and
+kept out of detection; used for evaluation only they gave: no false alarms on the normal runs (0 % of their rows flagged),
+95–99 % of post-onset rows flagged for the strong fault classes, AUROC 0.85, and the unnamed fault patterns aligned with the
+hidden fault types (adjusted mutual information 0.60). Every number above comes from `workspace/<run>/evaluation.json`
+and `detect_meta.json`; the detection pipeline itself never reads the labels.

@@ -58,3 +58,7 @@ Lead half (done, committed 9ce72b8): tpm/api/plain.py (+ GET /api/runs/{id}/plai
 Subagent half (in progress): clickable references + back navigation, evidence panels, prose rendering in diagnoses view, assessor initial content from the real assessor.json shape, data-flow/report overflow CSS, plain box hooks in quality/monitor/diagnoses/assessor, POST /api/demo -> real pipeline.
 2M slice after schema/trust fixes: 52 signals (labels excluded), 0 untrusted batches (row-scoped ranges), diagnoses process 1137 / unknown 963 / sensor 128 / data 52, AUROC 0.89, group false-alarm 0.0, AMI 0.79, 14.2 min.
 Final 6 GB run started as te_full_v2 (te_full's SQLite is held open by the team's running server).
+
+## 2026-09-19 06:10 — Final 6 GB run (te_full_v2): 22.6 min under load, detection sound
+ingest 266 s, profile 105, quality 171, detect 556 (robust_z+ewma; pca dropped for budget under CPU contention), diagnose 132, assess 110, report 14. Trust: 0 untrusted batches, ~320 row-scoped ranges per batch, 0.64 (duplicate rows 4 % batch-level). Flags 4014 in 3756 groups (11962 over threshold; rest in group_scores.json). Diagnoses 3758: process 1559, sensor 126, unknown 2063, data 10; narratives prose. Eval: AUROC 0.85, group detection 60 %, false alarm 0.0, delay 163 rows, AMI 0.60; normal runs 0 % flagged; big faults 95-99 % post-onset; subtle classes 5/10/16/19/20 undetected (known-hard); 8/12/13/14/17/18 at 46-91 %.
+Machine was shared with the team's server + UI subagent tests; unloaded estimate ~20 min.
