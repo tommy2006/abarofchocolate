@@ -22,7 +22,9 @@ def test_diagnoses_written(run):
     assert diags
     assert dsum["n_diagnoses"] == len(diags)
     groups_with_events = {f.group_id for f in ws.flags() if f.kind in ("anomaly", "drift")}
-    assert {d.group_id for d in diags} == groups_with_events
+    # the aggregated diagnosis of isolated readings (when present) spans groups and is not an event diagnosis
+    assert {d.group_id for d in diags if d.fault_type != "isolated suspicious readings"} == groups_with_events
+    assert sum(1 for d in diags if d.fault_type == "isolated suspicious readings") <= 1
 
 
 def test_diagnosis_steps_and_evidence(run):

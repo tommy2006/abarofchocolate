@@ -56,7 +56,9 @@ def chain_for_flag(inputs, flag: Flag, window: int) -> list[PropagationStep]:
             elif consistent is False:
                 expl += f" (learned lead/lag {rel_lag} does not match the observed {delta})"
         else:
-            expl += "; no strong learned relation between them"
+            continue  # no learned relation between the two signals: their order alone is not a propagation claim
+        if consistent is False:
+            continue  # the learned lead/lag contradicts the observed order
         steps.append(PropagationStep(from_signal=a.signal, to_signal=b.signal, lag=delta, strength=round(float(abs(r)), 3), explanation=expl + ".", evidence_ids=list(flag.evidence_ids[:1])))
     return steps
 

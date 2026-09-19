@@ -121,6 +121,16 @@ def build_patterns(ws, settings, flags: list[Flag], aliases: list[str], seed: in
         members = [events[i] for i in np.flatnonzero(lab == c)]
         if len(members) < min_events:
             continue
+        # cohesion gate: "recurring pattern" only when the events share their lead signals. Share of members whose
+        # top signal is the cluster's most common top signal, and mean overlap of the members' top-3 sets.
+        tops = [f.signals_ranked[0].signal for f in members if f.signals_ranked]
+        top3 = [frozenset(sc.signal for sc in f.signals_ranked[:3]) for f in members if f.signals_ranked]
+        lead_share = (max(tops.count(t) for t in set(tops)) / len(tops)) if tops else 0.0
+        common3 = frozenset(a for a in set().union(*top3) if sum(a in s3 for s3 in top3) >= 0.5 * len(top3)) if top3 else frozenset()
+        overlap = float(np.mean([len(s3 & common3) / max(1, len(s3 | common3)) for s3 in top3])) if top3 and common3 else 0.0
+        if lead_share < 0.5 and overlap < 0.5:
+            meta.setdefault("rejected_clusters", []).append({"n_events": len(members), "lead_share": round(lead_share, 3), "top3_overlap": round(overlap, 3), "reason": "events have different lead signals: not a recurring pattern"})
+            continue
         pid = f"PATTERN-{letters[len(patterns)]}"
         label_of_cluster[c] = pid
         centroid = V[lab == c].mean(axis=0)

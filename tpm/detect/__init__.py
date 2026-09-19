@@ -134,6 +134,13 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
     for f in flags[:2000]:
         ws.log.record("system:detect", "flag", "flag", f.id, {"kind": f.kind, "group_id": f.group_id, "row_start": f.row_start, "row_end": f.row_end, "score": f.score, "cause": f.likely_cause_class, "pattern_id": f.pattern_id, "top_signals": [s.signal for s in f.signals_ranked[:3]]}, f.evidence_ids)
     ws.write_json("propagation", {fid: [s.model_dump() for s in steps] for fid, steps in chains.items()})
+    try:
+        from .suspicious import build_suspicious_rows
+
+        susp = build_suspicious_rows(ws, settings, flags, (ev_meta or {}).get("points"))
+        notes.append(f"suspicious rows: {susp['n_rows']} (point-dominated: {susp['regime']['point_dominated']})")
+    except Exception as ex:  # the headline list must never break detection
+        ws.log.record("system:detect", "warning", "dataset", "suspicious_rows", {"error": str(ex)[:300]})
 
     evaluation = None
     if inputs.label_columns:

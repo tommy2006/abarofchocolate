@@ -69,6 +69,24 @@ def _diagnose(ws, settings, flags: list[Flag], ctx_opts: dict[str, Any], start_i
     t0 = time.time()
     diags: list[Diagnosis] = []
     n = start_id
+    point_diag = None
+    point_first = False
+    # isolated suspicious readings: ONE aggregated diagnosis, no onset / pattern / propagation analysis
+    point_flags = [f for f in flags if f.kind == "point" and f.human_status != "dismissed"]
+    if point_flags:
+        from .diagnosis import build_point_diagnosis
+
+        n += 1
+        pd_ = build_point_diagnosis(ws, f"DIAG-{n:06d}", point_flags, ws.read_json("suspicious_rows.json", None))
+        try:
+            pd_ = critique_diagnosis(ws, settings, pd_, flags_by_id, c["baseline"], c["patterns"], window, language, use_llm=False)
+        except Exception:
+            pass
+        ws.log.record("system:diagnose", "diagnosis", "diagnosis", pd_.id, {"fault_type": pd_.fault_type, "cause_class": pd_.cause_class, "confidence": pd_.confidence, "n_point_flags": len(point_flags)}, pd_.evidence_ids)
+        point_diag = pd_
+        point_first = bool(((ws.read_json("suspicious_rows.json", None) or {}).get("regime") or {}).get("point_dominated"))
+        if point_first:
+            diags.append(pd_)
     groups = _group_events(flags)
     # strongest first so a budget cut keeps the important ones
     groups.sort(key=lambda t: -max(f.score * (f.row_end - f.row_start + 1) for f in t[2]))
@@ -100,6 +118,8 @@ def _diagnose(ws, settings, flags: list[Flag], ctx_opts: dict[str, Any], start_i
         if time.time() - t0 > budget_s:
             ws.log.record("system:diagnose", "warning", "dataset", "diagnose", {"note": f"time budget reached after {len(diags)} diagnoses; {len(groups) - len(diags)} event groups left undiagnosed"})
             break
+    if point_diag is not None and not point_first:
+        diags.append(point_diag)  # sustained events lead; the isolated readings follow as one aggregate
     if use_llm and n_llm < len(diags):
         ws.log.record("system:diagnose", "note", "dataset", "diagnose", {"note": f"LLM narrative/critique applied to the {n_llm} strongest of {len(diags)} diagnoses (LLM time {llm_seconds:.0f}s of a {llm_budget:.0f}s allowance); the rest are template-only"})
     return diags

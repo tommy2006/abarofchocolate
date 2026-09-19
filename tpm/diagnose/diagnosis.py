@@ -132,6 +132,49 @@ def build_diagnosis(ws, diag_id: str, group: str, flags: list[Flag], onset_flag:
     return Diagnosis(id=diag_id, flag_ids=[f.id for f in flags] + ([onset_flag.id] if onset_flag is not None else []), group_id=group, pattern_id=main.pattern_id, fault_type=fault_type, cause_class=main.likely_cause_class, ranked_signals=ranked, propagation=chain, steps=steps, summary=summary, confidence=round(conf, 3), uncertainty=uncertainty, assumptions=assumptions[:8], evidence_ids=evidence_ids, narrative_source="template" if src is None else "human+template")
 
 
+def build_point_diagnosis(ws, diag_id: str, point_flags: list[Flag], suspicious: Optional[dict[str, Any]]) -> Diagnosis:
+    """All isolated suspicious readings of a run in ONE diagnosis. No onset, recurring-pattern or propagation
+    analysis: those need sustained events. The cause is stated as undecidable from the data."""
+    n = len(point_flags)
+    groups = sorted({f.group_id for f in point_flags if f.group_id})
+    per_sig: dict[str, dict[str, float]] = {}
+    for f in point_flags:
+        for sc in f.signals_ranked[:3]:
+            d = per_sig.setdefault(sc.signal, {"n": 0, "max": 0.0})
+            d["n"] += 1
+            try:
+                d["max"] = max(d["max"], float(sc.explanation.split(" was ")[1].split(" times")[0]))
+            except Exception:
+                pass
+    top = sorted(per_sig.items(), key=lambda kv: (-kv[1]["n"], -kv[1]["max"]))[:5]
+    ranked = [SignalContribution(signal=a, contribution=round(v["n"] / max(1, n), 3), direction="deviating", lag=None, explanation=f"{a} is involved in {int(v['n'])} of the {n} isolated readings" + (f" (largest deviation {v['max']:.0f} times its normal spread)." if v["max"] else ".")) for a, v in top]
+    regime = (suspicious or {}).get("regime") or {}
+    n_rows = (suspicious or {}).get("n_rows") or n
+    strongest = sorted(point_flags, key=lambda f: -f.score)[:5]
+    rows_txt = ", ".join(f"row {f.row_start}" if f.row_end == f.row_start else f"rows {f.row_start}-{f.row_end}" for f in strongest)
+    steps = [
+        f"What was found: {n} isolated reading(s) in {len(groups) or 1} group(s) that the detectors score far above anything seen in normal operation, each lasting one or two rows (strongest: {rows_txt}). Together with the data-quality checks, {n_rows} rows are on the list of suspicious rows.",
+        "Why these are not treated as process events: a real process change moves related signals and lasts; here the readings before and after each of these rows look normal, and the value returns immediately.",
+        ("Which signals: " + "; ".join(r.explanation.rstrip(".") for r in ranked[:3]) + ".") if ranked else "Which signals: no single signal dominates.",
+        "What it could be: a glitch (sensor, transmission or entry error) or a deliberate manipulation. The data alone cannot tell which.",
+        "What was deliberately not done: no onset, recurring-pattern or propagation analysis. Those describe sustained events and would be meaningless for single readings.",
+        "What to check: compare the listed rows with maintenance and calibration logs, operator entries and access records. If the same signal keeps recurring, inspect that instrument and its wiring or transmission. If the odd values are plausible-looking and fall at moments that matter commercially or for safety, treat manipulation as a real possibility and escalate.",
+    ]
+    if regime.get("point_dominated"):
+        steps.insert(2, f"How common this is here: {regime.get('share_points', 0):.0%} of all above-threshold stretches in this data are isolated readings ({regime.get('n_point_stretches')} isolated, {regime.get('n_sustained_stretches')} sustained).")
+    conf = float(np.clip(np.mean([f.confidence for f in point_flags]) if point_flags else 0.3, 0.1, 0.85))
+    summary = (f"The monitor found {n} isolated suspicious reading(s): single rows where a value does not fit its surroundings and comes straight back. "
+               + (f"The signals most often involved are {', '.join(r.signal for r in ranked[:3])}. " if ranked else "")
+               + "Each is either a glitch or a deliberate manipulation; the data alone cannot tell which, so no process fault is claimed. "
+               + f"We are {_conf_words(conf)} that these readings are genuinely out of line ({conf:.0%}).")
+    ev_ids: list[str] = []
+    for f in strongest + point_flags[:40]:
+        for e in f.evidence_ids:
+            if e not in ev_ids:
+                ev_ids.append(e)
+    return Diagnosis(id=diag_id, flag_ids=[f.id for f in point_flags[:200]], group_id=groups[0] if len(groups) == 1 else None, pattern_id=None, fault_type="isolated suspicious readings", cause_class="unknown", ranked_signals=ranked, propagation=[], steps=steps, summary=summary, confidence=round(conf, 3), uncertainty=["Whether each reading is a glitch or a manipulation cannot be decided from the data.", "A very coarse sampling period could make a short real event look like a single reading."], assumptions=["Readings next to a suspicious row are taken as the reference for what that row should have looked like."], evidence_ids=ev_ids[:40], narrative_source="template")
+
+
 _DIR_WORDS = {"up": "rose above its normal level", "down": "fell below its normal level", "noisy": "became much noisier than usual", "stuck": "froze at one value", "shifted": "stopped following the signals it normally moves with", "deviating": "deviated from its normal behaviour"}
 _CAUSE_SENTENCE = {
     "process": "The pattern points to a change in the process itself rather than a faulty instrument: several related signals moved together.",

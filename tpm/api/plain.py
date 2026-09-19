@@ -236,6 +236,9 @@ def _plain_monitor(ws) -> list[str]:
     p2 = f"{_n(over)} of {_n(n_groups)} groups went above the threshold somewhere; the strongest {len([f for f in flags if f.get('kind') in ('anomaly', 'drift')])} events are listed as flags" + (f" ({kinds.get('changepoint', 0)} with a located onset, {kinds.get('drift', 0)} gradual drifts, {kinds.get('cascade', 0)} cascades)" if flags else "") + "."
     if causes:
         p2 += " Of the flags, " + ", ".join(f"{v} point to {CAUSE_WORDS.get(k, k)}" for k, v in causes.most_common(4)) + "."
+    susp = _read(ws, "suspicious_rows.json", {}) or {}
+    if susp.get("n_rows"):
+        p2 += " " + str(susp.get("headline", "")) + " " + str(susp.get("wording", ""))
     p3 = "How to read the chart: the line is the deviation score; 1.0 is the largest deviation still seen in normal operation, so 3x means three times that. Click a flag to see which signals are responsible and to ask why in plain language."
     return [p1, p2, p3]
 
