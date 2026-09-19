@@ -67,4 +67,4 @@ class Translator:
         return self(f"verdict_{v}") if v and self.has(f"verdict_{v}") else (v or self("unknown"))
 
     def status(self, s: str | None) -> str:
-        return self(s) if s in ("pass", "warn", "fail") else (s or "")
+        return self(s) if s in ("pass", "warn", "fail", "not_testable") else (s or "")

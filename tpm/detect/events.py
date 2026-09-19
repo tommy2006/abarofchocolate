@@ -224,7 +224,7 @@ def _quality_single_readings(ws) -> dict[int, list[tuple[str, float, Optional[st
         return out
     for c in checks:
         ct = c.get("check_type")
-        if ct not in ("local_spike", "out_of_range", "impossible_value") or c.get("status") == "pass":
+        if ct not in ("local_spike", "out_of_range", "plausibility", "impossible_value") or c.get("status") in ("pass", "not_testable"):
             continue
         sig = (c.get("signals") or [None])[0]
         if not sig:

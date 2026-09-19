@@ -72,7 +72,9 @@ def test_batches_by_time_window(tmp_path):
     assert batches[-1]["row_end"] == len(df) and batches[0]["method"] == "time_window"
 
 
-@pytest.mark.parametrize("dq_type,check_type", [("missing_block", "missing"), ("spike_out_of_range", "out_of_range"), ("frozen_block", "stuck"), ("unit_shift", "unit_shift"), ("duplicate_rows", "duplicate_rows")])
+# round 6: a single 99999 reading on a signal around 2700 is outside its plausible range, so it is reported by the
+# plausibility check (out_of_range only reports readings inside the plausible range; a reading is never in both)
+@pytest.mark.parametrize("dq_type,check_type", [("missing_block", "missing"), ("spike_out_of_range", "plausibility"), ("frozen_block", "stuck"), ("unit_shift", "unit_shift"), ("duplicate_rows", "duplicate_rows")])
 def test_injected_dq_issues_are_detected(quality_run, dq_type, check_type):
     inj = next(d for d in quality_run["truth"]["dq"] if d["type"] == dq_type)
     signal = quality_run["aliases"].get(inj["signal"]) if inj["signal"] else None

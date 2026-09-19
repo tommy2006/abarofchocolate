@@ -362,16 +362,16 @@ class _Doc:
         d = Drawing(self.W, H)
         w = self.W - pad_l - pad_r
         for i, (name, counts) in enumerate(rows):
-            total = max(1, sum(int(counts.get(k, 0)) for k in ("pass", "warn", "fail")))
+            total = max(1, sum(int(counts.get(k, 0)) for k in ("pass", "warn", "fail", "not_testable")))
             y0 = H - gap - (i + 1) * (row_h + gap) + gap
             d.add(String(pad_l - 5, y0 + 3, _safe(name), fontName=FONT, fontSize=7.5, fillColor=C["ink"], textAnchor="end"))
             x0 = pad_l
-            for k in ("pass", "warn", "fail"):
+            for k in ("pass", "warn", "fail", "not_testable"):
                 cnt = int(counts.get(k, 0))
                 if cnt <= 0:
                     continue
                 ww = w * cnt / total
-                d.add(Rect(x0, y0, ww, row_h, fillColor=C[k], strokeColor=C["white"], strokeWidth=0.4))
+                d.add(Rect(x0, y0, ww, row_h, fillColor=C.get(k, C["muted"]), strokeColor=C["white"], strokeWidth=0.4))
                 if ww > 16:
                     d.add(String(x0 + ww / 2, y0 + 3, str(cnt), fontName=FONT, fontSize=6.5, fillColor=C["white"], textAnchor="middle"))
                 x0 += ww
@@ -783,8 +783,11 @@ class _Doc:
         ctx, t, lang = self.ctx, self.t, self.lang
         q = ctx["quality"]
         out: list[Any] = [self.heading(t("section_2"), "section-2"), self.P(t("s2_intro"), "intro")]
+        if q.get("verdict_text"):  # run-level verdict (round 6)
+            out.append(self.P(" ".join(x for x in (q["verdict_text"], q.get("not_testable_text") or "") if x)))
         if q.get("n_checks"):
-            out += self.H(f"{t('s2_by_category')} — {_thousands(q['n_checks'], lang)} ({t('pass')} {_thousands(q['n_pass'], lang)} · {t('warn')} {_thousands(q['n_warn'], lang)} · {t('fail')} {_thousands(q['n_fail'], lang)})", 2)
+            nt = f" · {t('not_testable')} {_thousands(q['n_not_testable'], lang)}" if q.get("n_not_testable") else ""
+            out += self.H(f"{t('s2_by_category')} — {_thousands(q['n_checks'], lang)} ({t('pass')} {_thousands(q['n_pass'], lang)} · {t('warn')} {_thousands(q['n_warn'], lang)} · {t('fail')} {_thousands(q['n_fail'], lang)}{nt})", 2)
             if q.get("by_category"):
                 out.append(self.chart_stacked(q["by_category"]))
             out += self.H(t("s2_failed_checks"), 2)

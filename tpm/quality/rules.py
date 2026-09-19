@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 from ..contracts import CheckResult, Rule, now_iso
-from ._common import GROUP_COL, ROW_COL, SignalInfo, contiguous_runs, fmt_num, load_catalog, next_check_id, numeric_signals, resolve_columns, value_runs
+from ._common import GROUP_COL, ROW_COL, SignalInfo, check_confidence, contiguous_runs, fmt_num, load_catalog, next_check_id, numeric_signals, resolve_columns, value_runs
 
 RULE_TYPES = ["range", "rate_of_change", "acceleration", "duration", "cross_signal", "rolling_stat", "missing", "stuck", "drift"]
 OPS = [">", ">=", "<", "<=", "==", "!="]
@@ -432,10 +432,12 @@ def rule_check_result(ws: Any, rule: Rule, violations: list[dict[str, Any]], bat
         vals = f"; values {fmt_num(first['value_min'])}..{fmt_num(first['value_max'])}" if first.get("value_min") is not None else ""
         statement = f"{rule.id} violated in batch {batch_id}: {n_v} samples in {len(violations)} episode(s) ({first['detail']}); first at rows {first['row_start']}-{first['row_end']}{vals}. Rule: {rule.text}"
         ev = ws.evidence.add("rule_violation", statement, signals=signals, values={"rule_id": rule.id, "n_violating": n_v, "n_episodes": len(violations), "episodes": [(v["row_start"], v["row_end"]) for v in violations[:12]]}, computed_by="quality.rules.run_rule", n_samples=n_rows, batch_id=batch_id, group_id=group_id)
-        return CheckResult(check_id=next_check_id(ws), check_type=f"rule:{rule.id}", category="rule", signals=signals, batch_id=batch_id, group_id=group_id, status="fail", severity=min(1.0, sev), statement=statement, evidence_ids=[ev.id], rule_id=rule.id, values={"rule_type": spec.get("type"), "n_violating": n_v, "n_episodes": len(violations), "events": [(v["row_start"], v["row_end"]) for v in violations[:12]], "episodes": violations[:12]}, row_start=first["row_start"], row_end=violations[-1]["row_end"])
+        conf, basis = check_confidence(n_rows, exact=True)  # a compiled rule is an exact comparison: only the sample size limits it
+        return CheckResult(check_id=next_check_id(ws), check_type=f"rule:{rule.id}", category="rule", signals=signals, batch_id=batch_id, group_id=group_id, status="fail", severity=min(1.0, sev), statement=statement, evidence_ids=[ev.id], rule_id=rule.id, values={"rule_type": spec.get("type"), "n_violating": n_v, "n_episodes": len(violations), "events": [(v["row_start"], v["row_end"]) for v in violations[:12]], "episodes": violations[:12], "confidence": conf, "confidence_basis": basis}, row_start=first["row_start"], row_end=violations[-1]["row_end"])
     statement = f"{rule.id} holds in batch {batch_id} ({n_rows} samples checked). Rule: {rule.text}"
     ev = ws.evidence.add("rule_pass", statement, signals=signals, values={"rule_id": rule.id, "n_rows": n_rows}, computed_by="quality.rules.run_rule", n_samples=n_rows, batch_id=batch_id, group_id=group_id)
-    return CheckResult(check_id=next_check_id(ws), check_type=f"rule:{rule.id}", category="rule", signals=signals, batch_id=batch_id, group_id=group_id, status="pass", severity=0.0, statement=statement, evidence_ids=[ev.id], rule_id=rule.id, values={"rule_type": spec.get("type"), "n_violating": 0, "n_rows": n_rows})
+    conf, basis = check_confidence(n_rows, exact=True)
+    return CheckResult(check_id=next_check_id(ws), check_type=f"rule:{rule.id}", category="rule", signals=signals, batch_id=batch_id, group_id=group_id, status="pass", severity=0.0, statement=statement, evidence_ids=[ev.id], rule_id=rule.id, values={"rule_type": spec.get("type"), "n_violating": 0, "n_rows": n_rows, "confidence": conf, "confidence_basis": basis + "; nothing was found"})
 
 
 # ================================================================== template parser

@@ -86,16 +86,16 @@ def stacked_bars(rows: Sequence[tuple[str, dict[str, int]]], width: int = 640, l
     w = width - pad_l - pad_r
     parts = [f'<svg class="bars" viewBox="0 0 {width} {height}" width="100%" role="img">']
     for i, (name, counts) in enumerate(rows):
-        total = max(1, sum(int(counts.get(k, 0)) for k in ("pass", "warn", "fail")))
+        total = max(1, sum(int(counts.get(k, 0)) for k in ("pass", "warn", "fail", "not_testable")))
         y0 = gap + i * (row_h + gap)
         parts.append(f'<text x="{pad_l - 8}" y="{y0 + row_h * 0.7:.1f}" font-size="12" text-anchor="end" fill="{PALETTE["ink"]}">{escape(str(name))}</text>')
         x0 = pad_l
-        for k in ("pass", "warn", "fail"):
+        for k in ("pass", "warn", "fail", "not_testable"):  # not testable: grey, neither a pass nor a failure
             c = int(counts.get(k, 0))
             if c <= 0:
                 continue
             ww = w * c / total
-            parts.append(f'<rect x="{x0:.1f}" y="{y0}" width="{ww:.1f}" height="{row_h}" fill="{PALETTE[k]}"><title>{escape(labels.get(k, k))}: {c}</title></rect>')
+            parts.append(f'<rect x="{x0:.1f}" y="{y0}" width="{ww:.1f}" height="{row_h}" fill="{PALETTE.get(k, PALETTE["muted"])}"><title>{escape(labels.get(k, k))}: {c}</title></rect>')
             if ww > 22:
                 parts.append(f'<text x="{x0 + ww / 2:.1f}" y="{y0 + row_h * 0.7:.1f}" font-size="11" text-anchor="middle" fill="#fff">{c}</text>')
             x0 += ww

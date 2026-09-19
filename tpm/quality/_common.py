@@ -334,3 +334,112 @@ def fmt_num(v: Any) -> str:
     if abs(v) >= 1e5 or (abs(v) < 1e-3 and v != 0):
         return f"{v:.3g}"
     return f"{v:.4g}"
+
+
+# ---------------------------------------------------------------- wording by kind of data
+# Sensor streams get instrument words; other tables (business records, event logs) get column / entry words, so a
+# repeated order quantity is not called "a dead sensor". The kind comes from the profile's domain.json
+# (domain_likelihood.sensor_stream >= 0.5 = sensor data; no domain.json yet = sensor data).
+WORDING: dict[str, dict[str, str]] = {
+    "sensor": {
+        "signal": "signal", "signals": "signals", "samples": "samples", "readings": "readings", "reading": "reading",
+        "frozen_why": "looks like a dead or stale sensor, not a process change",
+        "frozen_zero": "a closed valve or zero flow held exactly at 0, or a dead sensor",
+        "unreliable": "the signal is treated as unreliable in those rows",
+        "frozen_block": "a logging or data problem, not {n} broken sensors; these rows are not real measurements",
+        "missing_block": "a logging or transmission gap, not {n} separate sensor problems",
+        "quant_block": "a change in how the data was logged or exported, not {n} separate instrument problems",
+        "quant": "a precision or logger change, not a process change",
+        "unit": "likely a unit or decimal-point change, not a process event",
+        "saturation": "possible saturation or clipping",
+        "implausible": "a sensor, conversion or logging error",
+        "dup": "which real sensor readings practically never do; they are copies made by the logger or the export, not independent measurements",
+        "dropout": "whole-signal dropout",
+        "relation": "one of them is probably a bad sensor",
+        "record_problem": "a logging or data problem",
+        "record_gap": "a logging gap",
+    },
+    "records": {
+        "signal": "column", "signals": "columns", "samples": "entries", "readings": "entries", "reading": "entry",
+        "frozen_why": "the same value was repeated, e.g. a copied or default value, not a real change",
+        "frozen_zero": "a zero or default value was repeated; it can be genuine, or an entry or export problem",
+        "unreliable": "the column is treated as unreliable in those rows",
+        "frozen_block": "an entry or export problem, not {n} separate column problems; these rows do not hold real entries",
+        "missing_block": "an entry or export gap, not {n} separate column problems",
+        "quant_block": "a change in how the entries were rounded or exported, not {n} separate column problems",
+        "quant": "a change in how the entries were rounded or exported",
+        "unit": "likely a unit or decimal-point change in the entries",
+        "saturation": "possibly a cap or a default value at the column's limit",
+        "implausible": "an entry or export problem",
+        "dup": "an entry or export problem: the same record was stored twice and is not an independent record",
+        "dropout": "the column is empty in this batch",
+        "relation": "one of the two columns probably holds wrong entries",
+        "record_problem": "an entry or export problem",
+        "record_gap": "an entry or export gap",
+    },
+}
+
+
+def data_wording(ws: Any) -> str:
+    """"sensor" or "records" for the statements of the checks (see WORDING)."""
+    try:
+        d = ws.read_json("domain", None)
+    except Exception:
+        d = None
+    if not isinstance(d, dict):
+        return "sensor"
+    ll = d.get("domain_likelihood") or {}
+    try:
+        return "sensor" if float(ll.get("sensor_stream", 1.0)) >= 0.5 else "records"
+    except (TypeError, ValueError):
+        return "sensor"
+
+
+# ---------------------------------------------------------------- statuses, common mode, confidence
+NOT_TESTABLE = "not_testable"
+PROBLEM_STATUSES = ("warn", "fail")
+
+
+def is_problem(status: Any) -> bool:
+    """True for a finding (warn / fail). "pass" and "not_testable" are not problems: a check that could not run
+    says nothing either way and must never be counted as passed or as failed."""
+    return str(status) in PROBLEM_STATUSES
+
+
+def common_mode_k(n_signals: int) -> int:
+    """Minimum number of signals that must show the same finding in the same rows for it to be one common-mode event:
+    3 signals, or 10 % of the signals when there are fewer than 30 (never fewer than 2)."""
+    return int(min(3, max(2, math.ceil(0.10 * max(0, int(n_signals))))))
+
+
+CONF_N_HALF = 30  # readings at which the sample-size part of a check confidence reaches 0.5
+
+
+def check_confidence(n: Any, ratio: Optional[float] = None, exact: bool = False) -> tuple[float, str]:
+    """Heuristic confidence (0..1) in a check's finding and its basis in plain words.
+
+    Two parts, multiplied: the sample size behind the check (n / (n + 30): 30 readings give 0.5, 3000 give 0.99) and
+    how far the evidence is from the pass/fail boundary (``ratio`` = observed / threshold; 1.0 = just at the boundary
+    gives 0.5, 2x gives 0.89, 3x or more ~1). ``exact`` findings (an exact duplicate, an infinite value, a whole signal
+    missing) have no threshold to be near. No extra data pass: everything comes from the check's own counters."""
+    try:
+        nn = max(0, int(n or 0))
+    except (TypeError, ValueError):
+        nn = 0
+    size = nn / (nn + CONF_N_HALF)
+    words = f"based on {nn:,} readings"
+    if exact or ratio is None or not math.isfinite(float(ratio)):
+        margin = 0.97
+        words += "; an exact test, no threshold involved" if exact else ""
+    else:
+        r = max(float(ratio), 1e-6)
+        margin = max(0.02, 0.5 + 0.5 * math.tanh(1.5 * math.log(r)))
+        if r >= 1.2:
+            words += f"; the finding is {r:.1f} times its threshold" if r < 100 else "; the finding is far beyond its threshold"
+        elif r >= 1.0:
+            words += "; the finding is only just past its threshold"
+        else:
+            words += "; the evidence is below the threshold"
+    if nn < CONF_N_HALF:
+        words += " (few readings)"
+    return round(float(min(0.99, max(0.01, size * margin))), 2), words
