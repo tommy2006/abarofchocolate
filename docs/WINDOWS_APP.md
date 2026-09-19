@@ -42,7 +42,8 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
 
 needs the project environment (`.venv` with `requirements.txt`); the script installs PyInstaller when missing.
 Steps: icon + plotly.min.js, freeze the app (`packaging/windows/norrin_tpm.spec`, one folder, two executables),
-smoke test of the frozen app (doctor + a full analysis of a bundled sample), zip the payload, build the setup
+smoke test of the frozen app (doctor, which also lists the known failure types of the live monitor and fails when
+the build ships none, + a full analysis of a bundled sample), zip the payload, build the setup
 program (`packaging/windows/installer.py`, a small wizard that carries the payload). Output:
 `dist\NorrinTPM-Setup.exe` (about 190 MB, committed through git LFS - `.gitattributes` tracks it - so the team repo
 always carries the current installer; GitHub's 100 MB limit for ordinary files does not apply to LFS objects).

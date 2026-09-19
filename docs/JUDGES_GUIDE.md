@@ -3,6 +3,11 @@
 Everything below runs on your machine, without an account or an API key. Total time: about five minutes after the
 one-time dependency install.
 
+**How to move through the app.** The left bar is the order of an analysis: 0 Runs, 1 Understanding, 2 Data quality,
+3 Monitor, 4 Diagnoses, 5 Assessor, 6 Report, 7 Live monitor; Settings holds the rest. Pick **Basic** mode (your name
+in the top bar) to see the app as a busy operator would - only the essentials - and **Engineer** to see everything.
+Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes the text size.
+
 ## 0. Start (1 minute of typing, a few minutes of installing)
 
 ```
@@ -79,11 +84,6 @@ python -m tpm report latest --format summary       one A4 page to share
 - Sensor vs. process: one signal breaking its correlation structure is reported as a sensor / data problem, several
   correlated signals moving together as a process fault.
 
-**How to move through the app.** The left bar is the order of an analysis: 0 Runs, 1 Understanding, 2 Data quality,
-3 Monitor, 4 Diagnoses, 5 Assessor, 6 Report, 7 Live monitor; Settings holds the rest. Pick **Basic** mode (your name
-in the top bar) to see the app as a busy operator would - only the essentials - and **Engineer** to see everything.
-Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes the text size.
-
 ## 4. Root-cause diagnosis — *Diagnoses* view, report section 4
 
 - Fault type (pattern name or "unnamed pattern"), cause class (process / sensor / data / mixed / unknown), ranked
@@ -93,7 +93,7 @@ Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes t
   agreement) and four alternatives argued from the evidence (a data problem, a process change, a saturated actuator,
   a single broken sensor); the verdict (supported / weakened / rejected) and the adjusted confidence are shown before
   the diagnosis is presented, and every disagreement is logged. The confidence is labelled as a heuristic score.
-- Bonus "why" interface: click *why?* on any flag or diagnosis to ask a question in natural language. The local tool
+- Bonus "why" interface: press *Ask why* on any flag or diagnosis to ask a question in natural language. The local tool
   agent answers from the evidence and can query the raw data on this machine; the answer cites evidence IDs.
 
 ## 5. Human-in-the-loop — every card, report section 5
@@ -136,13 +136,28 @@ record batch" through the identical pipeline.
 - The model layer is swapped by configuration only: `local_llm.model` (Ollama), `external_llm.model` /
   `external_llm.base_url` (EU-hosted endpoint), profile routing per task.
 
+## 9. Live monitor - *7 Live monitor*, no run needed
+
+In **Engineer** mode, open page **7 Live monitor** and press **Demo: a known failure type**. The monitor learns what
+normal looks like for a few cycles, then the sensors start drifting like Tennessee Eastman Fault 1:
+
+1. *Early warning: drifting towards Fault 1* - the failure type it is moving towards, and how sure it is;
+2. a *Fault 1* alarm when it is occurring, as one card read left to right: **Alarm** (what tripped, since when) ->
+   **Problem** (which sensors behave how, with small charts) -> **Cause** (the matching failure type, or "no known
+   type matches: generic drift") -> **Suggestion** (what to check or do);
+3. on another page you still get it: a message in the corner and a dot on **7 Live monitor** in the left bar.
+
+The catalogue of known failure types is `config/failure_signatures.yaml`; drop your own YAML of the same shape into
+`workspace/_live/signatures/`. It never goes to a language model. Point the monitor at a growing file of your own with
+**Watch a file**.
+
 ## Bonus items and where to find them
 
 | Bonus | Where |
 |---|---|
 | No-egress mode: full pipeline on a local open-weight model | default profile; `python -m tpm models` shows the pulled model; ledger shows route = local |
 | Confidence / uncertainty throughout | every inference, check, flag, pattern, diagnosis card and report row |
-| Natural-language "why" interface | *why?* on any flag / diagnosis; the chat box on Diagnoses and Assessor |
+| Natural-language "why" interface | *Ask why* on any flag / diagnosis; the *Ask* button in the top bar |
 | Visual dashboards of drift over time | Monitor view (score timelines, contributions), report sparklines |
 | Critique / review step | Diagnoses view, report section 4 |
 | Exportable diagnosis and decision log | Report view → export; `python -m tpm export` |
