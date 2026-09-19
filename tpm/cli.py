@@ -302,7 +302,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     import uvicorn
 
-    uvicorn.run("tpm.api.server:app", host=args.host, port=args.port, log_level="warning" if args.quiet else "info", reload=False)
+    # SSE progress streams stay open until the browser disconnects; without a graceful-shutdown timeout Ctrl+C hangs
+    uvicorn.run("tpm.api.server:app", host=args.host, port=args.port, log_level="warning" if args.quiet else "info", reload=False, timeout_graceful_shutdown=3)
     return 0
 
 
