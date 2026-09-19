@@ -13,6 +13,7 @@ import csv
 import importlib
 import io
 import json
+import re
 import shutil
 import threading
 import time
@@ -84,6 +85,63 @@ def _rewrite_profile_line(settings_path: Optional[Path], profile: str) -> bool:
     if n != 1:
         return False
     p.write_text(new, encoding="utf-8")
+    return True
+
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+
+
+def _check_run_id(run_id: Optional[str]) -> Optional[str]:
+    """A client-chosen run id becomes a folder name under the workspace: letters, digits, '_', '-', '.' only,
+    no separators, no '..'."""
+    if run_id is None:
+        return None
+    run_id = str(run_id)
+    if not _RUN_ID_RE.fullmatch(run_id) or ".." in run_id:
+        raise HTTPException(400, "run_id may contain only letters, digits, '_', '-' and '.', must start with a letter or digit, and be at most 80 characters")
+    return run_id
+
+
+def _heal_orphan(ws: Workspace, jobs: dict[str, Any]) -> bool:
+    """A run left 'running' by a process that no longer exists (server stopped, machine restarted) is marked
+    failed/interrupted so the UI does not show it as running forever. Runs owned by a live process (this
+    server's job threads, or a CLI run in another process) are left alone."""
+    st = ws.status()
+    if st.state not in ("running", "pending"):
+        return False
+    job = jobs.get(ws.run_id)
+    th = job.get("thread") if job else None
+    if th is not None and th.is_alive():
+        return False
+    meta = ws.read_json("meta") or {}
+    alive = False
+    try:
+        import psutil
+        from datetime import datetime
+
+        pid = meta.get("pid")
+        if pid and psutil.pid_exists(int(pid)):
+            created = datetime.fromisoformat(str(meta.get("created_at"))).timestamp()
+            alive = psutil.Process(int(pid)).create_time() <= created + 5 and int(pid) != __import__("os").getpid()
+        elif not pid:
+            upd = datetime.fromisoformat(str(st.updated_at)).timestamp()
+            alive = (time.time() - upd) < 900  # older runs carry no pid: give a live CLI run 15 minutes between updates
+    except Exception:
+        alive = False
+    if alive:
+        return False
+    for sg in st.stages:
+        if sg.state == "running":
+            sg.state = "failed"
+            sg.message = "interrupted"
+            sg.error = "The process running this analysis stopped before the stage finished."
+    st.state = "failed"
+    st.error = "Interrupted: the process that was running this analysis is no longer alive (server stopped or machine restarted). Stages that finished are still available; start the run again to complete it."
+    ws.set_status(st)
+    try:
+        ws.log.record("system:api", "run_interrupted", "run", ws.run_id, {"reason": "owning process not alive"})
+    except Exception:
+        pass
     return True
 
 
@@ -304,19 +362,20 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         ctype = request.headers.get("content-type", "")
         options: dict[str, Any] = {}
         source: Optional[str] = None
-        upload_name: Optional[str] = None
-        upload_bytes: Optional[bytes] = None
+        received: Any = None  # tpm.api.upload.Received: the data file, already on disk (staged next to the runs)
         if ctype.startswith("multipart/form-data"):
-            form = await request.form()
-            for k, v in form.multi_items():
-                if hasattr(v, "filename") and v.filename:
-                    if k in ("file", "upload"):
-                        upload_name = v.filename
-                        upload_bytes = await v.read()
-                    elif k == "rules_file":
-                        options["rules_text"] = (await v.read()).decode("utf-8", errors="replace")
-                else:
-                    options[k] = v
+            # The data file can be many GB: it is streamed to the workspace volume in 8 MB chunks and never held
+            # in memory (see tpm/api/upload.py). Nothing is rejected by size; a full disk answers 507 with the numbers.
+            from .upload import UploadFailed, receive_multipart
+
+            try:
+                received = await receive_multipart(request, state.settings.workspace_path)
+            except UploadFailed as e:
+                raise HTTPException(e.status_code, e.detail)
+            for k, v in received.fields:
+                options[k] = v
+            if "rules_file" in received.small_files:
+                options["rules_text"] = received.small_files["rules_file"].decode("utf-8", errors="replace")
         else:
             try:
                 options = await request.json()
@@ -325,7 +384,12 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             options = dict(options or {})
         source = options.pop("path", None) or options.pop("source_path", None)
         profile = options.pop("profile", None) or None
-        run_id = options.pop("run_id", None) or None
+        try:
+            run_id = _check_run_id(options.pop("run_id", None) or None)
+        except HTTPException:
+            if received is not None:
+                received.discard()
+            raise
         # normalise option types
         for k in ("has_header", "transposed"):
             if k in options and isinstance(options[k], str):
@@ -334,16 +398,14 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             options["group_columns"] = [c.strip() for c in options["group_columns"].split(",") if c.strip()]
         options = {k: v for k, v in options.items() if v not in ("", None)}
         if profile and profile not in state.settings.profiles:
+            if received is not None:
+                received.discard()
             raise HTTPException(400, f"unknown profile {profile!r}")
         ws = Workspace(run_id=run_id, settings=state.settings)
         run_id = ws.run_id
-        if upload_bytes is not None:
-            up = ws.dir / "uploads"
-            up.mkdir(parents=True, exist_ok=True)
-            safe = Path(upload_name or "upload.csv").name
-            p = up / safe
-            p.write_bytes(upload_bytes)
-            source = str(p)
+        if received is not None and received.path is not None:
+            # staged on the same volume: a rename into workspace/<run_id>/uploads/<name>, nothing is copied
+            source = str(received.move_into(ws.dir / "uploads"))
         if not source:
             raise HTTPException(400, "provide a file (multipart field 'file') or a local path ('path')")
         if not Path(source).exists():
@@ -358,6 +420,15 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     @app.get("/api/runs")
     def list_runs() -> dict[str, Any]:
         runs = Workspace.list_runs(state.settings)
+        healed = False
+        for r in runs:
+            if r.get("state") in ("running", "pending") and r.get("run_id"):
+                try:
+                    healed = _heal_orphan(state.ws(r["run_id"]), state.jobs) or healed
+                except Exception:
+                    pass
+        if healed:
+            runs = Workspace.list_runs(state.settings)
         for r in runs:
             job = state.jobs.get(r.get("run_id", ""))
             r["job"] = {k: v for k, v in job.items() if k != "thread"} if job else None
@@ -375,6 +446,10 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     @app.get("/api/runs/{run_id}/status")
     def run_status(run_id: str) -> dict[str, Any]:
         ws = state.ws(run_id)
+        try:
+            _heal_orphan(ws, state.jobs)
+        except Exception:
+            pass
         st = _jsonable(ws.status())
         job = state.jobs.get(run_id)
         st["job"] = {k: v for k, v in job.items() if k != "thread"} if job else None
@@ -514,6 +589,16 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     def get_domain(run_id: str) -> dict[str, Any]:
         d, ok = _read_artifact(state.ws(run_id), "domain")
         return _wrap(d or {}, ok)
+
+    @app.get("/api/runs/{run_id}/suspicious")
+    def get_suspicious(run_id: str, limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+        """ONE headline list of suspicious rows (detector point anomalies + range/spike checks)."""
+        ws = state.ws(run_id)
+        d = ws.read_json("suspicious_rows.json", None)
+        if not isinstance(d, dict):
+            return {"available": False}
+        rows = d.get("rows") or []
+        return {"available": True, **{k: v for k, v in d.items() if k != "rows"}, "rows": rows[offset: offset + limit], "offset": offset, "limit": limit}
 
     @app.get("/api/runs/{run_id}/plain")
     def get_plain(run_id: str, view: str = Query("understanding"), lang: str = Query("en"), enhance: int = Query(0)) -> dict[str, Any]:
@@ -1325,6 +1410,31 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             return HTMLResponse(html, headers=headers)
         return FileResponse(str(p), media_type="text/html", headers=headers)
 
+    def _report_export(run_id: str, fmt: str, lang: str, refresh: bool):
+        """PDF / PowerPoint of the report: generated on demand from the report context, cached per language with
+        the stamp ensure_report() uses, never waits for the language model (a stored model summary is included)."""
+        ws = state.ws(run_id)
+        lang = lang if lang in state.settings.report.languages else state.settings.report.default_language
+        ensure = _lazy("tpm.report:ensure_export")
+        if ensure is None:
+            return _unavailable("tpm.report:ensure_export", f"The {fmt} export is not available in this build (pip install -r requirements.txt).")
+        try:
+            res = ensure(ws, state.settings, lang, fmt, force=refresh)
+        except ImportError as e:
+            return _unavailable("tpm.report:ensure_export", f"The {fmt} export needs a package that is not installed ({e}); run pip install -r requirements.txt.")
+        except Exception as e:
+            raise HTTPException(500, f"{fmt} export failed: {e}")
+        headers = {"Cache-Control": "no-store", "X-TPM-Export-Regenerated": "1" if res.get("regenerated") else "0", "X-TPM-Export-Seconds": str(res.get("seconds", ""))}
+        return FileResponse(res["path"], media_type=res["media_type"], filename=res["filename"], headers=headers)
+
+    @app.get("/api/runs/{run_id}/report.pdf")
+    def get_report_pdf(run_id: str, lang: str = Query("en"), refresh: bool = Query(False)):
+        return _report_export(run_id, "pdf", lang, refresh)
+
+    @app.get("/api/runs/{run_id}/report.pptx")
+    def get_report_pptx(run_id: str, lang: str = Query("en"), refresh: bool = Query(False)):
+        return _report_export(run_id, "pptx", lang, refresh)
+
     @app.post("/api/runs/{run_id}/report/email")
     async def email_report(run_id: str, request: Request):
         ws = state.ws(run_id)
@@ -1337,7 +1447,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         if fn is None:
             return _unavailable("tpm.report:email_report", "Email sending is not available in this build.")
         try:
-            res = fn(ws, state.settings, to, lang)
+            res = fn(ws, state.settings, to, lang, attach_pdf=bool(body.get("attach_pdf")))
         except Exception as e:
             raise HTTPException(500, f"email failed: {e}")
         ws.log.record("human:ui", "report_emailed", "report", lang, {"to": to})
@@ -1378,7 +1488,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         except Exception:
             body = {}
         body = dict(body or {})
-        run_id = str(body.pop("run_id", None) or time.strftime("run_demo_%Y%m%d_%H%M%S"))
+        run_id = _check_run_id(str(body.pop("run_id", None) or time.strftime("run_demo_%Y%m%d_%H%M%S")))
         if "/" in run_id or "\\" in run_id or run_id.startswith("."):
             raise HTTPException(400, "invalid run_id")
         src_raw = body.pop("path", None) or body.pop("source_path", None)

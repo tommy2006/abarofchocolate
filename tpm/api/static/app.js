@@ -1,6 +1,6 @@
 /* Trustworthy Process Monitor — frontend entry. Boot, router (hash), numbered rail, data-control
    lamps, role picker, language + theme switch, SSE subscription for the selected run. */
-import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows, navigate, recordNavigation, installRefHandler } from './js/core.js';
+import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows, navigate, recordNavigation, installRefHandler, viewAccess, lockText, lockProgressText, lockGlyph, viewHead } from './js/core.js';
 import { initChat } from './js/chat.js';
 import * as runs from './js/views/runs.js';
 import * as understanding from './js/views/understanding.js';
@@ -27,6 +27,7 @@ const VIEWS = [
 ];
 let current = null;
 let rendering = false;
+let routeSeq = 0;
 
 // ---------------------------------------------------------------- router
 function parseHash() {
@@ -36,6 +37,7 @@ function parseHash() {
   return { view: path || 'runs', params };
 }
 async function route() {
+  const seq = ++routeSeq;
   recordNavigation(location.hash || '#/runs');
   const { view, params } = parseHash();
   const def = VIEWS.find((v) => v.id === view) || VIEWS[0];
@@ -43,26 +45,105 @@ async function route() {
   document.querySelectorAll('.rail-item').forEach((b) => b.setAttribute('aria-current', b.dataset.view === def.id ? 'page' : 'false'));
   const main = document.getElementById('main');
   if (current && current.cleanup) { try { current.cleanup(); } catch { /* ignore */ } }
+  current = null;
   clear(main);
   rendering = true;
-  try { current = await def.mod.render(main, params); }
-  catch (e) { console.error(e); main.append(el('div', { class: 'notice fail', text: t('common.error', { msg: e.message }) })); current = null; }
+  // a page whose stage has produced nothing yet shows why and when it opens, not an empty view
+  const acc = viewAccess(def.id);
+  const locked = !acc.open && acc.reason !== 'norun';
+  let made = null;
+  try { made = locked ? renderLocked(main, def) : await def.mod.render(main, params); }
+  catch (e) { console.error(e); if (seq === routeSeq) main.append(el('div', { class: 'notice fail', text: t('common.error', { msg: e.message }) })); }
+  if (seq !== routeSeq) { if (made && made.cleanup) { try { made.cleanup(); } catch { /* ignore */ } } return; }  // a newer navigation took over while this one loaded
+  current = made;
   rendering = false;
   main.focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
 bus.on('route.same', () => route());
 
+/** Stand-in for a view that waits for its pipeline stage: says which stage, shows live progress, opens by itself. */
+function renderLocked(main, def) {
+  const view = el('div', { class: 'view locked-view' });
+  main.append(view);
+  view.append(viewHead(def.num, t(def.key)));
+  const stageLabel = (s) => (t('runs.stage.' + s) === 'runs.stage.' + s ? s : t('runs.stage.' + s));
+  const title = el('h2', { class: 'lockpanel-title' });
+  const now = el('p', { class: 'lockpanel-now' });
+  const body = el('p', { class: 'muted' });
+  const fill = el('i');
+  const pct = el('span', { class: 'small muted' });
+  const meterRow = el('div', { class: 'lockpanel-meter' }, el('span', { class: 'small muted', text: t('lock.towards') }), el('span', { class: 'bar' }, fill), pct);
+  const stagesEl = el('div', { class: 'stages' });
+  const errEl = el('pre', { class: 'notice fail small lockpanel-error', hidden: true });
+  const staleEl = el('div', { class: 'notice warn small', hidden: true });
+  const panel = el('div', { class: 'lockpanel', role: 'status' }, el('div', { class: 'lockpanel-head' }, lockGlyph(), title), now, meterRow, stagesEl, body, staleEl, errEl,
+    el('div', { class: 'row' }, el('button', { class: 'btn', type: 'button', onClick: () => navigate('runs') }, t('lock.watch'))));
+  view.append(panel);
+  const paint = () => {
+    const acc = viewAccess(def.id);
+    if (acc.open) { if (state.view === def.id) route(); return; }
+    if (acc.reason === 'norun') { route(); return; }
+    const vars = { stage: stageLabel(acc.stage), failed: acc.failedStage ? stageLabel(acc.failedStage) : t('runs.state.failed'), view: t(def.key), run: state.run || '', msg: acc.message || t('runs.state.skipped') };
+    panel.dataset.reason = acc.reason;
+    title.textContent = t('lock.title.' + acc.reason, vars);
+    body.textContent = t('lock.body.' + acc.reason, vars);
+    const waiting = acc.reason === 'waiting';
+    now.hidden = !waiting; meterRow.hidden = !waiting;
+    if (waiting) { now.textContent = lockProgressText(acc); fill.style.width = (acc.overall * 100).toFixed(1) + '%'; pct.textContent = fmt.pct(acc.overall); }
+    staleEl.hidden = !(waiting && acc.orphan);
+    if (!staleEl.hidden) staleEl.textContent = t('lock.stale', { min: acc.staleMin });
+    errEl.hidden = !(acc.reason === 'failed' && acc.error);
+    if (!errEl.hidden) errEl.textContent = String(acc.error).slice(-1500);
+    // the stages on the way to this page, in the same form as the Runs progress panel
+    const stages = (state.runStatus && state.runStatus.stages) || [];
+    const upto = stages.slice(0, stages.findIndex((s) => s.stage === acc.stage) + 1);
+    clear(stagesEl);
+    upto.forEach((sg, i) => stagesEl.append(el('div', { class: 'stage ' + sg.state }, el('span', { class: 'num', text: String(i + 1) }), st(sg.state, stageLabel(sg.stage)), el('span', { class: 'bar' }, el('i', { style: { width: ((sg.state === 'done' ? 1 : sg.progress || 0) * 100) + '%' } })), el('span', { class: 'msg', title: sg.message || '', text: sg.state === 'running' ? `${fmt.pct(sg.progress || 0)} ${sg.message || ''}` : (sg.state === 'failed' ? (sg.message || t('runs.state.failed')) : t('runs.state.' + sg.state)) }))));
+  };
+  paint();
+  const off = bus.on('status', paint);
+  view.cleanup = () => off();
+  return view;
+}
+
 // ---------------------------------------------------------------- rail
+const railLocks = { run: null, locked: {} };
 function renderRail() {
   const rail = document.getElementById('rail');
   clear(rail);
   rail.append(el('div', { class: 'rail-tag', text: t('app.tagline') }));
   for (const v of VIEWS) {
-    const b = el('button', { class: 'rail-item', type: 'button', dataset: { view: v.id }, 'aria-current': state.view === v.id ? 'page' : 'false', onClick: () => navigate(v.id) }, el('span', { class: 'rail-num', text: v.num }), el('span', {}, t(v.key), v.level && !roleAllows(v.level) ? el('span', { class: 'badge', title: t('role.tag.' + v.level), text: v.level[0] }) : null));
+    const b = el('button', { class: 'rail-item', type: 'button', dataset: { view: v.id }, 'aria-current': state.view === v.id ? 'page' : 'false', onClick: () => navigate(v.id) }, el('span', { class: 'rail-num', text: v.num }), el('span', { class: 'rail-label' }, t(v.key), v.level && !roleAllows(v.level) ? el('span', { class: 'badge', title: t('role.tag.' + v.level), text: v.level[0] }) : null), el('span', { class: 'rail-lock' }), el('span', { class: 'rail-prog', 'aria-hidden': 'true' }, el('i')));
     rail.append(b);
   }
+  updateRailLocks(false);
 }
+/** Lock state of every rail item for the selected run, updated in place on each status event. An item that was
+    locked a moment ago and is open now gets a brief highlight (never when the run itself was just switched). */
+function updateRailLocks(animate = true) {
+  const sameRun = railLocks.run === state.run;
+  if (!sameRun) { railLocks.run = state.run; railLocks.locked = {}; }
+  document.querySelectorAll('#rail .rail-item').forEach((b) => {
+    const id = b.dataset.view;
+    const acc = viewAccess(id);
+    const locked = !acc.open;
+    const was = railLocks.locked[id];
+    railLocks.locked[id] = locked;
+    b.classList.toggle('locked', locked);
+    if (locked) { b.setAttribute('aria-disabled', 'true'); b.title = lockText(acc); b.dataset.lock = acc.reason; } else { b.removeAttribute('aria-disabled'); b.removeAttribute('title'); delete b.dataset.lock; }
+    const slot = b.querySelector('.rail-lock');
+    if (locked && !slot.firstChild) slot.append(lockGlyph(), el('span', { class: 'sr-only', text: t('lock.locked') }));
+    if (!locked && slot.firstChild) clear(slot);
+    // a thin progress line only under the pages whose own stage is running right now
+    const showProg = locked && acc.reason === 'waiting' && acc.stageState === 'running';
+    if (showProg) b.dataset.prog = '1'; else delete b.dataset.prog;
+    b.querySelector('.rail-prog i').style.width = showProg ? (acc.progress * 100).toFixed(1) + '%' : '0';
+    if (animate && sameRun && was === true && !locked) { b.classList.remove('unlocked'); void b.offsetWidth; b.classList.add('unlocked'); setTimeout(() => b.classList.remove('unlocked'), 3200); }
+  });
+}
+bus.on('status', () => updateRailLocks(true));
+bus.on('run.changed', () => updateRailLocks(false));
 
 // ---------------------------------------------------------------- lamps (data-control strip)
 function renderLamps() {
@@ -131,7 +212,7 @@ function subscribe() {
   const es = new EventSource(`/api/runs/${encodeURIComponent(state.run)}/events`);
   state.es = es;
   es.addEventListener('status', (e) => { try { const s = JSON.parse(e.data); const prev = state.runStatus; state.runStatus = Object.assign({}, prev || {}, s); bus.emit('status', state.runStatus); if (prev && prev.state !== 'done' && s.state === 'done') { state.cache.clear(); toast(t('toast.runDone', { id: s.run_id, state: s.state }), 'ok'); } if (prev && prev.state !== 'failed' && s.state === 'failed') toast(t('toast.runDone', { id: s.run_id, state: s.state }), 'fail'); } catch { /* ignore */ } });
-  es.addEventListener('progress', (e) => { try { const p = JSON.parse(e.data); if (state.runStatus) { const sg = (state.runStatus.stages || []).find((x) => x.stage === p.stage); if (sg) { sg.progress = p.progress; sg.message = p.message; sg.state = 'running'; bus.emit('status', state.runStatus); } } } catch { /* ignore */ } });
+  es.addEventListener('progress', (e) => { try { const p = JSON.parse(e.data); if (state.runStatus) { const sg = (state.runStatus.stages || []).find((x) => x.stage === p.stage); if (sg && !['done', 'failed', 'skipped'].includes(sg.state)) { sg.progress = p.progress; sg.message = p.message; sg.state = 'running'; bus.emit('status', state.runStatus); } /* a late progress event never reopens a finished stage */ } } catch { /* ignore */ } });
   es.addEventListener('flags', (e) => { try { const d = JSON.parse(e.data); toast(t('toast.newFlags', { n: (d.latest || []).length }), 'warn'); bus.emit('flags', d); } catch { /* ignore */ } });
   es.addEventListener('batch', (e) => { try { const d = JSON.parse(e.data); toast(t('toast.batch', { id: d.batch_id, n: d.n_rows })); bus.emit('batch', d); } catch { /* ignore */ } });
   es.addEventListener('decision', (e) => { try { bus.emit('decision.remote', JSON.parse(e.data)); } catch { /* ignore */ } });
@@ -176,6 +257,16 @@ async function boot() {
   bus.on('status', () => { const r = state.runs.find((x) => x.run_id === state.run); if (r && state.runStatus) { r.state = state.runStatus.state; r.stages = state.runStatus.stages; renderRunSelect(); } });
   bus.on('run.changed', () => { route(); });
   setInterval(refreshSettings, 30000);
+  // The event stream drives the rail and the locked pages; when it is not delivering (proxy, sleeping tab) fall
+  // back to polling the status of a run that is still being analysed.
+  setInterval(async () => {
+    const s = state.runStatus;
+    if (!state.run || !s || !['running', 'pending'].includes(s.state)) return;
+    if (state.es && state.es.readyState === 1) return;
+    const id = state.run;
+    const r = await api(`/api/runs/${encodeURIComponent(id)}/status`);
+    if (r.ok && state.run === id) { state.runStatus = r.data; bus.emit('status', state.runStatus); }
+  }, 5000);
   if (!state.user) await pickRole();
   const saved = store.get('run', null);
   const initial = saved && state.runs.some((r) => r.run_id === saved) ? saved : (state.runs[0] ? state.runs[0].run_id : null);

@@ -1,7 +1,7 @@
 /* View 2: data quality — trust banner, trust by batch, checks with rule traceability, rule composer.
    ?batch=B00008 selects the batch and lists its checks; ?check=CHK-000029 highlights one; ?rule=RULE-001
    scrolls to the rule. */
-import { state, t, el, clear, runApi, fmt, conf, st, chip, section, table, viewHead, needRun, empty, evidenceButton, toast, errText, hiddenHint, actorName, actorRole, unavailableNote, bus, linkifyRefs, cleanText, refLink, refChips, sev, sevWords, confWords, addPlainBox, flash, navigate } from '../core.js';
+import { state, t, el, clear, runApi, fmt, conf, st, chip, section, table, viewHead, needRun, empty, evidenceButton, toast, errText, hiddenHint, actorName, actorRole, unavailableNote, bus, linkifyRefs, cleanText, refLink, refChips, rowsLink, sev, sevWords, confWords, addPlainBox, flash, navigate } from '../core.js';
 import { openChat, flagContext } from '../chat.js';
 
 export async function render(main, params = {}) {
@@ -21,7 +21,8 @@ export async function render(main, params = {}) {
   const caution = items.filter((x) => x.trusted && x.reasons && x.reasons.length);
   const bannerCls = untrusted.length ? '' : caution.length ? 'warn' : 'ok';
   const sigs = [...new Set(untrusted.flatMap((x) => x.untrusted_signals || []))];
-  const bannerText = untrusted.length ? t('dq.bannerFail', { signals: sigs.join(', ') || '–', batches: untrusted.map((x) => x.batch_id).join(', ') }) : caution.length ? t('dq.bannerWarn', { n: caution.length }) : t('dq.bannerOk', { n: items.length });
+  const capList = (arr, n) => arr.slice(0, n).join(', ') + (arr.length > n ? ` +${arr.length - n}` : '');
+  const bannerText = untrusted.length ? t('dq.bannerFail', { signals: capList(sigs, 8) || '–', batches: capList(untrusted.map((x) => x.batch_id), 8) }) : caution.length ? t('dq.bannerWarn', { n: caution.length }) : t('dq.bannerOk', { n: items.length });
   if (tr.ok && tr.data.available) {
     view.append(el('div', { class: 'trust-banner ' + bannerCls, role: 'status' },
       el('div', { class: 'score' }, fmt.pct(trust.overall), el('small', { text: t('dq.trustScore') })),
@@ -29,29 +30,127 @@ export async function render(main, params = {}) {
       untrusted.length ? el('button', { class: 'btn', type: 'button', onClick: () => openChat({ object_type: 'trust', object_id: untrusted[0].batch_id, batch_id: untrusted[0].batch_id, title: untrusted[0].statement, autoAsk: t('chat.quick.why') }) }, t('common.ask')) : null));
   } else view.append(tr.unavailable ? unavailableNote(tr) : el('div', { class: 'notice', text: t('common.notYet') }));
 
-  // ---- trust by batch
+  // ---- trust by batch: score, verdict and the REASONS per batch; group numbers only on request
   let selBatch = params.batch && byBatch[params.batch] ? params.batch : (params.batch && batchRows[params.batch] ? params.batch : '');
   const tb = section(t('dq.trustByBatch'));
   view.append(tb.root);
   const bar = el('div', { class: 'trustbar' });
-  const bInfo = el('div', { class: 'small muted batchinfo', style: { marginTop: '6px' } });
-  const showBatchInfo = (x) => {
-    clear(bInfo);
-    if (!x) { bInfo.append(el('span', { class: 'dim', text: t('dq.pickBatch') })); return; }
-    const b = batchRows[x.batch_id] || {};
-    bInfo.append(el('b', {}, refLink('batch', x.batch_id), ' '), st(x.trusted ? 'trusted' : 'untrusted', `${x.trusted ? t('dq.trusted') : t('dq.untrusted')} (${fmt.pct(x.trust_score)})`), ' ', linkifyRefs(cleanText(x.statement)),
-      (x.untrusted_signals || []).length ? el('span', {}, ` — ${t('dq.untrustedSignals')}: `, refChips('signal', x.untrusted_signals)) : null,
-      b.row_start !== undefined ? el('span', { class: 'dim', text: ` — ${t('common.rows', { a: b.row_start, b: b.row_end })}${(b.group_ids || []).length ? `, ${t('common.group').toLowerCase()} ${b.group_ids.join(', ')}` : ''}` }) : null,
-      (x.reasons || []).length ? el('ul', { class: 'list small' }, x.reasons.slice(0, 6).map((r) => el('li', {}, linkifyRefs(cleanText(r))))) : null,
-      el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => { selBatch = ''; bar.querySelectorAll('button').forEach((y) => y.classList.remove('sel')); showBatchInfo(null); loadChecks(); } }, t('common.clearFilter')));
+  const rowsHost = el('div', { class: 'batchrows' });
+  const endExclusive = !!(batches.ok && batches.data.row_end_exclusive);
+  const hasIssue = (x) => !x.trusted || (x.reasons || []).length > 0 || (x.local_untrusted || []).length > 0 || (x.untrusted_signals || []).length > 0;
+  const whyType = (ct) => { const key = 'dq.why.' + ct; return t(key) === key ? String(ct || '').replace(/^rule:/, 'rule ').replace(/_/g, ' ') : t(key); };
+  /** Row-scoped problems of a batch, one line per (kind, row range): signals hit in the same rows are listed together.
+      Ordered by how much data they touch: rows x severity x signals. */
+  const localProblems = (x) => {
+    const m = new Map();
+    const wideSet = new Set(x.untrusted_signals || []);   // their rows are named on the whole-batch line instead
+    for (const l of x.local_untrusted || []) {
+      if (wideSet.has(l.signal)) continue;
+      const key = `${l.check_type}|${l.row_start}|${l.row_end}`;
+      let g = m.get(key);
+      if (!g) { g = { check_type: l.check_type, row_start: Number(l.row_start), row_end: Number(l.row_end), severity: 0, signals: [], check_ids: [] }; m.set(key, g); }
+      if (l.signal && !g.signals.includes(l.signal)) g.signals.push(l.signal);
+      g.severity = Math.max(g.severity, Number(l.severity) || 0);
+      if (l.check_id && !g.check_ids.includes(l.check_id)) g.check_ids.push(l.check_id);
+    }
+    const weight = (g) => (g.row_end - g.row_start + 1) * Math.max(0.05, g.severity) * Math.max(1, g.signals.length);
+    const sorted = [...m.values()].sort((a, b) => weight(b) - weight(a));
+    // the heaviest problem of EACH kind first (frozen, scale change, out of range ...), then the rest by weight:
+    // five lines of the same kind would hide that other kinds exist
+    const seen = new Set(); const head = []; const rest = [];
+    for (const g of sorted) { if (seen.has(g.check_type)) rest.push(g); else { seen.add(g.check_type); head.push(g); } }
+    return head.concat(rest);
   };
+  const localLine = (g) => {
+    const n = g.row_end - g.row_start + 1;
+    return el('li', {},
+      g.signals.length > 3 ? el('span', { title: g.signals.join(', ') }, t('dq.nSignals', { n: g.signals.length }), ' (', refChips('signal', g.signals, { max: 3 }), ')') : refChips('signal', g.signals, { max: 3 }),
+      ' ', t(n === 1 ? 'dq.rowWord' : 'dq.rowsWord'), ' ', rowsLink(g.row_start, g.row_end, { signals: g.signals }), ': ', el('b', { text: whyType(g.check_type) }),
+      el('span', { class: 'dim' }, n > 1 ? ` — ${t('dq.nRows', { n: fmt.int(n) })}` : '', g.check_ids.length ? ' ' : '', g.check_ids.length ? refLink('check', g.check_ids[0], g.check_ids[0].replace('CHK-', '#')) : null, g.check_ids.length > 1 ? ` +${g.check_ids.length - 1}` : ''));
+  };
+  const LOCAL_TOP = 5;
+  const batchRow = (x, { selected = false } = {}) => {
+    const b = batchRows[x.batch_id] || {};
+    const verdict = !x.trusted ? 'untrusted' : hasIssue(x) ? 'caution' : 'trusted';
+    const row = el('div', { class: `batchrow v-${verdict}` + (selected ? ' sel' : ''), dataset: { batch: x.batch_id } });
+    const groups = (b.group_ids || []).map(String);
+    const lastRow = b.row_end !== undefined ? (endExclusive ? b.row_end - 1 : b.row_end) : null;
+    row.append(el('div', { class: 'batchrow-head' },
+      el('div', { class: 'batchrow-id' }, refLink('batch', x.batch_id), ' ', st(verdict === 'untrusted' ? 'untrusted' : verdict === 'caution' ? 'warn' : 'trusted', t('dq.verdict.' + verdict))),
+      el('div', { class: 'batchrow-score', title: t('dq.trustHelp') }, el('b', { text: fmt.pct(x.trust_score) }), el('span', { class: 'bar' }, el('i', { style: { width: Math.max(0, Math.min(1, x.trust_score)) * 100 + '%' } })), el('span', { class: 'small dim', text: t('dq.trustScore') })),
+      el('div', { class: 'batchrow-meta small dim' }, b.row_start !== undefined ? el('span', {}, t('dq.rowsWord'), ' ', rowsLink(b.row_start, lastRow)) : null, groups.length ? el('span', { text: groups.length === 1 ? `${t('common.group').toLowerCase()} ${groups[0]}` : t('dq.nGroups', { n: fmt.int(groups.length) }) }) : null, (x.check_ids || []).length ? el('span', { text: t('dq.nChecks', { n: x.check_ids.length }) }) : null),
+      selected ? el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => pickBatch('') }, t('common.clearFilter')) : el('button', { class: 'btn btn-sm', type: 'button', onClick: () => pickBatch(x.batch_id) }, t('dq.showChecks'))));
+    // reasons: whole-batch signals first, then structural reasons, then row-scoped problems
+    const why = el('div', { class: 'batchrow-why' });
+    const reasons = (x.reasons || []).map((r) => cleanText(r));
+    const sigReason = (s) => { const r = reasons.find((y) => y.startsWith(s + ':')); return r ? r.slice(s.length + 1).trim() : ''; };
+    const wide = (x.untrusted_signals || []);
+    const structural = reasons.filter((r) => !wide.some((s) => r.startsWith(s + ':')));
+    if (wide.length || structural.length) {
+      why.append(el('h4', { class: 'small muted', text: t('dq.wholeBatch') }));
+      const ul = el('ul', { class: 'list small' });
+      const WIDE_TOP = 6;
+      let firstStructural = null;
+      const wideLine = (s) => {
+        const ranges = (x.local_untrusted || []).filter((l) => l.signal === s).slice(0, 2);
+        return el('li', {}, refLink('signal', s), ': ', el('b', {}, linkifyRefs(sigReason(s) || t('dq.unreliable'))), ranges.length ? el('span', {}, ' (', t('dq.rowsWord'), ' ', ranges.map((l, i) => [i ? ', ' : '', rowsLink(l.row_start, l.row_end, { signals: [s] })]), ')') : null, el('span', { class: 'dim', text: ' — ' + t('dq.wholeBatchNote') }));
+      };
+      wide.slice(0, WIDE_TOP).forEach((s) => ul.append(wideLine(s)));
+      if (wide.length > WIDE_TOP) { const more = el('li', {}, el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => { more.remove(); wide.slice(WIDE_TOP).forEach((s) => ul.insertBefore(wideLine(s), firstStructural)); } }, t('dq.moreReasons', { n: wide.length - WIDE_TOP }))); ul.append(more); }
+      structural.slice(0, 6).forEach((r, i) => { const li = el('li', {}, linkifyRefs(r)); if (i === 0) firstStructural = li; ul.append(li); });
+      why.append(ul);
+    }
+    const local = localProblems(x);
+    if (local.length) {
+      const nSig = new Set(local.flatMap((g) => g.signals)).size;
+      why.append(el('h4', { class: 'small muted', text: t('dq.onlyRows', { n: nSig }) }));
+      const ul = el('ul', { class: 'list small' }, local.slice(0, LOCAL_TOP).map(localLine));
+      if (local.length > LOCAL_TOP) {
+        const more = el('li', { class: 'more' }, el('button', { class: 'btn btn-sm btn-quiet', type: 'button', 'aria-expanded': 'false', onClick: () => { more.remove(); local.slice(LOCAL_TOP).forEach((g) => ul.append(localLine(g))); } }, t('dq.moreRanges', { n: local.length - LOCAL_TOP })));
+        ul.append(more);
+      }
+      why.append(ul, el('p', { class: 'small dim', style: { margin: '2px 0 0' }, text: t('dq.onlyRowsNote') }));
+    }
+    if (!why.childNodes.length) why.append(el('p', { class: 'small muted', style: { margin: 0 }, text: t('dq.passedAll') }));
+    row.append(why);
+    // group numbers: thousands on large runs, so only on request and only then put in the page
+    if (groups.length > 1) {
+      const list = el('div', { class: 'grouplist small', hidden: true });
+      const btn = el('button', { class: 'btn btn-sm btn-quiet', type: 'button', 'aria-expanded': 'false', onClick: () => {
+        const open = list.hidden;
+        if (open && !list.firstChild) { if (groups.length <= 300) groups.forEach((g, i) => list.append(i ? ', ' : '', refLink('group', g))); else list.textContent = groups.join(', '); }
+        list.hidden = !open; btn.setAttribute('aria-expanded', String(open)); btn.textContent = open ? t('dq.hideGroups') : t('dq.showGroups', { n: fmt.int(groups.length) });
+      } }, t('dq.showGroups', { n: fmt.int(groups.length) }));
+      row.append(el('div', { class: 'batchrow-groups' }, btn, list));
+    }
+    return row;
+  };
+  let shownBatches = 4;
+  const renderBatchRows = () => {
+    clear(rowsHost);
+    if (selBatch) {
+      const x = byBatch[selBatch];
+      if (x) rowsHost.append(batchRow(x, { selected: true })); else rowsHost.append(el('p', { class: 'small muted', text: t('dq.noVerdict', { id: selBatch }) }), el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => pickBatch('') }, t('common.clearFilter')));
+      return;
+    }
+    const worst = items.filter(hasIssue).sort((a, b) => a.trust_score - b.trust_score || String(a.batch_id).localeCompare(String(b.batch_id)));
+    rowsHost.append(el('p', { class: 'small muted', style: { margin: '0 0 8px' }, text: worst.length ? t('dq.batchesAttention', { n: worst.length, total: items.length }) + ' ' + t('dq.pickBatch') : (items.length ? t('dq.batchesAllPassed', { n: items.length }) + ' ' + t('dq.pickBatch') : t('common.notYet')) }));
+    worst.slice(0, shownBatches).forEach((x) => rowsHost.append(batchRow(x)));
+    if (worst.length > shownBatches) rowsHost.append(el('button', { class: 'btn btn-quiet', type: 'button', onClick: () => { shownBatches += 10; renderBatchRows(); } }, t('dq.moreBatches', { n: worst.length - shownBatches })));
+  };
+  function pickBatch(id) {
+    selBatch = id;
+    bar.querySelectorAll('button').forEach((y) => y.classList.toggle('sel', !!id && y.dataset.batch === id));
+    renderBatchRows();
+    loadChecks();
+  }
   for (const x of items) {
-    const b = el('button', { type: 'button', class: (x.trusted ? (x.reasons && x.reasons.length ? 'warn' : '') : 'fail') + (selBatch === x.batch_id ? ' sel' : ''), style: { height: Math.max(8, x.trust_score * 100) + '%' }, title: `${x.batch_id}: ${fmt.pct(x.trust_score)}`, 'aria-label': `${x.batch_id} ${fmt.pct(x.trust_score)}` });
-    b.addEventListener('click', () => { selBatch = selBatch === x.batch_id ? '' : x.batch_id; bar.querySelectorAll('button').forEach((y) => y.classList.remove('sel')); if (selBatch) b.classList.add('sel'); showBatchInfo(selBatch ? x : null); loadChecks(); });
+    const b = el('button', { type: 'button', dataset: { batch: x.batch_id }, class: (x.trusted ? (hasIssue(x) ? 'warn' : '') : 'fail') + (selBatch === x.batch_id ? ' sel' : ''), style: { height: Math.max(8, x.trust_score * 100) + '%' }, title: `${x.batch_id}: ${fmt.pct(x.trust_score)}`, 'aria-label': `${x.batch_id} ${fmt.pct(x.trust_score)}` });
+    b.addEventListener('click', () => pickBatch(selBatch === x.batch_id ? '' : x.batch_id));
     bar.append(b);
   }
-  tb.body.append(bar, bInfo);
-  showBatchInfo(selBatch ? byBatch[selBatch] : null);
+  tb.body.append(bar, rowsHost);
+  renderBatchRows();
 
   // ---- checks
   const ck = section(t('dq.checks'));

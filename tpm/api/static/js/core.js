@@ -117,8 +117,10 @@ export const fmt = {
   int(x) { return x === null || x === undefined ? '–' : Number(x).toLocaleString(); },
   ts(s) { if (!s) return '–'; const d = new Date(s); if (isNaN(d)) return String(s).slice(0, 19).replace('T', ' '); return d.toLocaleString(undefined, { hour12: false }); },
   time(s) { if (!s) return '–'; const d = new Date(s); return isNaN(d) ? String(s) : d.toLocaleTimeString(undefined, { hour12: false }); },
-  bytes(b) { b = Number(b || 0); if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' kB'; return (b / 1048576).toFixed(2) + ' MB'; },
+  bytes(b) { b = Number(b || 0); if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' kB'; if (b < 1073741824) return (b / 1048576).toFixed(b < 104857600 ? 2 : 1) + ' MB'; return (b / 1073741824).toFixed(2) + ' GB'; },
   sec(s) { s = Number(s || 0); if (s < 90) return s.toFixed(0) + ' s'; return (s / 60).toFixed(1) + ' min'; },
+  /** a waiting time a person can plan with: 42 s, 3 min 05 s, 1 h 12 min */
+  dur(s) { s = Math.max(0, Math.round(Number(s || 0))); if (!isFinite(s)) return '–'; if (s < 60) return s + ' s'; if (s < 3600) return Math.floor(s / 60) + ' min ' + String(s % 60).padStart(2, '0') + ' s'; return Math.floor(s / 3600) + ' h ' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + ' min'; },
   /** signed difference on a 0..1 scale, shown in percentage points: +3.6 pp */
   pp(x, d = 1) { if (x === null || x === undefined || isNaN(x)) return '–'; const v = Number(x) * 100; return (v > 0 ? '+' : '') + v.toFixed(d) + ' pp'; },
 };
@@ -151,6 +153,69 @@ export function goBack() {
   closeAllModals();
   if (nav.stack.length) location.hash = nav.stack[nav.stack.length - 1];
   else history.back();
+}
+
+// ---------------------------------------------------------------- pages unlock as the analysis comes in
+export const STAGE_ORDER = ['ingest', 'profile', 'quality', 'detect', 'diagnose', 'assess', 'report'];
+/** View -> the pipeline stages whose output it shows; the view opens as soon as ONE of them is done (the report
+    page can generate a report once the diagnoses exist). Views not listed need no stage. */
+export const VIEW_STAGES = { understanding: ['profile'], quality: ['quality'], monitor: ['detect'], diagnoses: ['diagnose'], assessor: ['assess'], report: ['report', 'diagnose'] };
+const VIEWS_NEEDING_RUN = new Set(['understanding', 'quality', 'monitor', 'diagnoses', 'assessor', 'log', 'report']);
+/** Can this view show something for the selected run?  { open: true } or
+    { open: false, reason: 'norun' | 'waiting' | 'failed' | 'skipped', stage, stageState, progress, message,
+      running: {stage, progress, message} | null, overall (0..1 towards the awaited stage), failedStage, error }.
+    A stage counts only when it is `done`; `skipped` never opens a page. Runs without a stage record are not blocked. */
+export function viewAccess(viewId, status = state.runStatus, runId = state.run) {
+  if (!VIEWS_NEEDING_RUN.has(viewId)) return { open: true };
+  if (!runId) return { open: false, reason: 'norun' };
+  const needs = VIEW_STAGES[viewId];
+  const stages = (status && status.stages) || [];
+  if (!needs || !stages.length) return { open: true };
+  const by = Object.fromEntries(stages.map((s) => [s.stage, s]));
+  if (needs.some((n) => by[n] && by[n].state === 'done')) return { open: true };
+  const stage = needs.slice().sort((a, b) => STAGE_ORDER.indexOf(a) - STAGE_ORDER.indexOf(b)).find((n) => by[n]) || needs[0];
+  const target = by[stage] || { stage, state: 'pending', progress: 0, message: '' };
+  const failedStage = stages.find((s) => s.state === 'failed') || null;
+  const runFailed = !!failedStage || (status && status.state === 'failed');
+  const running = stages.slice().reverse().find((s) => s.state === 'running') || null;  // the furthest one, should two claim to run
+  const upto = stages.slice(0, Math.max(1, stages.findIndex((s) => s.stage === stage) + 1));
+  const overall = upto.reduce((a, s) => a + (s.state === 'done' ? 1 : s.state === 'running' ? Math.max(0, Math.min(1, Number(s.progress) || 0)) : 0), 0) / upto.length;
+  const out = { open: false, stage, stageState: target.state, progress: Number(target.progress) || 0, message: target.message || '', running: running ? { stage: running.stage, progress: Number(running.progress) || 0, message: running.message || '' } : null, overall, failedStage: failedStage ? failedStage.stage : null, error: null };
+  if (runFailed) {
+    out.reason = 'failed';
+    const job = status && status.job;
+    out.error = (failedStage && (failedStage.error || failedStage.message)) || (status && status.error) || (job && job.error) || '';
+    // one line for tooltips: the stage message is the exception text, the stored error is the end of a traceback
+    out.errorShort = String((failedStage && failedStage.message) || String(out.error).trim().split(/\r?\n/)[0] || '').slice(0, 200);
+  } else if (target.state === 'skipped' || (status && status.state === 'done')) out.reason = 'skipped';
+  else {
+    out.reason = 'waiting';
+    // every progress report refreshes updated_at; a long silence without a job in this service is worth a hint
+    const last = status && status.updated_at ? new Date(status.updated_at).getTime() : NaN;
+    out.staleMin = isNaN(last) ? 0 : Math.max(0, Math.floor((Date.now() - last) / 60000));
+    out.orphan = !(status && status.job) && out.staleMin >= 20;
+  }
+  return out;
+}
+const stageName = (s) => (t('runs.stage.' + s) === 'runs.stage.' + s ? s : t('runs.stage.' + s));
+/** One sentence for a locked page: tooltip of the rail item and lead of the locked panel. */
+export function lockText(acc) {
+  if (!acc || acc.open) return '';
+  if (acc.reason === 'norun') return t('lock.norun');
+  const stage = stageName(acc.stage);
+  if (acc.reason === 'failed') return (acc.failedStage === acc.stage ? t('lock.failedSelf', { stage }) : t('lock.failed', { stage, failed: acc.failedStage ? stageName(acc.failedStage) : t('runs.state.failed') })) + (acc.errorShort ? ' ' + acc.errorShort : '');
+  if (acc.reason === 'skipped') return t('lock.skipped', { stage, msg: acc.message || t('runs.state.skipped') });
+  return t('lock.waits', { stage }) + ' (' + lockProgressText(acc) + ')';
+}
+/** "currently 42 %: scoring fold 3 of 5" / "now running: Quality, 42 %" / "not started yet" */
+export function lockProgressText(acc) {
+  if (acc.stageState === 'running') return acc.message ? t('lock.current', { pct: fmt.pct(acc.progress), msg: acc.message }) : t('lock.currentNoMsg', { pct: fmt.pct(acc.progress) });
+  if (acc.running) return t('lock.nowRunning', { stage: stageName(acc.running.stage), pct: fmt.pct(acc.running.progress) }) + (acc.running.message ? ': ' + acc.running.message : '');
+  return t('lock.notStarted');
+}
+/** Small padlock drawn inline (no emoji: it must look the same on every machine and follow the text colour). */
+export function lockGlyph() {
+  return el('span', { class: 'lock-glyph', 'aria-hidden': 'true', html: '<svg viewBox="0 0 12 14" width="11" height="13" focusable="false"><path d="M3.2 6V4.2a2.8 2.8 0 0 1 5.6 0V6" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1.5" y="6" width="9" height="6.8" rx="1.3" fill="currentColor"/></svg>' });
 }
 
 // ---------------------------------------------------------------- toasts, modals
@@ -269,7 +334,7 @@ export function proseList(items, { ordered = false, cls, lead } = {}) {
 
 // ---------------------------------------------------------------- reference links
 const OBJ_TYPE = { FLAG: 'flag', DIAG: 'diagnosis', EV: 'evidence', CHK: 'check', INF: 'inference', EGR: 'egress' };
-const REF_RE = /\b(?<obj>(?:FLAG|DIAG|EV|CHK|INF|EGR)-\d{3,7})\b|\b(?<rule>RULE-\d{2,})\b|\b(?<pattern>PATTERN-[A-Z]{1,2})\b|\b(?<grpword>[Gg]roups?\s+)(?<grp>G?\d{1,6})\b|\b(?<gid>G\d{5,6})\b|\b(?<batch>B\d{4,6})\b|\b(?<sig>S\d{2,3})\b/g;
+const REF_RE = /\b(?<obj>(?:FLAG|DIAG|EV|CHK|INF|EGR)-\d{3,7})\b|\b(?<rule>RULE-\d{2,})\b|\b(?<pattern>PATTERN-[A-Z]{1,2})\b|\b(?<grpword>[Gg]roups?\s+)(?<grp>G?\d{1,6})\b|\b(?<gid>G\d{5,6})\b|\b(?<batch>B\d{4,6})\b|\b(?<sig>S\d{2,3})\b|\b[Rr]ows?\s+(?<rowa>\d{1,10})(?:\s*(?:-|–|to)\s*(?<rowb>\d{1,10}))?\b/g;
 const ROUTE_OF = {
   batch: (id) => hashFor('quality', { batch: id }),
   flag: (id) => hashFor('monitor', { flag: id }),
@@ -278,7 +343,16 @@ const ROUTE_OF = {
   signal: (id) => hashFor('understanding', { signal: id }),
   group: (id) => hashFor('monitor', { group: id }),
   rule: (id) => hashFor('quality', { rule: id }),
+  rows: (id) => hashFor('monitor', rowsParams(id)),
 };
+/** A rows reference is "312632-312999" (or one row), optionally with the signals to plot: "312632-312999:S09,S01". */
+function rowsParams(id) { const [rows, signals] = String(id).split(':'); return { rows, signals }; }
+/** Link to the Monitor at a row range, with the signals that matter there. */
+export function rowsLink(a, b, { signals, label } = {}) {
+  const range = b === undefined || b === null || Number(b) === Number(a) ? String(a) : `${a}-${b}`;
+  const id = range + (signals && signals.length ? ':' + signals.slice(0, 6).join(',') : '');
+  return refLink('rows', id, label === undefined ? (range.includes('-') ? `${fmt.int(a)}–${fmt.int(b)}` : fmt.int(a)) : label);
+}
 /** <a class="ref"> for one object; the global click handler (installRefHandler) does the jump. */
 export function refLink(type, id, label) {
   const href = ROUTE_OF[type] ? ROUTE_OF[type](id) : '#';
@@ -305,6 +379,7 @@ export function linkifyRefs(text) {
   const f = document.createDocumentFragment();
   const s = text === null || text === undefined ? '' : String(text);
   let last = 0;
+  let sigBefore = null; let sigEnd = -1;  // "S09 rows 312632-312999": the rows link also carries the signal
   for (const m of s.matchAll(REF_RE)) {
     const g = m.groups || {};
     let type; let id;
@@ -315,7 +390,9 @@ export function linkifyRefs(text) {
     else if (g.gid) { type = 'group'; id = g.gid; }
     else if (g.batch) { type = 'batch'; id = g.batch; }
     else if (g.sig) { type = 'signal'; id = g.sig; }
+    else if (g.rowa) { type = 'rows'; id = g.rowa + (g.rowb && g.rowb !== g.rowa ? '-' + g.rowb : '') + (sigBefore && s.slice(sigEnd, m.index).trim() === '' ? ':' + sigBefore : ''); }
     else continue;
+    if (type === 'signal') { sigBefore = id; sigEnd = m.index + m[0].length; }
     if (m.index > last) f.append(document.createTextNode(s.slice(last, m.index)));
     f.append(refLink(type, id, m[0]));
     last = m.index + m[0].length;
@@ -337,6 +414,7 @@ export async function openRef(type, id) {
     case 'signal': closeAllModals(); navigate('understanding', { signal: id }); return;
     case 'group': closeAllModals(); navigate('monitor', { group: id }); return;
     case 'rule': closeAllModals(); navigate('quality', { rule: id }); return;
+    case 'rows': closeAllModals(); navigate('monitor', rowsParams(id)); return;
     default: showRefModal(type, id);
   }
 }
@@ -394,7 +472,7 @@ export function infStatus(status, { human } = {}) {
 }
 export function st(status, label) { return el('span', { class: 'st ' + (status || '') }, label === undefined ? (status || '') : label); }
 export function chip(text, cls = '', attrs = {}) { return el('span', { class: 'chip ' + cls, ...attrs }, text); }
-export function kindChip(kind) { const cls = { anomaly: 'fail', drift: 'warn', changepoint: 'info', dq: 'warn', rule: 'info', cascade: 'fail' }[kind] || ''; return chip(t('mon.kind.' + kind) === 'mon.kind.' + kind ? kind : t('mon.kind.' + kind), cls); }
+export function kindChip(kind) { const cls = { anomaly: 'fail', point: 'fail', drift: 'warn', changepoint: 'info', dq: 'warn', rule: 'info', cascade: 'fail' }[kind] || ''; return chip(t('mon.kind.' + kind) === 'mon.kind.' + kind ? kind : t('mon.kind.' + kind), cls); }
 export function causeChip(cause) { const cls = { process: 'warn', sensor: 'info', data: '', mixed: 'fail', unknown: '' }[cause] || ''; return chip(t('mon.cause.' + cause) === 'mon.cause.' + cause ? cause : t('mon.cause.' + cause), cls, { title: t('mon.cause') }); }
 export function meter(label, v, { color, right } = {}) {
   const x = Math.max(0, Math.min(1, Number(v || 0)));

@@ -4,6 +4,7 @@ missing stage is recorded as 'skipped', a failing stage as 'failed' (later stage
 from __future__ import annotations
 
 import importlib
+import os
 import time
 import traceback
 from typing import Any, Callable, Optional
@@ -53,7 +54,7 @@ def run_pipeline(
 
     status = RunStatus(run_id=ws.run_id, source_path=str(source_path), profile=settings.profile, state="running", options=options, stages=[StageStatus(stage=s, state="pending") for s, _ in STAGES])
     ws.set_status(status)
-    ws.write_json("meta", {"run_id": ws.run_id, "source_path": str(source_path), "profile": settings.profile, "options": options, "created_at": now_iso(), "settings_snapshot": settings.model_dump(exclude={"profiles"})})
+    ws.write_json("meta", {"run_id": ws.run_id, "source_path": str(source_path), "profile": settings.profile, "options": options, "created_at": now_iso(), "pid": os.getpid(), "settings_snapshot": settings.model_dump(exclude={"profiles"})})
     ws.log.record("system:pipeline", "run_started", "run", ws.run_id, {"source_path": str(source_path), "profile": settings.profile, "options": options})
 
     t_start = time.time()
