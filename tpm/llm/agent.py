@@ -373,6 +373,23 @@ def load_context(ws: Any, settings: Settings, context: Optional[dict[str, Any]],
                     out["flag"] = f
                     ctx.setdefault("flag_id", f["id"])
                     ctx.setdefault("batch_id", f.get("batch_id"))
+    if ctx.get("row") is not None:
+        try:
+            row = int(ctx["row"])
+            susp = ws.read_json("suspicious_rows.json", None) or {}
+            hit = next((r for r in (susp.get("rows") or []) if int(r.get("row", -9)) - 1 <= row <= int(r.get("row_end", r.get("row", -9))) + 1), None)
+            if hit:
+                out["suspicious_row"] = {**{k: hit.get(k) for k in ("row", "row_end", "group_id", "batch_id", "signals", "sources", "strength", "statement", "flag_ids", "check_ids", "evidence_ids")}, "wording": susp.get("wording")}
+                if not ctx.get("flag_id") and hit.get("flag_ids"):
+                    ctx["flag_id"] = hit["flag_ids"][0]
+                    f = tb.tool_get_flag(ctx["flag_id"])
+                    if "error" not in f:
+                        out["flag"] = f
+                if not ctx.get("signal") and hit.get("signals"):
+                    ctx["signal"] = hit["signals"][0].get("signal")
+                ctx.setdefault("batch_id", hit.get("batch_id"))
+        except Exception:
+            pass
     if ctx.get("signal"):
         s = tb.tool_describe_signal(ctx["signal"])
         if "error" not in s:
@@ -398,6 +415,8 @@ def load_context(ws: Any, settings: Settings, context: Optional[dict[str, Any]],
             ev_ids += [e["id"] for e in obj.get("evidence", [])]
     for c in out["checks"]:
         ev_ids += c.get("evidence_ids", [])
+    if out.get("suspicious_row"):
+        ev_ids = list(out["suspicious_row"].get("evidence_ids") or []) + ev_ids
     out["evidence"] = tb.evidence_statements(ev_ids, limit=20)
     return out
 
@@ -414,6 +433,8 @@ def _context_text(loaded: dict[str, Any]) -> str:
     if loaded.get("signal"):
         s = loaded["signal"]
         compact["signal"] = {k: s.get(k) for k in ("id", "structural_role", "structural_confidence", "instrument_hypothesis", "instrument_confidence", "unit_operation_hypothesis", "cluster_id", "related_signals", "fingerprint", "excluded")}
+    if loaded.get("suspicious_row"):
+        compact["suspicious_row"] = loaded["suspicious_row"]
     if loaded.get("trust"):
         compact["trust"] = loaded["trust"]
     if loaded.get("checks"):
@@ -456,6 +477,14 @@ def deterministic_answer(ws: Any, settings: Settings, message: str, loaded: dict
         else:
             lines.append(json.dumps(res.get("result"), ensure_ascii=False, default=str)[:1500])
             found = True
+    sr = loaded.get("suspicious_row")
+    if sr:
+        found = True
+        lines.append(str(sr.get("statement") or ""))
+        if sr.get("wording"):
+            lines.append(str(sr["wording"]))
+        lines.append("What to check: compare this row with maintenance, calibration and operator records, and with the readings just before and after it; if the same signal keeps appearing on this list, inspect that instrument and its transmission.")
+        cites += list(sr.get("evidence_ids") or [])[:6]
     f = loaded.get("flag")
     if f:
         found = True
