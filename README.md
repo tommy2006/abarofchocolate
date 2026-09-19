@@ -84,9 +84,9 @@ A five-minute judging walkthrough is in [docs/JUDGES_GUIDE.md](docs/JUDGES_GUIDE
 | `serve [--host 127.0.0.1] [--port 8000] [--open]` | Starts the web UI (uvicorn). |
 | `demo [--no-llm] [--lang …]` | Generates `samples/` if missing, runs the full pipeline on `samples/demo_process.csv` with `config/rules.example.md` as rules, prints how to open the UI. |
 | `replay <run_id> [--speed S] [--max-batches N]` | Replays a run's dataset as a stream of batches through the batch path (checks → trust → scoring → diagnoses). `--speed` is data-seconds per wall-clock second; 0 = as fast as possible. |
-| `report <run_id> [--lang en\|fi\|sv\|all] [--out FILE] [--no-llm]` | (Re)generates the HTML report. `latest` works as a run id. |
-| `email <run_id> --to a@b.c[,d@e.f] [--lang …] [--subject …]` | E-mails the report; needs `TPM_SMTP_*` in `.env` (clear error otherwise). |
-| `export <run_id> [--out DIR] [--lang …]` | Writes `<run_id>_export.zip`: reports, `decision_log.jsonl`, `egress_ledger.jsonl`, `verify.json`, derived JSON/JSONL artifacts. Never the raw data. |
+| `report <run_id> [--format html\|pdf\|pptx\|all] [--lang en\|fi\|sv\|all] [--out FILE\|DIR] [--no-llm] [--pdf-engine native\|browser]` | (Re)generates the report: HTML (default), a typeset PDF, a PowerPoint deck, or all three. `--out` is a file for one language and one format, otherwise a directory. `latest` works as a run id. |
+| `email <run_id> --to a@b.c[,d@e.f] [--lang …] [--subject …] [--pdf] [--pptx]` | E-mails the HTML report, optionally with the PDF / the deck attached; needs `TPM_SMTP_*` in `.env` (clear error otherwise). |
+| `export <run_id> [--out DIR] [--lang …]` | Writes `<run_id>_export.zip`: reports (HTML, PDF, PowerPoint), `decision_log.jsonl`, `egress_ledger.jsonl`, `verify.json`, derived JSON/JSONL artifacts. Never the raw data. |
 | `verify-log <run_id>` | Recomputes the SHA-256 hash chain of the decision log. Exit code 1 if broken. |
 | `models` | Which local models are pulled, the exact `ollama pull` commands for missing ones, and external availability. |
 | `bakeoff` | Runs `scripts/bakeoff.py` (local-model comparison on representative tasks). |
@@ -141,10 +141,31 @@ chat, all without network egress.
 ## Report, export, e-mail
 
 - `python -m tpm report <run_id> --lang all` writes `report_en.html`, `report_fi.html`, `report_sv.html` into the run
-  folder. Print to PDF from the browser for a shareable copy.
-- `python -m tpm export <run_id>` bundles the reports, the decision log (JSONL), the egress ledger, the chain
-  verification result and all derived artifacts into `exports/<run_id>_export.zip`.
-- `python -m tpm email <run_id> --to someone@example.org --lang fi` sends the report. Set in `.env`:
+  folder.
+- **PDF and PowerPoint.** `python -m tpm report <run_id> --format pdf` (or `pptx`, or `all`; with `--lang` and
+  `--out`) writes `report_<lang>.pdf` / `report_<lang>.pptx`. In the app, the Report view has **Download PDF** and
+  **Download PowerPoint** next to Open / Download HTML; the API routes are
+  `GET /api/runs/<run_id>/report.pdf?lang=fi` and `GET /api/runs/<run_id>/report.pptx?lang=fi` (file name
+  `tpm_<run_id>_<lang>.pdf|pptx`). Both are generated on demand from the same findings as the HTML report, cached per
+  language, rebuilt when an artifact or a human decision changes, and never wait for the language model (a
+  model-written summary is included only when the HTML report already has one). A few seconds even for a run with
+  thousands of flags; large lists are capped to the most severe rows and the totals are stated.
+  - The **PDF** is a typeset A4 document (ReportLab, pure Python, works offline): title page with the headline numbers,
+    contents page, the eight report sections plus suspicious rows, evaluation, assessor and the labelled model summary,
+    running header / footer with the run id and "page x of y", tables with repeating header rows, vector charts
+    (score timelines with threshold and flagged spans, pass / warn / fail bars, trust by batch, contribution bars,
+    learning curve, data-flow diagram). Bitstream Vera is embedded, so ä / ö / å print correctly on any machine.
+    `--pdf-engine browser` prints the HTML report with a headless Edge / Chrome instead, when one is installed.
+  - The **deck** is a 16:9 presentation of 10 to 16 slides (python-pptx): summary, what was analysed, sensor
+    understanding, data trust, monitoring, suspicious rows, the top diagnoses, fault patterns, human decisions and log
+    integrity, data-flow record, assessor verdict, evaluation, open points and next steps. Charts and tables are native
+    PowerPoint objects (editable, with their data), text is fitted to every box (cut at a sentence boundary with "…"
+    and a note pointing to the report), and the speaker notes list the evidence ids behind each slide.
+  - Neither file contains raw rows: both are drawn from the derived artifacts and bucketed aggregates of the report.
+- `python -m tpm export <run_id>` bundles the reports (HTML, PDF, PowerPoint), the decision log (JSONL), the egress
+  ledger, the chain verification result and all derived artifacts into `exports/<run_id>_export.zip`.
+- `python -m tpm email <run_id> --to someone@example.org --lang fi [--pdf]` sends the report (`--pdf` attaches the PDF
+  as well). Set in `.env`:
   `TPM_SMTP_HOST`, `TPM_SMTP_PORT` (587 STARTTLS, 465 SSL), `TPM_SMTP_USER`, `TPM_SMTP_PASSWORD`, `TPM_SMTP_FROM`.
 
 ---
@@ -181,7 +202,7 @@ tpm/
   llm/                        router, egress guard, ledger, providers (Ollama / Anthropic), local tool agent
   api/                        FastAPI server + static UI
   log/                        hash-chained decision log, exports
-  report/                     HTML report (Jinja2, inline SVG), i18n EN/FI/SV, e-mail
+  report/                     HTML report (Jinja2, inline SVG), PDF (pdf.py), PowerPoint (pptx_export.py), i18n EN/FI/SV, e-mail
 config/settings.yaml          all tunables and profiles;  config/rules.example.md  example rules
 samples/                      small synthetic demo files (scripts/make_samples.py)
 docs/                         DECISIONS, ARCHITECTURE, DATAFLOW, ADAPTABILITY, EVALUATION, JUDGES_GUIDE, worklog/

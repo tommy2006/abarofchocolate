@@ -1,5 +1,5 @@
-"""Export a run as a shareable bundle: reports, decision log (JSONL), egress ledger, key JSON artifacts and a
-chain-verification result, zipped. Never includes dataset.parquet / scores.parquet / the SQLite file itself.
+"""Export a run as a shareable bundle: reports (HTML, PDF, PowerPoint), decision log (JSONL), egress ledger, key JSON
+artifacts and a chain-verification result, zipped. Never includes dataset.parquet / scores.parquet / the SQLite file.
 
     from tpm.log.exports import export_run
     zip_path = export_run(ws, out_dir)
@@ -25,8 +25,13 @@ def export_manifest(ws: Workspace) -> dict[str, Any]:
     return {"run_id": ws.run_id, "exported_at": now_iso(), "artifacts_present": present, "excluded": sorted(EXCLUDED), "note": "raw data (dataset.parquet, scores.parquet) is never exported; only derived artifacts"}
 
 
-def export_run(ws: Workspace, out_dir: str | Path, languages: Optional[list[str]] = None, make_reports: bool = True, use_llm: bool = False) -> Path:
-    """Write <out_dir>/<run_id>_export/ with all files and <out_dir>/<run_id>_export.zip; returns the zip path."""
+EXPORT_FORMATS = ("pdf", "pptx")
+
+
+def export_run(ws: Workspace, out_dir: str | Path, languages: Optional[list[str]] = None, make_reports: bool = True, use_llm: bool = False, make_exports: bool = True) -> Path:
+    """Write <out_dir>/<run_id>_export/ with all files and <out_dir>/<run_id>_export.zip; returns the zip path.
+    make_exports: also put the PDF and the PowerPoint deck of each requested language into the bundle (generated on
+    demand and cached in the run; they never call the language model, so this also holds for make_reports=False)."""
     out_dir = Path(out_dir)
     folder = out_dir / f"{ws.run_id}_export"
     if folder.exists():
@@ -47,6 +52,24 @@ def export_run(ws: Workspace, out_dir: str | Path, languages: Optional[list[str]
             (folder / "REPORT_ERROR.txt").write_text(str(e), encoding="utf-8")
     for p in sorted(ws.dir.glob("report_*.html")):
         shutil.copy2(p, folder / p.name)
+
+    # PDF + PowerPoint of the requested languages (cached per language; regenerated when the artifacts changed)
+    if make_exports:
+        errors = []
+        try:
+            from ..report import ensure_export
+        except Exception as e:  # reportlab / python-pptx missing: the bundle is still complete without them
+            ensure_export = None
+            errors.append(f"exports unavailable: {e}")
+        for lang in (languages or [ws.settings.report.default_language]) if ensure_export else []:
+            for fmt in EXPORT_FORMATS:
+                try:
+                    res = ensure_export(ws, ws.settings, lang, fmt)
+                    shutil.copy2(res["path"], folder / Path(res["path"]).name)
+                except Exception as e:
+                    errors.append(f"{fmt} ({lang}): {e}")
+        if errors:
+            (folder / "EXPORT_ERROR.txt").write_text("\n".join(errors), encoding="utf-8")
 
     # decision log + verification
     ws.log.export_jsonl(folder / "decision_log.jsonl")

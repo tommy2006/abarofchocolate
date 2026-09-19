@@ -1,9 +1,11 @@
-/* View 8: report — language select, open / download, email, inline preview.
+/* View 8: report — language select, open / download (HTML, PDF, PowerPoint), email, inline preview.
    Switching language asks the API for the report's status first (`?status=1`): the template report is
    generated in a few seconds and cached per language; the model-written summary is added by a worker on
    the server, so the view shows what is happening (generating → ready, summary pending → added) and
    reloads the preview when the summary arrives. The preview is the report HTML in a same-origin iframe
-   (`&embed=1`: no auto-reload); a cache-busting `v=` makes sure a regenerated report is what is shown. */
+   (`&embed=1`: no auto-reload); a cache-busting `v=` makes sure a regenerated report is what is shown.
+   "Download PDF" / "Download PowerPoint" fetch `/report.pdf` / `/report.pptx` (generated on demand, cached per
+   language on the server), show a generating state while the server works and the error text when it fails. */
 import { state, t, el, clear, runApi, fmt, section, viewHead, needRun, toast, errText, notice } from '../core.js';
 
 const IFRAME_FIX = `
@@ -24,6 +26,40 @@ export async function render(main) {
   const openA = el('a', { class: 'btn btn-primary', href: base(), target: '_blank', rel: 'noopener' }, t('rep.open'));
   const dlA = el('a', { class: 'btn', href: base() + '&download=1' }, t('rep.download'));
   const regen = el('button', { class: 'btn btn-quiet', type: 'button', title: t('rep.regenerateHelp') }, t('rep.regenerate'));
+  // PDF / PowerPoint: generated on demand by the server (cached per language); the button shows progress and errors
+  const exportStatus = el('div', { class: 'small muted', role: 'status', 'aria-live': 'polite' });
+  const exportBtn = (kind, label) => {
+    const btn = el('button', { class: 'btn', type: 'button', title: t('rep.exportHelp') }, label);
+    btn.addEventListener('click', async () => {
+      const lang = sel.value;
+      const what = `${kind === 'pdf' ? 'PDF' : 'PowerPoint'} (${lang.toUpperCase()})`;
+      btn.disabled = true; btn.textContent = t('rep.exportGenerating');
+      clear(exportStatus); exportStatus.append(el('span', { class: 'spinner', text: '● ' }), t('rep.exportWorking', { what }));
+      const r = await runApi(`/report.${kind}`, { params: { lang }, raw: true });
+      btn.disabled = false; btn.textContent = label;
+      if (!view.isConnected) return;
+      if (!r.ok || !r.res) {
+        let msg = r.data && r.data.error ? r.data.error : `HTTP ${r.status}`;
+        try { const d = await r.res.json(); msg = d.detail || d.message || msg; } catch { /* not JSON */ }
+        clear(exportStatus); exportStatus.append(notice(`${t('rep.exportFailed', { what })} ${msg}`, 'fail'));
+        toast(t('rep.exportFailed', { what }), 'fail');
+        return;
+      }
+      const blob = await r.res.blob();
+      const cd = r.res.headers.get('content-disposition') || '';
+      const m = cd.match(/filename="?([^";]+)"?/);
+      const name = m ? m[1] : `tpm_${state.run}_${lang}.${kind}`;
+      const url = URL.createObjectURL(blob);
+      const a = el('a', { href: url, download: name, style: { display: 'none' } });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      clear(exportStatus); exportStatus.append(t('rep.exportReady', { what, size: fmt_bytes(blob.size) }));
+    });
+    return btn;
+  };
+  const fmt_bytes = (n) => (fmt.bytes ? fmt.bytes(n) : `${Math.round(n / 1024)} kB`);
+  const pdfBtn = exportBtn('pdf', t('rep.downloadPdf'));
+  const pptxBtn = exportBtn('pptx', t('rep.downloadPptx'));
   const to = el('input', { type: 'email', placeholder: 'name@example.com', style: { width: '240px', maxWidth: '100%' } });
   const status = el('div', { class: 'stack', style: { gap: '6px', marginBottom: '10px' }, role: 'status', 'aria-live': 'polite' });
   const preview = el('iframe', { title: t('rep.preview'), class: 'report-frame' });
@@ -94,7 +130,8 @@ export async function render(main) {
   }
   sel.addEventListener('change', () => refresh());
   regen.addEventListener('click', () => refresh({ force: true }));
-  view.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), openA, dlA, regen));
+  view.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), openA, dlA, pdfBtn, pptxBtn, regen));
+  view.append(exportStatus);
   const em = section(t('rep.email'));
   view.append(em.root);
   em.body.append(el('form', { class: 'row', onSubmit: async (e) => { e.preventDefault(); const r = await runApi('/report/email', { method: 'POST', body: { to: to.value.trim(), lang: sel.value } }); if (r.ok) toast(t('rep.sent', { to: to.value.trim() }), 'ok'); else toast(errText(r), 'fail'); } }, el('label', { class: 'row' }, t('rep.to'), to), el('button', { class: 'btn', type: 'submit' }, t('common.send'))));

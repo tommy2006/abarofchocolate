@@ -37,7 +37,7 @@ from .i18n import Translator, available_languages, normalize_lang
 from .prose import clean_text, detector_label, parse_narrative, strip_lead, whole_sentences
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
-REPORT_VERSION = "3"  # bump when the template or the context changes shape: cached reports are then regenerated
+REPORT_VERSION = "4"  # bump when the template or the context changes shape: cached reports are then regenerated
 MAX_SIGNALS = 400
 MAX_FLAGS = 300
 MAX_DIAGNOSES = 100
@@ -46,12 +46,15 @@ MAX_CHECK_ROWS = 300
 MAX_UNTRUSTED = 100
 MAX_LOG_APPENDIX = 300
 MAX_TIMELINES = 24
+MAX_SUSPICIOUS = 25  # rows of the headline "suspicious rows" list (HTML, PDF and deck show the same 25)
+MAX_POINT_FLAGS = 25
+TRUST_SERIES_POINTS = 80
 TIMELINE_POINTS = 160
 LLM_MAX_TOKENS = 1600  # the narrative JSON needs ~600-1000 tokens; 700 cut it mid-sentence
 LLM_WAIT_S = 75.0  # blocking callers (pipeline stage, CLI) wait at most this long for the model summary
 LLM_RETRY_S = 600.0  # after a failed model call, do not try again for this long (unless the artifacts change)
 # artifacts whose change makes a cached report stale / a cached model summary stale
-_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger")
+_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger", "suspicious_rows.json", "group_scores.json")
 _NARRATIVE_INPUTS = ("schema", "signals", "checks", "trust", "flags", "patterns", "diagnoses")
 
 
@@ -248,7 +251,7 @@ def _score_timelines(ws: Workspace, schema: Optional[dict[str, Any]], flags: lis
                     spans.append((idx[0], idx[-1]))
             label = f"{t('group')} {g}" if group_col else t("s3_timelines")
             svg = charts.sparkline(vals, threshold=threshold, flagged=spans, label=label, x_labels=(str(pts[0][2]), str(pts[-1][3])))
-            timelines.append({"group": g, "svg": svg, "n_flags": flagged_groups.get(g, 0), "max": max(vals) if vals else 0.0})
+            timelines.append({"group": g, "svg": svg, "n_flags": flagged_groups.get(g, 0), "max": max(vals) if vals else 0.0, "label": label, "values": [round(v, 4) for v in vals], "spans": spans, "x_labels": (str(pts[0][2]), str(pts[-1][3]))})
         return {"timelines": timelines, "threshold": threshold, "score_col": score_col, "group_col": group_col, "n_groups": len(series), "shown": len(timelines)}
     except Exception as e:  # never break the report
         return {"timelines": [], "error": str(e)[:200], "threshold": None, "n_groups": 0, "shown": 0}
@@ -375,6 +378,107 @@ def _human_rows(ws: Workspace, log_entries: list[dict[str, Any]], signals: list[
     return rows
 
 
+def _trust_series(trust: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Trust score per batch for a chart: every batch when there are few, else the LOWEST score of each of
+    TRUST_SERIES_POINTS consecutive buckets (so an untrusted batch is never averaged away)."""
+    pts = []
+    for x in trust:
+        try:
+            pts.append((str(x.get("batch_id") or ""), float(x.get("trust_score")), bool(x.get("trusted", True))))
+        except (TypeError, ValueError):
+            continue
+    if len(pts) <= TRUST_SERIES_POINTS:
+        return [{"label": b, "score": round(sc, 4), "trusted": tr, "n": 1} for b, sc, tr in pts]
+    out = []
+    n = len(pts)
+    for k in range(TRUST_SERIES_POINTS):
+        chunk = pts[k * n // TRUST_SERIES_POINTS : (k + 1) * n // TRUST_SERIES_POINTS]
+        if chunk:
+            worst = min(chunk, key=lambda c: c[1])
+            out.append({"label": chunk[0][0], "score": round(worst[1], 4), "trusted": all(c[2] for c in chunk), "n": len(chunk)})
+    return out
+
+
+def _group_summary(ws: Workspace, flags: list[dict[str, Any]], schema: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """How many groups crossed the alert threshold (group_scores.json of the detect stage; falls back to the flags)."""
+    gs = ws.read_json("group_scores.json")
+    flagged = {str(f.get("group_id")) for f in flags if f.get("group_id") is not None}
+    n_groups = int((schema or {}).get("n_groups") or 0)
+    if isinstance(gs, dict) and isinstance(gs.get("groups"), list):
+        groups = [g for g in gs["groups"] if isinstance(g, dict)]
+        th = gs.get("threshold")
+        n_over = gs.get("n_groups_over_threshold")
+        if not isinstance(n_over, int):
+            n_over = sum(1 for g in groups if isinstance(g.get("max_score"), (int, float)) and isinstance(th, (int, float)) and g["max_score"] >= th)
+        top = sorted((g for g in groups if isinstance(g.get("max_score"), (int, float))), key=lambda g: -float(g["max_score"]))[:10]
+        return {"n_groups": int(gs.get("n_groups") or len(groups) or n_groups), "n_over": int(n_over), "threshold": th if isinstance(th, (int, float)) else None, "top": [{"group": str(g.get("group")), "max_score": round(float(g["max_score"]), 3), "top_signal": g.get("top_signal"), "flagged_fraction": g.get("flagged_fraction")} for g in top], "source": "group_scores"}
+    return {"n_groups": n_groups or len(flagged), "n_over": len(flagged), "threshold": None, "top": [], "source": "flags"}
+
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-ZÅÄÖ])")
+_ONSET_STEP_RE = re.compile(r"^\s*(?:When it started|How it propagated|Onset|Propagation)\b", re.I)
+
+
+def _dir_label(t: Translator, d: Any) -> str:
+    d = str(d or "")
+    return t(f"dir_{d}") if d and t.has(f"dir_{d}") else d
+
+
+def _row_text(a: Any, b: Any) -> str:
+    if a is None:
+        return ""
+    return str(a) if b is None or b == a else f"{a}–{b}"
+
+
+def _suspicious(ws: Workspace, point_flags: list[dict[str, Any]], evidence: dict[str, dict[str, Any]], explain, t: Translator) -> Optional[dict[str, Any]]:
+    """The headline list of suspicious rows (suspicious_rows.json of the detect stage) plus the flags of kind "point"
+    (isolated readings). None when the run has neither: the section is then omitted everywhere."""
+    raw = ws.read_json("suspicious_rows.json")
+    raw = raw if isinstance(raw, dict) else None
+    if raw is None and not point_flags:
+        return None
+    rows = []
+    for r in ((raw or {}).get("rows") or [])[:MAX_SUSPICIOUS]:
+        if not isinstance(r, dict):
+            continue
+        sigs = [{**x, "direction_label": _dir_label(t, x.get("direction"))} for x in (r.get("signals") or []) if isinstance(x, dict)]
+        sig_text = [f"{x.get('signal')} ({', '.join(p for p in (_num(x.get('deviation'), 1), _dir_label(t, x.get('direction'))) if p)})" for x in sigs[:4]]
+        sources = [str(x) for x in (r.get("sources") or [])]
+        rows.append({
+            "row": r.get("row"), "row_end": r.get("row_end"), "row_text": _row_text(r.get("row"), r.get("row_end")), "group_id": r.get("group_id"), "batch_id": r.get("batch_id"),
+            "signals": sigs[:4], "signals_text": sig_text, "sources": sources, "sources_text": ", ".join(t(f"susp_source_{x}") if t.has(f"susp_source_{x}") else x.replace("_", " ") for x in sources),
+            "strength": r.get("strength"), "flag_ids": list(r.get("flag_ids") or [])[:4], "check_ids": list(r.get("check_ids") or [])[:4], "evidence_ids": list(r.get("evidence_ids") or [])[:4],
+            "statement": clean_text(r.get("statement")), "explanation": clean_text(next((x.get("explanation") for x in sigs if x.get("explanation")), "")),
+            "ev": _ev_items(r.get("evidence_ids"), evidence, explain, 1),
+        })
+    # the closing sentence every row repeats ("Glitch or manipulation: ...") is shown once, prominently, as the wording
+    tails = {_SENTENCE_SPLIT_RE.split(r["statement"])[-1] for r in rows if r["statement"]}
+    if len(rows) > 1 and len(tails) == 1:
+        tail = tails.pop()
+        for r in rows:
+            if r["statement"] != tail:
+                r["statement"] = r["statement"][: -len(tail)].rstrip()
+    for r in rows:
+        if r["explanation"] and r["explanation"].rstrip(".") in r["statement"]:
+            r["explanation"] = ""  # already part of the statement
+    regime = (raw or {}).get("regime") if isinstance((raw or {}).get("regime"), dict) else None
+    regime_text = ""
+    if regime:
+        regime_text = t("susp_regime", n_points=regime.get("n_point_stretches", 0), n_sustained=regime.get("n_sustained_stretches", 0), share=_pct(regime.get("share_points") or 0))
+        if regime.get("point_dominated"):
+            regime_text = t("susp_point_dominated") + " " + regime_text
+    pf = []
+    for f in sorted(point_flags, key=lambda f: -float(f.get("severity") or 0))[:MAX_POINT_FLAGS]:
+        pf.append({"id": f.get("id"), "group_id": f.get("group_id"), "batch_id": f.get("batch_id"), "row_text": _row_text(f.get("row_start"), f.get("row_end")), "score": f.get("score"), "threshold": f.get("threshold"), "severity": f.get("severity"), "confidence": f.get("confidence"), "cause_label": t.cause(f.get("likely_cause_class")), "human_status": f.get("human_status"),
+                   "signals": [f"{s.get('signal')} ({_pct(s.get('contribution'))}{', ' + str(s.get('direction')) if s.get('direction') else ''})" for s in (f.get("signals_ranked") or [])[:3]], "statement": clean_text(f.get("statement")), "evidence_ids": list(f.get("evidence_ids") or [])[:4], "ev": _ev_items(f.get("evidence_ids"), evidence, explain, 1)})
+    n_rows = (raw or {}).get("n_rows")
+    return {
+        "available": raw is not None, "headline": clean_text((raw or {}).get("headline")), "wording": clean_text((raw or {}).get("wording")) or t("susp_wording_default"),
+        "regime": regime, "regime_text": regime_text, "n_rows": n_rows if isinstance(n_rows, int) else len(rows), "n_listed": (raw or {}).get("n_listed"), "cap": (raw or {}).get("cap"), "rows": rows, "shown": len(rows),
+        "point_flags": pf, "n_point_flags": len(point_flags),
+    }
+
+
 def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en", use_llm: bool = False, ctx: Optional[dict[str, Any]] = None, narrative: Optional[dict[str, Any]] = None, llm_state: str = "none") -> dict[str, Any]:
     """The template context. `narrative` is a parsed model summary (see _narrative_context); with use_llm=True and no
     narrative given, the model is asked here, time-boxed (kept for callers that use collect() directly)."""
@@ -445,20 +549,25 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     for r in rules:
         comp = r.get("compiled")
         rule_rows.append({"id": r.get("id"), "text": r.get("text"), "status": r.get("status"), "compiled": _short(json.dumps(comp, ensure_ascii=False), 220) if comp else "", "explanation_text": clean_text(r.get("compile_explanation")), "compile_source": r.get("compile_source"), "compile_confidence": r.get("compile_confidence"), "explanation": r.get("compile_explanation"), "n_checks": checks_by_rule.get(str(r.get("id")), 0)})
-    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
+    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "trust_series": _trust_series(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
 
     # ---- detect
     tl = _score_timelines(ws, schema, flags, detect_meta, t)
     flag_rows = []
     det_cache: dict[str, dict[str, Any]] = {}
-    for f in sorted(flags, key=lambda f: -float(f.get("severity") or 0))[:MAX_FLAGS]:
+    # isolated readings (kind "point") belong to the suspicious-rows list, not to the sustained events
+    point_flags = [f for f in flags if str(f.get("kind")) == "point"]
+    point_ids = {f.get("id") for f in point_flags}
+    sustained = [f for f in flags if str(f.get("kind")) != "point"] if point_flags else flags
+    for f in sorted(sustained, key=lambda f: -float(f.get("severity") or 0))[:MAX_FLAGS]:
         det_key = str(f.get("detector") or "")
         if det_key not in det_cache:
             det_cache[det_key] = detector_label(det_key, t)
-        flag_rows.append({**f, "statement": clean_text(f.get("statement")), "kind_label": t.kind(f.get("kind")), "cause_label": t.cause(f.get("likely_cause_class")), "det": det_cache[det_key], "signals": [f"{s.get('signal')} ({_pct(s.get('contribution'))}{', ' + str(s.get('direction')) if s.get('direction') else ''})" for s in (f.get("signals_ranked") or [])[:5]], "ev": _ev_items(f.get("evidence_ids"), evidence, explain, 1 if len(flags) > MAX_FLAGS else 3)})
-    flags_by_kind = [(t.kind(k), n) for k, n in Counter(str(f.get("kind")) for f in flags).most_common(8)]
-    flags_by_cause = [(t.cause(k), n) for k, n in Counter(str(f.get("likely_cause_class")) for f in flags if f.get("likely_cause_class")).most_common(8)]
-    detect = {"flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(flags), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
+        flag_rows.append({**f, "statement": clean_text(f.get("statement")), "kind_label": t.kind(f.get("kind")), "cause_label": t.cause(f.get("likely_cause_class")), "det": det_cache[det_key], "signals": [f"{s.get('signal')} ({_pct(s.get('contribution'))}{', ' + str(s.get('direction')) if s.get('direction') else ''})" for s in (f.get("signals_ranked") or [])[:5]], "ev": _ev_items(f.get("evidence_ids"), evidence, explain, 1 if len(sustained) > MAX_FLAGS else 3)})
+    flags_by_kind = [(t.kind(k), n) for k, n in Counter(str(f.get("kind")) for f in sustained).most_common(8)]
+    flags_by_cause = [(t.cause(k), n) for k, n in Counter(str(f.get("likely_cause_class")) for f in sustained if f.get("likely_cause_class")).most_common(8)]
+    suspicious = _suspicious(ws, point_flags, evidence, explain, t)
+    detect = {"flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
 
     # ---- diagnoses
     diag_rows = []
@@ -475,7 +584,14 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         crit = d.get("critique") or None
         if crit:
             crit = {**crit, "objections": [x for x in (clean_text(o) for o in (crit.get("objections") or [])) if x]}
-        diag_rows.append({**d, "compact": False, "summary": clean_text(d.get("summary")), "steps": [x for x in (clean_text(x) for x in (d.get("steps") or [])) if x], "uncertainty": [x for x in (clean_text(x) for x in (d.get("uncertainty") or [])) if x], "cause_label": t.cause(d.get("cause_class")), "severity": diag_sev[id(d)], "ranked_svg": svg, "ranked": ranked[:8], "critique": crit, "verdict_label": t.verdict(crit.get("verdict")) if crit else "", "ev": _ev_items(d.get("evidence_ids"), evidence, explain, 5)})
+        # a diagnosis that only rests on isolated readings has no onset, pattern or propagation worth printing
+        point_only = bool(d.get("flag_ids")) and all(i in point_ids for i in d["flag_ids"])
+        steps = [x for x in (clean_text(x) for x in (d.get("steps") or [])) if x]
+        severity = diag_sev[id(d)]
+        if point_only:
+            d = {**d, "propagation": [], "pattern_id": None}
+            steps = [x for x in steps if not _ONSET_STEP_RE.match(x)]
+        diag_rows.append({**d, "compact": False, "point_only": point_only, "summary": clean_text(d.get("summary")), "steps": steps, "uncertainty": [x for x in (clean_text(x) for x in (d.get("uncertainty") or [])) if x], "cause_label": t.cause(d.get("cause_class")), "severity": severity, "ranked_svg": svg, "ranked": ranked[:8], "critique": crit, "verdict_label": t.verdict(crit.get("verdict")) if crit else "", "ev": _ev_items(d.get("evidence_ids"), evidence, explain, 5)})
     crit_counts = Counter((d.get("critique") or {}).get("verdict") for d in diags)
 
     # ---- humans / log
@@ -515,7 +631,9 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     if checks:
         overview.append(t("overview_quality", n_checks=len(checks), n_pass=quality["n_pass"], n_warn=quality["n_warn"], n_fail=quality["n_fail"], n_untrusted=len(untrusted), n_batches=n_batches))
     if flags or patterns:
-        overview.append(t("overview_detect", n_flags=len(flags), n_groups_flagged=len({f.get("group_id") for f in flags}), n_patterns=len(patterns)))
+        overview.append(t("overview_detect", n_flags=len(sustained), n_groups_flagged=len({f.get("group_id") for f in sustained}), n_patterns=len(patterns)))
+    if suspicious and (suspicious["rows"] or suspicious["point_flags"]):
+        overview.append(suspicious["headline"] or t("overview_suspicious", n=suspicious["n_rows"] or suspicious["n_point_flags"]))
     if diags:
         mean_conf = sum(float(d.get("confidence") or 0) for d in diags) / max(1, len(diags))
         overview.append(t("overview_diag", n_diag=len(diags), mean_conf=_pct(mean_conf), n_weak=crit_counts.get("weakened", 0), n_rej=crit_counts.get("rejected", 0)))
@@ -576,12 +694,12 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
                 wh = v.get("would_help")
                 verdicts.append({"question": t(label), "answer": t("yes") if wh is True else (t("no") if wh is False else t("unclear")), "state": "pass" if wh is True else ("muted" if wh is False else "warn"), "why": strip_lead(re.sub(r"^\s*Removing bad data helps\s*:\s*", "", str(v.get("why") or ""))), "gain": v.get("estimated_gain")})
         summary_text = re.sub(r"\b(?:More|Less) data:\s*(?:yes|no|unclear)\.\s*", "", clean_text(assessor.get("summary") or "")) if verdicts else clean_text(assessor.get("summary") or "")
-        assess_ctx = {"scalars": _scalars(assessor), "summary": summary_text, "verdicts": verdicts, "curve_svg": charts.line_chart(pts, x_label=t("learning_curve")) if pts else "", "recommendations": rec_rows}
+        assess_ctx = {"scalars": _scalars(assessor), "summary": summary_text, "verdicts": verdicts, "curve_svg": charts.line_chart(pts, x_label=t("learning_curve")) if pts else "", "curve_points": [(float(a), float(b)) for a, b in pts if isinstance(a, (int, float)) and isinstance(b, (int, float))], "recommendations": rec_rows}
 
     # ---- optional model-written summary
     anchors = {str(f.get("id")) for f in flag_rows} | {str(d.get("id")) for d in diag_rows}
     known_ids = set(evidence) | {str(x.get("id")) for x in flags} | {str(x.get("id")) for x in diags} | {str(x.get("check_id")) for x in checks} | {str(x.get("id")) for x in inferences} | {str(x.get("id")) for x in rules} | {str(x.get("id")) for x in patterns}
-    llm_payload = _narrative_payload(lang, overview, flag_rows, diag_rows, quality, n_flags_total=len(flags), n_diagnoses_total=len(diags))
+    llm_payload = _narrative_payload(lang, overview, flag_rows, diag_rows, quality, n_flags_total=len(sustained), n_diagnoses_total=len(diags))
     if narrative is None and use_llm:
         budget = LLM_WAIT_S
         if ctx and ctx.get("t_start") and ctx.get("time_budget_s"):
@@ -596,8 +714,8 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     return {
         "t": t, "lang": lang, "lang_name": t("lang_name"), "languages": available_languages(), "generated_at": _ts(now_iso()), "run_id": ws.run_id, "meta": meta, "status": status, "source_name": Path(str(meta.get("source_path") or status.get("source_path") or "")).name or t("unknown"), "source_path": meta.get("source_path") or status.get("source_path") or "",
         "stages": stages, "overview": overview, "schema": schema, "dataset": dataset, "domain_items": domain_items, "signals": _signal_rows(signals, evidence, inferences, t, explain), "n_signals_total": len(signals), "relations_count": (len(relations.get("pairs") or []) if isinstance(relations, dict) else (len(relations) if isinstance(relations, list) else 0)),
-        "quality": quality, "detect": detect, "diagnoses": diag_rows, "n_diag_total": len(diags), "human": human, "log": log, "dataflow": dataflow, "evaluation": eval_ctx, "assessor": assess_ctx, "llm": llm, "llm_state": llm_state, "llm_payload": llm_payload, "has_plain_evidence": explain is not None,
-        "caps": {"flags": (len(flag_rows), len(flags)), "diagnoses": (len(diag_rows), len(diags)), "untrusted": (min(len(untrusted), MAX_UNTRUSTED), len(untrusted))},
+        "quality": quality, "detect": detect, "suspicious": suspicious, "diagnoses": diag_rows, "n_diag_total": len(diags), "human": human, "log": log, "dataflow": dataflow, "evaluation": eval_ctx, "assessor": assess_ctx, "llm": llm, "llm_state": llm_state, "llm_payload": llm_payload, "has_plain_evidence": explain is not None,
+        "caps": {"flags": (len(flag_rows), len(sustained)), "diagnoses": (len(diag_rows), len(diags)), "untrusted": (min(len(untrusted), MAX_UNTRUSTED), len(untrusted))},
         "fmt": {"num": _num, "pct": _pct, "short": _short, "ts": _ts},
     }
 

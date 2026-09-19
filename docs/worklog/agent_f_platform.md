@@ -135,3 +135,70 @@ How to continue:
 - `.venv\Scripts\python.exe -m pytest tests/test_f_* -q`. JS: `node --check` does NOT parse these files as modules;
   use `node --input-type=module --check - < file.js`.
 - A dev server without `--reload` keeps old Python but serves the new template: restart it after editing tpm/report.
+
+## 2026-09-19T12:30+03:00 — Report export: PDF document and PowerPoint deck (+ suspicious-rows section in all outputs)
+Done:
+- Libraries (appended to requirements.txt): `reportlab>=4.0` (PDF; platypus gives a real document model: contents page,
+  repeating table headers, wrapped cells, vector drawings; ships Bitstream Vera, so no system font is needed; wheel is
+  pure Python), `python-pptx>=1.0` (native charts with embedded workbook, native tables, notes), `pypdf>=4.0` (tests
+  only: text extraction / page count; pure Python). All pip-installable, offline afterwards, no network calls.
+- `tpm/report/export_common.py`: `export_context()` = `collect()` + the STORED model summary only (never calls the
+  model), `ensure_export(ws, settings, lang, fmt, force)` = cache per language + format in `report_<lang>.pdf|pptx`
+  with stamps in `report_exports.json` (stamp = `report_fingerprint()` of ensure_report + "llm=ready|none": rebuilt when
+  artifacts / human decisions / report code / stored summary change), per-file locks, atomic byte writes,
+  `download_name()` -> `tpm_<run_id>_<lang>.<ext>`, `fit_text()` (sentence boundary, then word, always "…"), and the
+  derived lists both documents share (headline numbers, role mix, signals worth a look, top diagnoses with distinct
+  fault types, cause split, open points, next steps).
+- `tpm/report/pdf.py`: `generate_pdf(ws, settings, lang="en", out_path=None, context=None, log=True)`, `render_pdf(ctx)`,
+  optional `browser_pdf()` (headless Edge/Chrome `--print-to-pdf` of the HTML report when installed; CLI
+  `--pdf-engine browser`; never used by the API or the tests). A4, one pass: the contents page and "page x of y" use
+  PDF form objects that are defined at save time (no multiBuild -> te_2m renders in ~1.5 s). Title page with headline
+  tiles, contents with links + PDF outline, header/footer with run id, the 8 sections + suspicious rows + evaluation
+  (only when present) + assessor + appendix, the model summary in a labelled dashed box, plain sentence first and the
+  technical statement + id smaller, vector charts redrawn from aggregates (timelines with threshold + flagged spans,
+  pass/warn/fail bars, trust by batch, contribution bars, learning curve, data-flow diagram). PDF caps (totals always
+  stated): 24 signal cards + table, 80 checks, 60 untrusted batches, 12 timelines, 60 flags, 8 diagnosis cards + 52
+  brief rows, 60 ledger rows, 80 log rows. Characters Vera lacks (arrows, Greek) are replaced by ASCII (`_safe`).
+  Every table cell is capped to ~40 lines of its column and boxed paragraphs are capped, so no row can outgrow a page;
+  if a layout still fails the document is rebuilt once with all text caps at 35 %.
+- `tpm/report/pptx_export.py`: `generate_pptx(...)`, `render_pptx(ctx)`. 16:9, 10 to 16 slides: title, summary,
+  what we analysed, sensor understanding, data trust, monitoring, suspicious rows (if any), up to 3 diagnoses,
+  patterns + propagation (if any), human decisions + chain verification, data-flow record, assessor + learning curve,
+  evaluation (if labels), open points / next steps. One accent colour, fixed margins and type scale, native charts
+  (bar, stacked bar, column, line with threshold + flagged series, XY) and native tables, slide-number field + footer
+  with run id, speaker notes with the evidence ids behind each slide. Text fitting: `fit_paragraphs()` allocates lines
+  from the box geometry and font size (0.45 em per character, 1.2 line height, 8 % wrap loss), cuts the last paragraph
+  at a sentence boundary with "…", drops what follows and adds the "Text shortened…" note; every frame is named
+  `tpm-<role>;budget=N` and the tests check both that budget and an independent geometric estimate. Table cells are
+  cut to the lines their row holds. The suspicious-rows wording is never cut: the banner grows / type steps down.
+- `tpm/report/report.py` (context; REPORT_VERSION 4): timelines keep `values/spans/x_labels/label`, `quality.trust_series`
+  (every batch, or the lowest score per bucket above 80 batches), `detect.group_summary` (group_scores.json),
+  `assessor.curve_points`, `suspicious` (suspicious_rows.json: top 25 rows, wording, regime sentence; the closing
+  sentence every row repeats is removed from the rows because it is shown once as the wording), flags of kind `point`
+  are listed under suspicious rows and not in the flags table / counts, diagnoses that rest only on point flags get no
+  pattern / propagation / onset steps. `suspicious_rows.json` and `group_scores.json` are part of the cache stamp.
+  Template: `<section id="suspicious">` after the overview (one list, wording prominent); omitted when the run has
+  neither the artifact nor point flags. i18n: +93 keys (`susp_*`, `dir_*`, `kind_point`, `pdf_*`, `px_*`) in en/fi/sv.
+- Wiring: `GET /api/runs/{id}/report.pdf|report.pptx?lang=&refresh=` (FileResponse with media type, file name,
+  `X-TPM-Export-Regenerated`), e-mail route passes `attach_pdf`; `email_report(..., attach_pdf, attach_pptx)`;
+  `python -m tpm report <run> --format html|pdf|pptx|all [--lang ..|all] [--out FILE|DIR] [--pdf-engine native|browser]`,
+  `email --pdf/--pptx`; `export_run(..., make_exports=True)` puts the PDF + deck of the requested languages into the
+  zip (also for the API export, they never call the model); report.js: "Download PDF" / "Download PowerPoint" buttons
+  (fetch -> blob -> download with the server's file name, "Generating…" state, error text + toast), `rep.*` keys.
+- Verified: PowerPoint (COM, hidden) opens the decks without repair and the slides were reviewed as PNGs (EN small run,
+  FI te_2m, real suspicious rows on swat_points); PDF pages reviewed via pdfium (EN/FI/SV). UI flow checked in the
+  browser against a dev server (generating state, success, simulated 500).
+- Times (this machine): fix_check / demo_cli: context 0.1 s + PDF 0.6 s (37 pages, 216 kB) + deck 0.4 s (14 slides,
+  154 kB); te_2m: context 3.1 s + PDF 1.5 s (69 pages, 305 kB) + deck 0.5 s (15 slides, 157 kB).
+- Tests: `tests/test_f_export_pdf.py` (11), `tests/test_f_export_pptx.py` (10), `tests/test_f_export_wiring.py` (8).
+Pending / known gaps:
+- Evidence sentences, diagnosis texts and the lead's suspicious-row statements are English under localized headings
+  (same as the HTML report).
+- `tpm doctor` does not list reportlab / python-pptx (not my command); the routes answer 501 with a pip hint when a
+  package is missing, the CLI prints the same hint.
+- The deck shows 2 signals per suspicious row (the PDF / HTML show 4 with explanations).
+How to continue:
+- `.venv\Scripts\python.exe -m pytest tests/test_f_* tests/test_e_ui_assets.py -q`.
+- Visual check: PowerPoint COM `Presentations.Open(path, ReadOnly, Untitled, WithWindow=0).SaveAs(dir, 18)` exports PNGs;
+  PDFs: `pip install pypdfium2` (dev only) and render pages.
+- New context keys must stay aggregates: never put rows or long series into `collect()`.

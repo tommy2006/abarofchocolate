@@ -61,6 +61,8 @@ ol.steps li { margin: 4px 0; }
 .plain { display: block; font-size: .86rem; margin-top: 3px; }
 .det { border-bottom: 1px dotted var(--muted); cursor: help; }
 svg { max-width: 100%; }
+.wording { background: #fff4e5; border-left: 5px solid var(--warn); padding: 10px 14px; margin: 10px 0; font-size: 1.12rem; font-weight: 600; }
+.lead-line { font-size: 1.04rem; margin: 6px 0; }
 .stmt { background: var(--soft); border-left: 4px solid var(--primary); padding: 8px 12px; margin: 8px 0; }
 .conf { font-variant-numeric: tabular-nums; }
 footer { margin-top: 40px; border-top: 1px solid var(--grid); padding-top: 10px; font-size: .82rem; color: var(--muted); }
@@ -96,6 +98,7 @@ details summary { cursor: pointer; color: var(--primary); }
 <nav class="toc">
   <b>{{ t('toc') }}:</b>
   <a href="#overview">{{ t('section_overview') }}</a>
+  {% if suspicious %}<a href="#suspicious">{{ t('section_suspicious') }}</a>{% endif %}
   {% for i in range(1, 9) %}<a href="#section-{{ i }}">{{ t('section_' ~ i) }}</a>{% endfor %}
   <a href="#evaluation">{{ t('section_eval') }}</a>
   <a href="#assessor">{{ t('section_assessor') }}</a>
@@ -139,6 +142,41 @@ details summary { cursor: pointer; color: var(--primary); }
     {% endfor %}
   </table>
 </section>
+
+{# ============================================================ SUSPICIOUS ROWS (only when the run has them) #}
+{% if suspicious %}
+<section id="suspicious">
+  <h2>{{ t('section_suspicious') }}{% if suspicious.n_rows %} ({{ suspicious.n_rows|thousands(lang) }}){% endif %}</h2>
+  {% if suspicious.headline %}<p class="lead-line">{{ suspicious.headline }}</p>{% endif %}
+  <div class="wording">{{ suspicious.wording }}</div>
+  <p class="intro">{{ t('susp_intro') }}{% if suspicious.regime_text %} {{ suspicious.regime_text }}{% endif %}</p>
+  {% if suspicious.rows %}
+  {% if suspicious.n_rows > suspicious.shown %}<p class="stmt small">{{ t('susp_capped', shown=suspicious.shown, total=suspicious.n_rows|thousands(lang)) }}</p>{% endif %}
+  <table class="fixed">
+    <colgroup><col style="width:11%"><col style="width:11%"><col style="width:20%"><col style="width:13%"><col style="width:8%"><col style="width:37%"></colgroup>
+    <thead><tr><th>{{ t('susp_row') }}</th><th>{{ t('group') }} / {{ t('batch') }}</th><th>{{ t('susp_signals') }}</th><th>{{ t('susp_found_by') }}</th><th>{{ t('susp_strength') }}</th><th>{{ t('message') }}</th></tr></thead>
+    <tbody>
+    {% for r in suspicious.rows %}
+    <tr><td class="mono id">{{ r.row_text }}</td><td class="mono small">{{ r.group_id or '' }}{% if r.batch_id %}<br>{{ r.batch_id }}{% endif %}</td><td class="mono small">{% for x in r.signals_text %}{{ x }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td><td class="small">{{ r.sources_text }}</td><td class="conf">{{ r.strength|num }}</td><td>{{ r.statement or r.explanation }}{% if r.statement and r.explanation and r.explanation != r.statement %}<span class="plain">{{ r.explanation }}</span>{% endif %}{% set ids = (r.flag_ids or []) + (r.check_ids or []) + (r.evidence_ids or []) %}{% if ids %}<span class="tech mono">{{ ids|join(', ') }}</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% elif not suspicious.point_flags %}<p class="na">{{ t('susp_none_listed') }}</p>{% endif %}
+  {% if suspicious.point_flags %}
+  <h3>{{ t('susp_point_flags', n=suspicious.n_point_flags|thousands(lang)) }}</h3>
+  {% if suspicious.n_point_flags > suspicious.point_flags|length %}<p class="small">{{ t('pdf_capped_rows', shown=suspicious.point_flags|length, total=suspicious.n_point_flags|thousands(lang)) }}</p>{% endif %}
+  <table class="fixed">
+    <colgroup><col style="width:12%"><col style="width:14%"><col style="width:11%"><col style="width:18%"><col style="width:45%"></colgroup>
+    <thead><tr><th>{{ t('id') }}</th><th>{{ t('group') }} / {{ t('batch') }} / {{ t('susp_row') }}</th><th>{{ t('score') }} / {{ t('threshold') }}</th><th>{{ t('responsible_signals') }}</th><th>{{ t('message') }}</th></tr></thead>
+    <tbody>
+    {% for f in suspicious.point_flags %}
+    <tr id="{{ f.id }}"><td class="mono id">{{ f.id }}{% if f.human_status %}<br><span class="badge b-primary">{{ f.human_status }}</span>{% endif %}</td><td class="mono small">{{ f.group_id or '' }}{% if f.batch_id %}<br>{{ f.batch_id }}{% endif %}<br>{{ f.row_text }}</td><td class="conf">{{ f.score|num }}{% if f.threshold is not none %} / {{ f.threshold|num }}{% endif %}</td><td class="mono small">{% for x in f.signals %}{{ x }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td><td>{{ f.statement }}{% for e in f.ev %}{% if e.plain %}<span class="plain">{{ e.plain }}</span>{% endif %}{% endfor %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
 
 {# ============================================================ 1 SENSOR UNDERSTANDING #}
 <section id="section-1">

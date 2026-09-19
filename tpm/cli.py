@@ -3,8 +3,8 @@
     python -m tpm run <path> [--profile no-egress|hybrid|eu-hosted] [--stages a,b] [--opt k=v] [--rules FILE] [--lang en]
     python -m tpm serve [--host 127.0.0.1] [--port 8000] [--open]
     python -m tpm replay <run_id> [--speed 10] [--max-batches N]
-    python -m tpm report <run_id> [--lang en|fi|sv] [--out FILE] [--no-llm]
-    python -m tpm email <run_id> --to a@b.c [--lang en]
+    python -m tpm report <run_id> [--format html|pdf|pptx|all] [--lang en|fi|sv|all] [--out FILE|DIR] [--no-llm]
+    python -m tpm email <run_id> --to a@b.c [--lang en] [--pdf]
     python -m tpm export <run_id> [--out DIR]
     python -m tpm verify-log <run_id>
     python -m tpm models | bakeoff | demo | doctor | list
@@ -359,16 +359,52 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
+    """HTML report, PDF document and / or PowerPoint deck. --out is a file when exactly one file is written (one
+    language, one format), otherwise a directory that receives tpm_<run>_<lang>.<ext> files."""
     settings = _settings(args)
     ws = _open_ws(args.run_id, settings)
-    from .report import generate_report
+    from .report import download_name, export_context, generate_report
 
     langs = [args.lang] if args.lang and args.lang != "all" else settings.report.languages
+    fmt = (getattr(args, "format", None) or "html").lower()
+    formats = ["html", "pdf", "pptx"] if fmt == "all" else [fmt]
+    single = len(langs) == 1 and len(formats) == 1
+    out_dir = Path(args.out) if args.out and not single else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    def target(lang: str, ext: str) -> Optional[Path]:
+        if args.out and single:
+            return Path(args.out)
+        return (out_dir / download_name(ws.run_id, lang, ext)) if out_dir is not None else None
+
     try:
         for lang in langs:
-            out = generate_report(ws, settings, lang, use_llm=not args.no_llm, out_path=args.out if len(langs) == 1 else None)
-            _p(f"Report written: {out}")
+            if "html" in formats:
+                out = generate_report(ws, settings, lang, use_llm=not args.no_llm, out_path=target(lang, "html"))
+                _p(f"Report written: {out}")
+            if "pdf" in formats or "pptx" in formats:
+                t0 = time.time()
+                ctx = export_context(ws, settings, lang)  # collected once per language, shared by both documents
+                if "pdf" in formats:
+                    from .report.pdf import browser_pdf, generate_pdf
+
+                    out = None
+                    if getattr(args, "pdf_engine", "native") == "browser":
+                        out = browser_pdf(ws, settings, lang, out_path=target(lang, "pdf"))
+                        if out is None:
+                            _p("  no headless Edge / Chrome print available; using the built-in PDF writer")
+                    out = out or generate_pdf(ws, settings, lang, out_path=target(lang, "pdf"), context=ctx)
+                    _p(f"PDF written: {out}  ({out.stat().st_size / 1e6:.2f} MB)")
+                if "pptx" in formats:
+                    from .report.pptx_export import generate_pptx
+
+                    out = generate_pptx(ws, settings, lang, out_path=target(lang, "pptx"), context=ctx)
+                    _p(f"PowerPoint written: {out}  ({out.stat().st_size / 1e6:.2f} MB)")
+                _p(f"  ({lang}: {time.time() - t0:.1f} s)")
         return 0
+    except ImportError as e:
+        return _fail(f"the {fmt} export needs a package that is not installed ({e}). Run: pip install -r requirements.txt")
     finally:
         ws.close()
 
@@ -379,8 +415,8 @@ def cmd_email(args: argparse.Namespace) -> int:
     from .report import SmtpNotConfigured, email_report
 
     try:
-        res = email_report(ws, settings, args.to, lang=args.lang or settings.report.default_language, subject=args.subject, regenerate=args.regenerate)
-        _p(f"Sent {Path(res['path']).name} to {', '.join(res['to'])} via {res['host']}")
+        res = email_report(ws, settings, args.to, lang=args.lang or settings.report.default_language, subject=args.subject, regenerate=args.regenerate, attach_pdf=bool(getattr(args, "pdf", False)), attach_pptx=bool(getattr(args, "pptx", False)))
+        _p(f"Sent {', '.join(res.get('attachments') or [Path(res['path']).name])} to {', '.join(res['to'])} via {res['host']}")
         return 0
     except SmtpNotConfigured as e:
         return _fail(str(e))
@@ -513,7 +549,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         bad(f"Python {v.major}.{v.minor} is too old", "install Python 3.10+ and re-run run.ps1 / run.sh")
 
-    mods = ["pandas", "numpy", "scipy", "sklearn", "lightgbm", "duckdb", "pyarrow", "fastapi", "uvicorn", "pydantic", "yaml", "jinja2", "httpx", "anthropic", "openpyxl", "psutil", "dotenv", "plotly", "ruptures"]
+    mods = ["pandas", "numpy", "scipy", "sklearn", "lightgbm", "duckdb", "pyarrow", "fastapi", "uvicorn", "pydantic", "yaml", "jinja2", "httpx", "anthropic", "openpyxl", "psutil", "dotenv", "plotly", "ruptures", "multipart", "reportlab", "pptx"]
     missing = []
     for m in mods:
         try:
@@ -643,10 +679,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--profile", choices=["no-egress", "hybrid", "eu-hosted"])
     rp.set_defaults(fn=cmd_replay)
 
-    re_ = sub.add_parser("report", help="(re)generate the HTML report")
+    re_ = sub.add_parser("report", help="(re)generate the report: HTML, PDF document, PowerPoint deck")
     re_.add_argument("run_id")
+    re_.add_argument("--format", choices=["html", "pdf", "pptx", "all"], default="html", help="html (default) | pdf | pptx | all")
     re_.add_argument("--lang", help="en | fi | sv | all")
-    re_.add_argument("--out", help="output file (single language only)")
+    re_.add_argument("--out", help="output file (one language and one format), otherwise an output directory")
+    re_.add_argument("--pdf-engine", choices=["native", "browser"], default="native", help="native = built-in typeset PDF (default); browser = headless Edge/Chrome print of the HTML report when installed")
     re_.add_argument("--no-llm", action="store_true")
     re_.set_defaults(fn=cmd_report)
 
@@ -656,9 +694,11 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("--lang", choices=["en", "fi", "sv"])
     em.add_argument("--subject")
     em.add_argument("--regenerate", action="store_true")
+    em.add_argument("--pdf", action="store_true", help="also attach the PDF report")
+    em.add_argument("--pptx", action="store_true", help="also attach the PowerPoint deck")
     em.set_defaults(fn=cmd_email)
 
-    ex = sub.add_parser("export", help="export report(s), decision log, ledger and artifacts as a zip")
+    ex = sub.add_parser("export", help="export report(s) (HTML, PDF, PowerPoint), decision log, ledger and artifacts as a zip")
     ex.add_argument("run_id")
     ex.add_argument("--out", help="output directory (default exports/)")
     ex.add_argument("--lang", choices=["en", "fi", "sv"])

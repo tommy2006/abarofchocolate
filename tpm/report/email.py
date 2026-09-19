@@ -30,7 +30,10 @@ def smtp_config(settings: Settings) -> dict[str, Any]:
     return {"host": host, "port": port, "user": user, "password": password, "from": sender}
 
 
-def build_message(ws: Workspace, settings: Settings, to: list[str], lang: str, path: Path, sender: str, subject: Optional[str] = None) -> EmailMessage:
+_ATTACH_TYPES = {".pdf": ("application", "pdf"), ".pptx": ("application", "vnd.openxmlformats-officedocument.presentationml.presentation")}
+
+
+def build_message(ws: Workspace, settings: Settings, to: list[str], lang: str, path: Path, sender: str, subject: Optional[str] = None, extra_attachments: Optional[list[Path]] = None) -> EmailMessage:
     t = Translator(lang)
     meta = ws.read_json("meta", {}) or {}
     msg = EmailMessage()
@@ -40,11 +43,16 @@ def build_message(ws: Workspace, settings: Settings, to: list[str], lang: str, p
     msg.set_content(t("email_body", run_id=ws.run_id, lang=t("lang_name"), source=Path(str(meta.get("source_path", ""))).name, profile=meta.get("profile", settings.profile)))
     with open(path, "rb") as f:
         msg.add_attachment(f.read(), maintype="text", subtype="html", filename=path.name)
+    for extra in extra_attachments or []:  # the PDF (and, when asked for, the deck) next to the HTML report
+        maintype, subtype = _ATTACH_TYPES.get(Path(extra).suffix.lower(), ("application", "octet-stream"))
+        with open(extra, "rb") as f:
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=f"tpm_{ws.run_id}_{lang}{Path(extra).suffix.lower()}")
     return msg
 
 
-def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str = "en", subject: Optional[str] = None, regenerate: bool = False, use_llm: bool = False) -> dict[str, Any]:
-    """Send report_<lang>.html to one or more recipients. Raises SmtpNotConfigured with a clear message.
+def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str = "en", subject: Optional[str] = None, regenerate: bool = False, use_llm: bool = False, attach_pdf: bool = False, attach_pptx: bool = False) -> dict[str, Any]:
+    """Send report_<lang>.html to one or more recipients; with attach_pdf / attach_pptx the PDF / the deck of the same
+    language is attached too (generated on demand, cached). Raises SmtpNotConfigured with a clear message.
 
     Accepts both email_report(ws, settings, to, lang) and the API's shorter email_report(ws, to, lang)."""
     if isinstance(settings, (str, list)):  # called as (ws, to, lang)
@@ -61,7 +69,14 @@ def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str 
             path = generate_report(ws, settings, lang, use_llm=True)
     else:  # send a report that matches the artifacts; a stored model summary is kept, the model is not called
         ensure_report(ws, settings, lang, use_llm=True, force=regenerate, ask_model=False)
-    msg = build_message(ws, settings, recipients, lang, path, cfg["from"], subject)
+    extras: list[Path] = []
+    if attach_pdf or attach_pptx:
+        from .export_common import ensure_export
+
+        for fmt, wanted in (("pdf", attach_pdf), ("pptx", attach_pptx)):
+            if wanted:
+                extras.append(Path(ensure_export(ws, settings, lang, fmt, force=regenerate)["path"]))
+    msg = build_message(ws, settings, recipients, lang, path, cfg["from"], subject, extra_attachments=extras)
     if cfg["port"] == 465:
         server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=30)
     else:
@@ -80,5 +95,5 @@ def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str 
             server.quit()
         except Exception:
             pass
-    ws.log.record("system:report", "email", "report", path.name, {"to": recipients, "lang": lang, "host": cfg["host"]})
-    return {"sent": True, "to": recipients, "lang": lang, "path": str(path), "host": cfg["host"]}
+    ws.log.record("system:report", "email", "report", path.name, {"to": recipients, "lang": lang, "host": cfg["host"], "attachments": [path.name] + [x.name for x in extras]})
+    return {"sent": True, "to": recipients, "lang": lang, "path": str(path), "host": cfg["host"], "attachments": [path.name] + [x.name for x in extras]}
