@@ -79,3 +79,18 @@ A rename existed only inside the Understanding detail pane and did not reach the
   "name (S44)"; `linkifyRefs` keeps the bare id when the text already has a name in front of "(S44)".
 - Tests: `tests/test_e_rename.py` (3). Checked live on a copy of demo_cli: rename through the bar, summary card,
   report prose.
+
+## State at the end of round 4 (2026-09-19 ~16:30)
+- Pushed: 4462187 (full suite 500 passed, 1 xfailed). The workflow's three-reviewer phase was stopped on purpose
+  (the user's credits are low); instead: full test run by the lead plus an adversarial probe of the guard with real
+  raw values (found and fixed: epoch-style integer time stamps, generic data-file names inside sentences).
+- Final installer built with `build.ps1` (setup 180 MB) and installed on the user's laptop; the installed app was
+  started headless and answered on /api/health, /api/models and the new UI modules.
+- NOT done: the real Anthropic benchmark. The user's key is organisation-level; the API answers 400 "not scoped to a
+  workspace". The provider now sends `anthropic-workspace-id` from `ANTHROPIC_WORKSPACE_ID` (.env). When the user has
+  added it: `python -m tpm bench-llm --run bench_hybrid --profile hybrid --n 2` (workspace/bench_hybrid is a copy of
+  demo_cli made for this; about 15 Sonnet 5 calls). Then put the measured numbers into README ("What it speeds up").
+- Known leftovers: rule_compile's pseudo schema will probably be refused as a tool schema by the real API (falls back
+  to local); EV/INF/RULE item briefs are English-only; `router.agent_chat` has no "no local fallback" switch (one
+  wasted local call in a rare path); the installed app has its own empty workspace (runs of the source checkout are
+  not shown there).
