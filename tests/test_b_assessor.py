@@ -259,6 +259,12 @@ def test_assess_new_file_and_apply(assessed):
     assert "error" in apply_override(ws, settings, HumanDecision(actor_name="ann", role="engineer", action="approve", object_type="assessor", object_id="REC-999"))
     human = [e for e in ws.log.entries(actor_prefix="human:ann") if e.action == "apply_assessor_action"]
     assert len(human) >= 5 and ws.log.verify_chain()["ok"]
+    # the same suggestion approved a second time (its other Apply button, another tab) is not applied again
+    assert ws.read_json("assessor")["recommendations"][0].get("status") == "applied"
+    stamp = ws.path("dataset_curated.parquet").stat().st_mtime_ns
+    again = apply_override(ws, settings, HumanDecision(actor_name="bob", role="engineer", action="approve", object_type="assessor", object_id=rec["id"]))
+    assert again["already_applied"] and not again["applied"] and again["applied_by"] == "human:ann(engineer)"
+    assert ws.path("dataset_curated.parquet").stat().st_mtime_ns == stamp
 
 
 def test_pipeline_apply_decision_routes_to_assessor_and_quality(assessed):

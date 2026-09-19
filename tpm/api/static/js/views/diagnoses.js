@@ -7,7 +7,7 @@
 import { state, t, el, clear, runApi, cachedRunApi, fmt, conf, sev, chip, kindChip, causeChip, viewHead, needRun, empty, evidenceButton, evidencePanel, decisionBar, postDecision, hiddenHint, roleAllows, infStatus, toast, unavailableNote, linkifyRefs, cleanText, prose, proseList, refLink, refChips, rowsLink, confWords, sevWords, addPlainBox, navigate, table } from '../core.js';
 import { openChat, diagnosisContext, flagContext, setChatContext } from '../chat.js';
 import { summaryCard, techDetails, techNested, itemBrief, bt } from '../brief.js';
-import { vt, vizBox, chartNode, praStrip, fetchItemBrief, donut, hbar, kindOfSignal, sensorKindColor, sensorKindLegend, timeline, binnedTimeline, causeColors, CAUSE_ORDER, briefActionButtons } from '../charts.js';
+import { vt, vizBox, chartNode, praStrip, fetchItemBrief, donut, hbar, kindOfSignal, sensorKindColor, sensorKindLegend, timeline, binnedTimeline, causeColors, CAUSE_ORDER, briefActionButtons, basicMore } from '../charts.js';
 
 const DIRS = ['up', 'down', 'noisy', 'stuck', 'shifted'];
 function dirWord(d) { return d && DIRS.includes(d) ? t('plain.dir.' + d) : (d || ''); }
@@ -74,10 +74,17 @@ export async function render(main, params = {}) {
   };
   const open = (d) => { show(d); navigate('diagnoses', { diag: d.id, pattern: patternFilter || undefined }); };
 
-  // ---- Problem -> Reason -> Answer of one finding (+ its decision bar); the item brief when the server has no strip data
+  // ---- Problem -> Reason -> Answer of one finding (+ its decision bar); the item brief when the server has no strip data.
+  // Basic mode: a short strip (one sentence of reason, two things to do) whose only "where" is the link to the rows
   const stripOf = (d, b, { label } = {}) => {
     const pts = b.points || []; const wherePt = pts.find((p) => /^(Where|Missä|Var)\b/.test(p)); const rest = pts.filter((p) => p !== wherePt);
     const sigs = (d.ranked_signals || []).slice(0, 3);
+    if (!full) {
+      const p = placeOf(d);
+      return praStrip({ verdict: b.verdict, problem: b.headline, where: p ? el('div', {}, rowsLink(p.row_start, p.row_end, { signals: sigs.map((s) => s.signal), label: vt('adv.showRows') })) : null,
+        reason: b.because || b.why || rest[0] || cleanText(d.summary || ''), fix: b.fix || [], use: b.can_use_rows,
+        extra: [briefActionButtons(b.actions, diagnosisContext(d), { skipRef: d.id, noAsk: true }), el('div', { class: 'brief-decide' }, decisions(d))], compact: true });
+    }
     const w = whereOf(d);
     return praStrip({ verdict: b.verdict, problem: linkifyRefs(b.headline), where: [wherePt ? el('div', { text: wherePt }) : null, w ? el('div', {}, w) : null],
       reason: b.why ? linkifyRefs(b.why) : (rest[0] || cleanText(d.summary || '')),
@@ -237,9 +244,12 @@ export async function render(main, params = {}) {
   renderList();
   // the most important findings, as strips with their decision bar, above the expander (never a rejected one)
   // (with a pattern asked for, the most important findings of that pattern)
-  const topN = diags.filter((d) => !(d.critique && d.critique.verdict === 'rejected')).slice(0, 3);
-  if (topN.length) topHost.append(el('h2', { class: 'brief-top-title', text: bt('brief.topFindings') }), el('p', { class: 'small muted brief-top-help', text: (full ? bt('brief.topFindingsHelp') : td('brief.topFindingsHelpBasic')) + ' ' + vt('adv.topHelp') }),
-    ...topN.map((d) => el('div', { class: 'brief-top-item', dataset: { diag: d.id } }, el('div', { class: 'brief-top-name small muted' }, refLink('diagnosis', d.id), ' · ', titleOf(d)), stripHost(d))));
+  // (Basic mode: the most important one, and how many more Operator mode lists)
+  const shownDiags = diags.filter((d) => !(d.critique && d.critique.verdict === 'rejected'));
+  const topN = shownDiags.slice(0, full ? 3 : 1);
+  if (topN.length) topHost.append(...[el('h2', { class: 'brief-top-title', text: bt('brief.topFindings') }), el('p', { class: 'small muted brief-top-help', text: full ? bt('brief.topFindingsHelp') + ' ' + vt('adv.topHelp') : td('brief.topFindingsHelpBasic') }),
+    ...topN.map((d) => el('div', { class: 'brief-top-item', dataset: { diag: d.id } }, full ? el('div', { class: 'brief-top-name small muted' }, refLink('diagnosis', d.id), ' · ', titleOf(d)) : null, stripHost(d))),
+    full ? null : basicMore(shownDiags.length - topN.length)].filter(Boolean));
   const want = params.diag || params.diagnosis;
   const first = want ? diags.find((d) => d.id === want) || all.find((d) => d.id === want) : diags[0];
   if (first) { show(first); if (want) detail.scrollIntoView({ block: 'start', behavior: 'smooth' }); }

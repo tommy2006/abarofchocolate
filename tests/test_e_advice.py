@@ -59,6 +59,23 @@ def test_advice_for_fills_facts_and_defaults():
     assert A.advice_for("batch", "untrusted", {"batch": "B00002", "n": 4}, "en")["can_use_rows"] == "no"
 
 
+def test_the_first_step_fits_the_cause_a_faulty_sensor_is_never_sent_to_look_for_a_leak():
+    """'xmv_3 is probably faulty' must not start its answer with 'look for a leak or a changed feed' (the process
+    version of a drift): a faulty sensor gets the instrument version, a data problem no event step at all."""
+    for lang in A.LANGS:
+        lib = A.LIBRARY[lang]
+        for kind in ("drift", "changepoint"):
+            process_step = lib[f"diagnosis.process.{kind}"]["fix"][0]
+            assert lib[f"diagnosis.sensor.{kind}"]["fix"][0] != process_step, (lang, kind)
+            assert lib[f"diagnosis.data.{kind}"]["fix"][0] != process_step, (lang, kind)
+            assert lib[f"diagnosis.mixed.{kind}"]["fix"][0] == process_step, (lang, kind)
+    assert "sensor" in A.LIBRARY["en"]["diagnosis.sensor.drift"]["fix"][0] and "leak" not in A.LIBRARY["en"]["diagnosis.sensor.drift"]["fix"][0]
+    # the short Basic strip gives the cause, not the first sentence of "why" (which only says what happened again)
+    a = A.advice_for("diagnosis", ("sensor", "drift"), {"sensor": "xmv_3 (S44)", "where": "rows 1–2"}, "en")
+    assert a["because"].startswith("One sensor broke its usual relation") and a["why"].endswith(a["because"])
+    assert "because" not in A.advice_for("check", "stuck", {}, "en")
+
+
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
     from fastapi.testclient import TestClient

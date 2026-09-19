@@ -53,6 +53,7 @@ export async function openChat(ctx) {
 export function setChatContext(ctx, { cleared = false } = {}) {
   const c = cur();
   const next = normCtx(ctx);
+  if (!cleared) chat.pageCtx = { view: state.view, run: state.run, ctx: next };   // the item on the page: "+ New chat" starts from it
   const changed = ctxKey(next) !== ctxKey(c.context);
   const before = ctxKey(c.context);
   c.context = next;
@@ -175,10 +176,12 @@ function selectChat(id) {
   render();
   loadHistory(cur()).then(() => { saveChats(); if (chat.open) renderMsgs(); });
 }
+/** "+ New chat": a chat of its own, about the item selected on this page (else about the whole run). */
 function newChat(ctx) {
   if (inputEl) cur().draft = inputEl.value;
   if (chat.busy) stop();
-  const c = makeChat(ctx, null);
+  const p = chat.pageCtx;
+  const c = makeChat(ctx || (p && p.view === state.view && p.run === state.run ? p.ctx : null), null);
   chat.chats.push(c);
   chat.current = c.id;
   saveChats();

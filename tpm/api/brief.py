@@ -89,7 +89,7 @@ T: dict[str, dict[str, str]] = {
         "und.p.noperiod": "The file has no time column, so time is counted in rows.",
         "und.p.excluded": "{k} of {n} sensors are left out of the fault search because they never change or only repeat another sensor.",
         "und.p.excluded.1": "One of {n} sensors is left out of the fault search because it never changes or only repeats another sensor.",
-        "und.p.names": "The system does not know what each sensor measures. It only looks at how the values behave.",
+        "und.p.names": "The system guessed what each sensor measures from how its values behave (the colours below); it did not use the column names.",
         "und.p.unsure": "The system had to guess {k} things about the file. Ask it below what it assumed.",
         "und.p.unsure.1": "The system had to guess one thing about the file. Ask it below what it assumed.",
         "und.a.check": "Check that the columns were read the way you expect",
@@ -319,7 +319,7 @@ T: dict[str, dict[str, str]] = {
         "und.p.noperiod": "Tiedostossa ei ole aikasaraketta, joten aika lasketaan riveinä.",
         "und.p.excluded": "{k} anturia {n}:stä jätetään pois vianetsinnästä, koska ne eivät muutu tai vain toistavat toista anturia.",
         "und.p.excluded.1": "Yksi anturi {n}:stä jätetään pois vianetsinnästä, koska se ei muutu tai vain toistaa toista anturia.",
-        "und.p.names": "Järjestelmä ei tiedä, mitä kukin anturi mittaa. Se katsoo vain, miten arvot käyttäytyvät.",
+        "und.p.names": "Järjestelmä arvasi, mitä kukin anturi mittaa, sen arvojen käyttäytymisestä (värit alla); se ei käyttänyt sarakkeiden nimiä.",
         "und.p.unsure": "Järjestelmä joutui arvaamaan {k} asiaa tiedostosta. Kysy alta, mitä se oletti.",
         "und.p.unsure.1": "Järjestelmä joutui arvaamaan yhden asian tiedostosta. Kysy alta, mitä se oletti.",
         "und.a.check": "Tarkista, että sarakkeet luettiin odottamallasi tavalla",
@@ -535,7 +535,7 @@ T: dict[str, dict[str, str]] = {
         "und.p.noperiod": "Filen har ingen tidskolumn, så tiden räknas i rader.",
         "und.p.excluded": "{k} av {n} givare lämnas utanför felsökningen eftersom de aldrig ändras eller bara upprepar en annan givare.",
         "und.p.excluded.1": "En av {n} givare lämnas utanför felsökningen eftersom den aldrig ändras eller bara upprepar en annan givare.",
-        "und.p.names": "Systemet vet inte vad varje givare mäter. Det ser bara på hur värdena beter sig.",
+        "und.p.names": "Systemet gissade vad varje givare mäter utifrån hur värdena beter sig (färgerna nedan); det använde inte kolumnnamnen.",
         "und.p.unsure": "Systemet fick gissa {k} saker om filen. Fråga nedan vad det antog.",
         "und.p.unsure.1": "Systemet fick gissa en sak om filen. Fråga nedan vad det antog.",
         "und.a.check": "Kontrollera att kolumnerna lästes som du väntar dig",
@@ -1723,6 +1723,8 @@ def brief_item(ws: Any, settings: Any, object_id: str, lang: str = "en") -> Opti
             if not (body.get("kind") == "check" and out["verdict"] == "ok"):
                 adv = advice_for_object(ws, body["kind"], obj, lang)
                 res.update({"why": adv["why"], "fix": adv["fix"], "can_use_rows": adv["can_use_rows"]})
+                if adv.get("because"):                   # the cause sentence alone, for the short Basic-mode strip
+                    res["because"] = adv["because"]
         except Exception:
             pass
     return res

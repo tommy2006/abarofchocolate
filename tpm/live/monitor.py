@@ -163,7 +163,12 @@ class LiveMonitor:
 
     @staticmethod
     def _no_source() -> dict[str, Any]:
-        return {"kind": "none", "name": "", "path": "", "detail": "", "error": "", "rows": 0}
+        return {"kind": "none", "name": "", "path": "", "detail": "", "error": "", "rows": 0, "detail_msg": [], "name_msg": None}
+
+    def _detail(self, *msgs: dict[str, Any]) -> None:
+        """The status line of the source: the English text for the log, the message keys for the page (it translates them)."""
+        self.src["detail"] = " ".join(m["text"] for m in msgs)
+        self.src["detail_msg"] = list(msgs)
 
     @staticmethod
     def _fresh_state() -> dict[str, Any]:
@@ -197,7 +202,7 @@ class LiveMonitor:
         with self.lock:
             st = self.state
             out = {
-                "source": {k: self.src.get(k) for k in ("kind", "name", "path", "detail", "error", "rows", "scenario", "inject")},
+                "source": {k: self.src.get(k) for k in ("kind", "name", "path", "detail", "error", "rows", "scenario", "inject", "detail_msg", "name_msg")},
                 "running": self.feed is not None,
                 "cfg": dict(self.cfg), "expected_rows": int(self.expected_rows()),
                 "settings": dict(self.set), "settings_by": dict(self.set_by),
@@ -209,6 +214,12 @@ class LiveMonitor:
                 "signature_sources": list(self.sig_sources), "signature_dir": str(self.sig_dir), "n_signatures": len(self.sigs),
             }
             return json.loads(json.dumps(out, default=str))
+
+    def alarm_brief(self) -> dict[str, Any]:
+        """What the app-wide watcher needs on every page (a toast and a dot on rail item 7): is a source running, and
+        the current alarm card. Small, so it can be polled from any page."""
+        with self.lock:
+            return json.loads(json.dumps({"running": self.feed is not None, "source": self.src.get("kind"), "alarm": self.state.get("alarm")}, default=str))
 
     # ------------------------------------------------------------------ operator settings
     def apply_settings(self, data: dict[str, Any], *, by: str = "operator", note: str = "", name: str = "") -> dict[str, Any]:
@@ -379,8 +390,13 @@ class LiveMonitor:
         """The alarm card: ALARM (what tripped) -> PROBLEM (which sensors behave how) -> CAUSE (the known failure type
         that matches, or none) -> SUGGESTION (its advice, or generic advice). None when nothing is wrong."""
         cause, also = signatures.best_cause(sig_rows)
+        # the process IS drifting (the drift alarm has tripped, or the plain pattern on the cause's own sensors is already
+        # there) while the failure type itself is still building up: an alarm "drifting towards" it, never a step back
+        # from "Alarm" to "Early warning"
+        towards = cause is not None and cause["status"] == "imminent" and (level == "drift" or any(
+            r.get("covered_by") == cause["id"] and r["status"] == "occurring" for r in sig_rows))
         if cause is not None:
-            kind = cause["status"]                                              # occurring | imminent
+            kind = "occurring" if towards else cause["status"]                  # occurring | imminent
         elif level == "drift":
             kind = "drift"
         elif level in ("quality", "untrusted"):
@@ -388,7 +404,7 @@ class LiveMonitor:
         else:
             self._alarm_since = {}
             return None
-        key = (kind, cause["id"] if cause else None)
+        key = ("towards" if towards else kind, cause["id"] if cause else None)
         if self._alarm_since.get("key") != key:
             self._alarm_since = {"key": key, "t": t_iso}
         since = self._alarm_since["t"]
@@ -403,7 +419,7 @@ class LiveMonitor:
                     "spark": [h["mean"].get(sensor) for h in hist] + [r.get("mean")]}
         if cause is not None:
             sensors = [problem(x["sensor"], x["how"]) for x in cause["resolved"][:4]]
-            trip = {"key": "sig." + kind, "sig": cause["id"], "name": cause["name"], "name_i18n": cause["name_i18n"], "score": cause["score"], "n": len(sensors)}
+            trip = {"key": "sig.towards" if towards else "sig." + kind, "sig": cause["id"], "name": cause["name"], "name_i18n": cause["name_i18n"], "score": cause["score"], "n": len(sensors)}
             cause_out = {"sig": cause["id"], "fault": cause["fault"], "name": cause["name"], "name_i18n": cause["name_i18n"], "confidence": cause["confidence"],
                          "score": cause["score"], "status": cause["status"], "generic": cause["generic"], "pattern": cause["pattern"], "direction": cause["direction"],
                          "matched": cause["matched"], "n": cause["n"], "partial": cause["partial"],
@@ -546,7 +562,7 @@ class LiveMonitor:
         self.cfg.update(interval=interval, rows_per_sec=rows_per_sec, baseline_cycles=baseline_cycles)
 
     def _begin(self, kind: str, name: str, path: Path, from_start: bool, prepare: Optional[Callable] = None,
-               reset: bool = True, detail: str = "", actor: str = "") -> None:
+               reset: bool = True, detail: Optional[dict[str, Any]] = None, actor: str = "") -> None:
         """Switch to a new data source. ``prepare(stop_event)`` may start a worker thread and may raise ValueError."""
         with self.lock:
             self._stop_worker()
@@ -562,7 +578,9 @@ class LiveMonitor:
                 self.src["error"] = str(e)
                 self.state["verdict"] = {"level": "wait", **msg("verdict.nosource")}
                 raise
-            self.src.update(kind=kind, name=name, path=str(path), detail=detail or self.src["detail"])
+            if detail:
+                self._detail(detail)
+            self.src.update(kind=kind, name=name, path=str(path))
             self.feed = Feed(path, from_start)
             self._wake.set()
             self._ensure_loop()
@@ -571,7 +589,8 @@ class LiveMonitor:
     def stop_source(self, actor: str = "") -> None:
         with self.lock:
             self._stop_worker()
-            self.src.update(kind="none", name="", detail="Stopped by the operator.", error="")
+            self.src.update(kind="none", name="", name_msg=None, error="")
+            self._detail(msg("src.stopped"))
             self.feed = None
             self.state["verdict"] = {"level": "wait", **msg("verdict.stopped")}
             self.state["alarm"] = None                       # nothing is watched any more: no alarm card next to "stopped"
@@ -712,9 +731,11 @@ class LiveMonitor:
                     raise
                 plan.update(ramp_rows=ramp, spreads=INJECT_SPREADS * strength, amplitude={})
             self.work_file.write_bytes(header)
-            self.src["detail"] = f"{src.name}: {rate:g} rows/s, from row {start_row:,}" + (f", {max_rows:,} rows" if max_rows else ", to the end") + (", repeating" if loop else "")
+            key = "src.replay" + (".rows" if max_rows else "") + (".loop" if loop else "")
+            parts = [msg(key, file=src.name, rate=f"{rate:g}", start=f"{start_row:,}", **({"rows": f"{max_rows:,}"} if max_rows else {}))]
             if plan:
-                self.src["detail"] += f". After {inject_after:,} rows: {plan['label']} injected on {', '.join(plan['columns'])}."
+                parts.append(msg("src.inject", after=f"{inject_after:,}", label=plan["label"], columns=", ".join(plan["columns"])))
+            self._detail(*parts)
             self.src["inject"] = plan
 
             def play() -> None:
@@ -794,7 +815,7 @@ class LiveMonitor:
                             if not loop:
                                 break
                     if not stop.is_set():
-                        self.src["detail"] = f"Finished: {self.src['rows']:,} rows were played. No more rows will arrive."
+                        self._detail(msg("src.finished", rows=f"{self.src['rows']:,}"))
                 finally:
                     f.close()
             th = threading.Thread(target=play, name="live-replay", daemon=True)
@@ -818,11 +839,11 @@ class LiveMonitor:
         def prepare(stop: threading.Event) -> threading.Thread:
             names, drift, freeze = plant["names"], plant["drift"], plant["freeze"]
             self.work_file.write_text("datetime," + ",".join(names) + "\n", encoding="utf-8")
-            when = (f"from cycle 7, slowly: {max(abs(a) for a in drift.values()):g} normal spreads more every cycle"
-                    if plant.get("drift_per_cycle") else f"cycle 7 to {freeze_cycle - 1}")
-            self.src["detail"] = (f"Built-in demo plant ({scenario}): {rate:g} rows/s, normal, then a drift on {', '.join(drift)} "
-                                  f"({when}), then {freeze} freezes (cycle {freeze_cycle}).")
+            common = {"rate": f"{rate:g}", "drift": ", ".join(drift), "freeze": freeze, "cycle": freeze_cycle}
+            self._detail(msg("src.demo.slow", step=f"{max(abs(a) for a in drift.values()):g}", **common) if plant.get("drift_per_cycle")
+                         else msg("src.demo.fast", end=freeze_cycle - 1, **common))
             self.src["scenario"] = scenario
+            self.src["name_msg"] = msg("src.name." + scenario)
 
             def play() -> None:
                 readings, i, carry, t0 = demo_readings(plant, per_cycle), 0, 0.0, datetime.now()
@@ -840,7 +861,7 @@ class LiveMonitor:
                             self.src["rows"] += len(lines)
                         stop.wait(1.0)
                 if not stop.is_set():
-                    self.src["detail"] = f"Demo finished after {self.src['rows']:,} rows."
+                    self._detail(msg("src.demo.finished", rows=f"{self.src['rows']:,}"))
             th = threading.Thread(target=play, name="live-demo", daemon=True)
             th.start()
             return th
@@ -856,7 +877,7 @@ class LiveMonitor:
             p = Path(target)
             if not p.is_file():
                 raise ValueError(f"File not found: {p}")
-            return self._begin("live-file", p.name, p, False, detail=f"Watching {p} for new rows.", actor=actor)
+            return self._begin("live-file", p.name, p, False, detail=msg("src.watching", path=str(p)), actor=actor)
         url = target
 
         def prepare(stop: threading.Event) -> threading.Thread:
@@ -887,7 +908,7 @@ class LiveMonitor:
                 raise ValueError("The link does not return CSV text with a header line (JSON or web pages are not supported).")
             header = body[: nl + 1]
             self.work_file.write_bytes(header)
-            self.src["detail"] = f"Connected to {url}. Waiting for new rows (checking every second)."
+            self._detail(msg("src.link.waiting", url=url))
 
             def poll() -> None:
                 nonlocal ranged
@@ -920,7 +941,7 @@ class LiveMonitor:
                                     pos += cut + 1
                                     self.src["rows"] += data[: cut + 1].count(b"\n")
                                 self.src["error"] = ""
-                                self.src["detail"] = f"Connected to {url}. Last check {datetime.now():%H:%M:%S}."
+                                self._detail(msg("src.link.checked", url=url, time=f"{datetime.now():%H:%M:%S}"))
                             except Exception as e:
                                 self.src["error"] = f"Could not fetch new data: {e}"
                 finally:

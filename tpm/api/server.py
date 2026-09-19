@@ -475,9 +475,9 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         s = state.reload_settings()
         for rid, w in list(state.workspaces.items()):
             try:
-                w.log.record("human:ui(reviewer)", "settings", "settings", "profile", {"from": old, "to": s.profile})
+                w.log.record("human:ui(engineer)", "settings", "settings", "profile", {"from": old, "to": s.profile})
                 if "external_llm" in allowed:
-                    w.log.record("human:ui(reviewer)", "settings", "settings", "external_model", {"from": old_ext, "to": s.external_llm.model})
+                    w.log.record("human:ui(engineer)", "settings", "settings", "external_model", {"from": old_ext, "to": s.external_llm.model})
             except Exception:
                 pass
         return {"ok": True, "profile": s.profile, "allow_external": s.active_profile.allow_external, "external_model": s.external_llm.model, "changed": allowed}
@@ -1114,7 +1114,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         except Exception as e:
             raise HTTPException(422, f"invalid decision: {e}")
         if decision.role not in ("basic", "operator", "engineer", "reviewer"):
-            raise HTTPException(422, "role must be operator | engineer | reviewer")
+            raise HTTPException(422, "role must be basic | operator | engineer")
         try:
             return {"ok": True, **_apply(ws, decision), "decision": _jsonable(decision)}
         except Exception as e:
@@ -1384,12 +1384,15 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         ws = state.ws(run_id)
         body = await request.json()
         turn_id = fallback.clean_turn_id(body.get("turn_id") or body.get("client_turn_id"))
-        chat_id = fallback.clean_chat_id(body.get("chat_id")) if body.get("chat_id") else None
+        chat_id = fallback.valid_chat_id(body.get("chat_id")) if body.get("chat_id") else None
+        if body.get("chat_id") and not chat_id:
+            raise HTTPException(400, "invalid chat_id")
         if not turn_id and not chat_id:
             raise HTTPException(400, "turn_id or chat_id is required")
         # a named turn stops only that turn: flagging the whole chat too could stop the next question when the person
-        # asks it right after Stop (both requests race); every running turn of a chat stops only when no turn is named
-        flagged = fallback.request_stop(turn_id, None if turn_id else chat_id)
+        # asks it right after Stop (both requests race); every running turn of a chat stops only when no turn is named,
+        # and only in this run (every run's first chat is called "default")
+        flagged = fallback.request_stop(turn_id, None if turn_id else chat_id, ws.run_id)
         actor = body.get("actor") or "operator"
         role = body.get("role") or "operator"
         try:
@@ -1402,10 +1405,13 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         """Remove the persisted turns of one chat ("Clear history" keeps the chat, "Delete chat" removes it in the UI;
         the server side is the same). Logged as a human decision."""
         ws = state.ws(run_id)
-        chat_id = fallback.clean_chat_id(body.get("chat_id"))
+        chat_id = fallback.valid_chat_id(body.get("chat_id"))
+        if not chat_id:   # never fall back to "default": that would silently clear the first chat
+            raise HTTPException(400, "a valid chat_id is required")
         actor = body.get("actor") or "operator"
         role = body.get("role") or "operator"
-        fallback.request_stop(None, chat_id)  # a turn still running for this chat stops too
+        # a turn still running for this chat (of this run) stops, and its late answer is not saved into the cleared chat
+        fallback.discard_running(chat_id, ws.run_id)
         removed = fallback.clear_chat(ws, chat_id)
         try:
             ws.log.record(f"human:{actor}({role})", "chat_deleted" if body.get("delete") else "chat_cleared", "chat", chat_id, {"chat_id": chat_id, "turns_removed": removed})
@@ -1488,6 +1494,11 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         action = body.get("action")
         if not action:
             raise HTTPException(400, "action (recommendation id or text) is required")
+        if isinstance(action, str):
+            # a suggestion that was applied already (its second Apply button, another tab) is neither applied nor logged again
+            rec = next((r for r in (ws.read_json("assessor", None) or {}).get("recommendations", []) if r.get("id") == action), None)
+            if rec is not None and rec.get("status") == "applied":
+                return {"ok": True, "applied": False, "already_applied": True, "status": "applied", "applied_by": rec.get("applied_by")}
         decision = HumanDecision(actor_name=body.get("actor_name") or "ui", role=body.get("role") or "engineer", action="apply_assessor_action", object_type="assessor", object_id=str(action if isinstance(action, str) else action.get("id", "action")), note=body.get("note"), new_value=action if isinstance(action, dict) else {"action": action})
         res = _apply(ws, decision)
         return {"ok": True, **res}

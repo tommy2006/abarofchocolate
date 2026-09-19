@@ -70,6 +70,22 @@ MSG = {
     "sig.imminent": "Drifting towards a known failure type: {name} (match {score}%) on {sensors}.",
     "sig.occurring": "A known failure type is occurring: {name} (match {score}%) on {sensors}.",
     "sig.cleared": "{name}: no longer matching (match {score}%).",
+    # the status line of the data source (tpm.live.monitor)
+    "src.replay": "{file}: {rate} rows per second, from row {start} to the end.",
+    "src.replay.rows": "{file}: {rate} rows per second, from row {start}, {rows} rows.",
+    "src.replay.loop": "{file}: {rate} rows per second, from row {start} to the end, repeating.",
+    "src.replay.rows.loop": "{file}: {rate} rows per second, from row {start}, {rows} rows, repeating.",
+    "src.inject": "After {after} rows: {label} is added on {columns}.",
+    "src.finished": "Finished: {rows} rows were played. No more rows will arrive.",
+    "src.demo.slow": "Built-in demo plant: {rate} rows per second, normal running, then from cycle 7 a slow drift on {drift} ({step} normal spreads more every cycle), then {freeze} freezes (cycle {cycle}).",
+    "src.demo.fast": "Built-in demo plant: {rate} rows per second, normal running, then a drift on {drift} (cycles 7 to {end}), then {freeze} freezes (cycle {cycle}).",
+    "src.demo.finished": "Demo finished after {rows} rows.",
+    "src.name.plant": "demo plant",
+    "src.name.te": "demo plant (TE names)",
+    "src.link.waiting": "Connected to {url}. Waiting for new rows (checking every second).",
+    "src.link.checked": "Connected to {url}. Last check {time}.",
+    "src.watching": "Watching {path} for new rows.",
+    "src.stopped": "Stopped by the operator.",
 }
 CHECKS = ("level", "trend", "noise", "range")
 CHECK_LABEL_EN = {"level": "Level", "trend": "Trend", "noise": "Noise", "range": "Range"}

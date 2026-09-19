@@ -4,13 +4,24 @@
    the question box comes last. Reads the real assessor.json shape (combined_score, fitness, coverage,
    dq_scores, more_data_verdict, less_data_verdict, recommendations) and the older fixture shape. */
 import { state, t, el, clear, runApi, fmt, conf, chip, section, viewHead, needRun, empty, evidenceButton, evChips, hiddenHint, meter, toast, errText, confirmDialog, actorName, actorRole, infStatus, unavailableNote, roleAllows, linkifyRefs, cleanText, prose, proseList, refLink, refChips, confWords, addPlainBox, kv, notice } from '../core.js';
-import { plot, purge, tokens, praStrip } from '../charts.js';
+import { plot, purge, tokens, praStrip, basicMore } from '../charts.js';
 import { summaryCard, techDetails, answerBlock } from '../brief.js';
 
 // English fallbacks of this page's own keys (the i18n files are edited by several people at once)
 const FB = {
   'ass.plain.title': 'How to make the data better',
   'ass.plain.help': 'Each strip reads left to right: what limits the analysis, why, and what to do about it. Nothing changes until you approve it.',
+  'ass.rec.dup.problem': '{n} rows are exact copies of other rows ({share} of the data).',
+  'ass.rec.dup.reason': 'Removing the copies is safe: they add nothing new but are counted twice, and the consistency score goes from {before} to {after}.',
+  'ass.rec.more.problem': 'The results would still get better with more data.',
+  'ass.rec.more.reason': 'They still improved every time data was added: {pct} more data of the same kind should improve them by about {gain} points.',
+  'ass.rec.more.thin': 'Most useful: data from the operating modes with few examples ({list}).',
+  'ass.rec.more.thinOnly': 'Some operating modes have only a few examples ({list}); more data from them lets the analysis cover them too.',
+  'ass.rec.drop.problem.signal': 'Sensor {list} makes the data less reliable.',
+  'ass.rec.drop.problem.group': 'Group {list} holds mostly unreliable data.',
+  'ass.rec.drop.problem.range': 'Rows {a}–{b} contain failed checks.',
+  'ass.rec.drop.reason': 'Leaving them out raises the data-quality score from {before} to {after}.',
+  'ass.alreadyApplied': 'This suggestion was already applied.',
 };
 const ta = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [x, y] of Object.entries(vars || {})) v = v.replaceAll(`{${x}}`, String(y)); } return v; };
 function metricName(m) { const k = 'ass.metric.' + m; return t(k) === k ? String(m || '').replace(/_/g, ' ') : t(k); }
@@ -79,6 +90,44 @@ function verdictCard(title, v, { gainLabel } = {}) {
   if ((v.evidence_ids || []).length) box.append(el('div', { class: 'row small' }, el('span', { class: 'dim', text: t('common.evidence') + ':' }), evChips(v.evidence_ids)));
   return box;
 }
+/** The action of a suggestion in plain words: its name and what it is about (sensors, groups, rows), never the raw
+    parameters ("(unit group)"). */
+function plainAction(a) {
+  if (!a || typeof a === 'string') return actionLabel(a);
+  const p = a.params || {};
+  const base = actionLabel({ type: a.type });
+  const list = (v) => [].concat(v || []).join(', ');
+  if ((p.signals || []).length) return `${base}: ${list(p.signals)}`;
+  if ((p.group_ids || []).length) return `${base}: ${list(p.group_ids)}`;
+  if (p.row_start !== undefined && p.row_end !== undefined) return `${base}: ${fmt.int(p.row_start)}–${fmt.int(p.row_end)}`;
+  return base;
+}
+/** Problem and reason of a suggestion from its structured effect, in the user's language and with the numbers in
+    words (the assessor's own English sentence stays in the technical part). null: no template fits, use the sentence. */
+function recPlain(rec) {
+  const a = rec.action || {}; const p = a.params || {}; const eff = rec.effect || {};
+  const dq = (eff.dq_scores || {});
+  const pts = (x) => Math.round(Math.abs(Number(x) || 0) * 100);
+  if (a.type === 'drop_duplicates' && eff.rows_removed) {
+    const c = dq.consistency || {};
+    return { problem: ta('ass.rec.dup.problem', { n: fmt.int(eff.rows_removed), share: fmt.pct(eff.fraction || 0, 2) }),
+      reason: c.before !== undefined ? ta('ass.rec.dup.reason', { before: fmt.pct(c.before), after: fmt.pct(c.after) }) : null };
+  }
+  if (a.type === 'add_more_like') {
+    const f = eff.fitness; const thin = ((eff.coverage || {}).thin_regimes || []).join(', ');
+    if (f && f.estimated_gain !== undefined) {
+      return { problem: ta('ass.rec.more.problem'), reason: [ta('ass.rec.more.reason', { pct: fmt.pct(f.added_fraction || 0.5), gain: fmt.int(Math.max(1, pts(f.estimated_gain))) }), thin ? ta('ass.rec.more.thin', { list: thin }) : ''].filter(Boolean).join(' ') };
+    }
+    if (thin) return { problem: ta('ass.rec.more.problem'), reason: ta('ass.rec.more.thinOnly', { list: thin }) };
+    return null;
+  }
+  const o = dq.overall;
+  const why = o && o.before !== undefined ? ta('ass.rec.drop.reason', { before: fmt.pct(o.before), after: fmt.pct(o.after) }) : null;
+  if (a.type === 'drop_signal' && (p.signals || []).length) return { problem: ta('ass.rec.drop.problem.signal', { list: [].concat(p.signals).join(', ') }), reason: why };
+  if (a.type === 'drop_group' && (p.group_ids || []).length) return { problem: ta('ass.rec.drop.problem.group', { list: [].concat(p.group_ids).join(', ') }), reason: why };
+  if (a.type === 'drop_range' && p.row_start !== undefined) return { problem: ta('ass.rec.drop.problem.range', { a: fmt.int(p.row_start), b: fmt.int(p.row_end) }), reason: why };
+  return null;
+}
 function effectSummary(eff) {
   if (!eff) return null;
   const parts = [];
@@ -107,25 +156,38 @@ export async function render(main) {
   if (!r.ok || !raw.available) { view.append(r.unavailable ? unavailableNote(r) : el('div', { class: 'notice', text: t('common.notYet') })); }
   const a = normalize(raw);
 
-  /** Apply a recommendation after the person confirmed it (the button of a strip and of the list below). */
+  /** Apply a recommendation after the person confirmed it. Every Apply button of that suggestion (its strip and the
+      list below) is switched off afterwards, and the server never applies a suggestion twice. */
   const applyRec = async (rec, onDone) => {
     if (!(await confirmDialog(t('ass.applyConfirm', { action: rec.actionLabel })))) return;
     const rr = await runApi('/assessor/apply', { method: 'POST', body: { action: rec.id, actor_name: actorName(), role: actorRole() } });
-    if (rr.ok) { rec.status = 'approved'; if (onDone) onDone(); toast(t('decision.recorded', { seq: rr.data.log_seq }), 'ok'); } else toast(errText(rr), 'fail');
+    if (!rr.ok) { toast(errText(rr), 'fail'); return; }
+    rec.status = rr.data.already_applied ? 'applied' : 'approved';
+    page.querySelectorAll('button[data-rec]').forEach((b) => { if (b.dataset.rec === rec.id) b.disabled = true; });
+    if (rec.repaint) rec.repaint();
+    if (onDone) onDone();
+    toast(rr.data.already_applied ? ta('ass.alreadyApplied') : t('decision.recorded', { seq: rr.data.log_seq }), 'ok');
   };
-  // ---- round 5: every suggestion as problem -> reason -> answer, above the technical part (Basic mode: the first three).
-  // The generated text reads "<finding>; <what removing / adding it does>": the finding is the problem, the rest the reason.
+  // ---- round 5: every suggestion as problem -> reason -> answer, above the technical part (Basic mode: the first one,
+  // as a short strip). Problem and reason come from the suggestion's numbers in the user's language; a suggestion no
+  // template fits falls back to the assessor's sentence: "<finding>; <what removing / adding it does>".
   if (a.recs.length) {
-    const recHost = el('section', { class: 'viz-host ass-recs', dataset: { briefSection: 'recommendations' } }, el('h2', { class: 'viz-title', text: ta('ass.plain.title') }), el('p', { class: 'viz-help', text: ta('ass.plain.help') }));
+    const full = roleAllows('operator');
+    const recHost = el('section', { class: 'viz-host ass-recs', dataset: { briefSection: 'recommendations' } }, el('h2', { class: 'viz-title', text: ta('ass.plain.title') }), full ? el('p', { class: 'viz-help', text: ta('ass.plain.help') }) : null);
     page.insertBefore(recHost, tech);
-    for (const rec of a.recs.slice(0, roleAllows('operator') ? 6 : 3)) {
+    const shown = a.recs.slice(0, full ? 6 : 1);
+    for (const rec of shown) {
       const text = rec.text || rec.actionLabel;
       const cut = text.indexOf('; ');
-      const why = cut > 0 ? capFirst(text.slice(cut + 2).trim()) : rec.rationale;
-      const btn = rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', disabled: rec.status === 'approved' || rec.status === 'applied', onClick: () => applyRec(rec, () => { btn.disabled = true; }) }, t('ass.applyAfterApproval'));
-      recHost.append(praStrip({ verdict: 'attention', label: [el('span', { class: 'dim', text: rec.id }), ' · ', conf(rec.confidence, { words: true })], problem: linkifyRefs(capFirst(cut > 0 ? text.slice(0, cut).trim() : text)), reason: why ? linkifyRefs(why) : null,
-        reasonMore: cut > 0 && rec.rationale ? linkifyRefs(rec.rationale) : null, fix: [rec.actionLabel], extra: [effectSummary(rec.effect), el('div', { class: 'pra-btns' }, btn)] }));
+      const plain = recPlain(rec);
+      const problem = plain ? plain.problem : capFirst(cut > 0 ? text.slice(0, cut).trim() : text);
+      const why = plain ? plain.reason : cut > 0 ? capFirst(text.slice(cut + 2).trim()) : rec.rationale;
+      const btn = rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', dataset: { rec: rec.id }, disabled: rec.status === 'approved' || rec.status === 'applied', onClick: () => applyRec(rec) }, t('ass.applyAfterApproval'));
+      recHost.append(praStrip({ verdict: 'attention', label: [el('span', { class: 'dim', text: rec.id }), ' · ', conf(rec.confidence, { words: true })], problem: full ? linkifyRefs(problem) : problem, reason: why ? (full ? linkifyRefs(why) : why) : null,
+        reasonMore: full && cut > 0 && rec.rationale ? linkifyRefs(rec.rationale) : null, fix: [plainAction(rec.action)],   // the assessor's own sentence: in the list below
+        extra: [full ? effectSummary(rec.effect) : null, el('div', { class: 'pra-btns' }, btn)], compact: !full }));
     }
+    if (!full) { const more = basicMore(a.recs.length - shown.length); if (more) recHost.append(more); }
   }
 
   // ---- headline: verdict cards + combined score
@@ -190,13 +252,14 @@ export async function render(main) {
     const status = el('span', { class: 'small' });
     const setStatus = () => { clear(status); if (rec.status === 'approved' || rec.status === 'applied') status.append(infStatus(null, { human: 'accepted' }), ' ', t('ass.applied')); else if (rec.status === 'dismissed') status.append(infStatus(null, { human: 'dismissed' })); };
     setStatus();
+    rec.repaint = setStatus;                               // an Apply on the strip above updates this line too
     row.append(el('div', { class: 'recbody' },
       el('div', { class: 'act' }, el('span', { class: 'dim small', text: rec.id + ' ' }), rec.actionLabel),
       el('div', { class: 'why prose' }, linkifyRefs(rec.text)),
       rec.rationale ? el('div', { class: 'why small' }, linkifyRefs(rec.rationale)) : null,
       effectSummary(rec.effect),
       el('div', { class: 'row small muted', style: { marginTop: '4px' } }, conf(rec.confidence, { words: true }), rec.gain !== undefined && rec.gain !== null ? chip(`${t('ass.expectedGain')} ${fmt.pp(rec.gain)}`) : null, evidenceButton(rec.evidence_ids), status)),
-      el('div', { class: 'decisions' }, rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', disabled: rec.status === 'approved' || rec.status === 'applied', onClick: () => applyRec(rec, setStatus) }, t('ass.applyAfterApproval'))));
+      el('div', { class: 'decisions' }, rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', dataset: { rec: rec.id }, disabled: rec.status === 'approved' || rec.status === 'applied', onClick: () => applyRec(rec) }, t('ass.applyAfterApproval'))));
     rs.body.append(row);
   }
   if (roleAllows('engineer') && a.evaluations.length) rs.body.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('ass.evaluations') }), el('ul', { class: 'list small prose' }, a.evaluations.map((e) => el('li', {}, chip(e.recommendation || '', e.recommendation === 'recommend' ? 'ok' : e.recommendation === 'reject' ? 'fail' : ''), ' ', el('b', { text: actionLabel(e.action) }), ': ', linkifyRefs(reason(e.rationale || '')), e.seconds ? el('span', { class: 'dim', text: ` (${fmt.sec(e.seconds)})` }) : null))));

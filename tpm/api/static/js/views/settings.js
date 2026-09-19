@@ -22,12 +22,14 @@ const TABS = ['person', 'display', 'models', 'dataflow', 'log'];
 export const ZOOM_STEPS = [0.85, 0.95, 1, 1.1, 1.25, 1.4, 1.6];
 export function applyZoom(z) {
   const zoom = Number(z) || 1;
+  const changed = zoom !== state.zoom;
   state.zoom = zoom;
   store.set('zoom', zoom);
   document.body.style.zoom = String(zoom);                    // Chromium / Edge / Firefox 126+: layout re-flows
-  document.documentElement.style.setProperty('--zoom', String(zoom));
+  document.documentElement.style.setProperty('--zoom', String(zoom));   // viewport heights and charts undo the zoom (styles.css)
   document.documentElement.setAttribute('data-zoom', zoom === 1 ? '1' : (zoom > 1 ? 'large' : 'small'));
-  setTimeout(() => window.dispatchEvent(new Event('resize')), 50);  // Plotly charts follow the new width
+  if (changed) bus.emit('zoom.changed', zoom);                // charts are drawn again with their text scaled (charts.js)
+  setTimeout(() => window.dispatchEvent(new Event('resize')), 50);  // the top bar height and the chart widths follow
 }
 export function stepZoom(dir) {
   const i = ZOOM_STEPS.indexOf(state.zoom || 1);

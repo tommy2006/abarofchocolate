@@ -31,7 +31,8 @@ def tpm_data():
 
 
 datas = tpm_data()
-datas += [(str(ROOT / "config" / "settings.yaml"), "config")]
+# every config file the app reads: settings.yaml, failure_signatures.yaml (live monitor), rules.example.md (demo rules)
+datas += [(str(p), "config") for p in (ROOT / "config").iterdir() if p.is_file() and p.suffix in (".yaml", ".yml", ".md")]
 datas += [(str(p), "samples") for p in (ROOT / "samples").iterdir() if p.is_file()]
 datas += [(str(p), "samples/labels") for p in (ROOT / "samples" / "labels").glob("*") if p.is_file()]
 datas += [(str(ROOT / ".env.example"), "."), (str(HERE / "norrin_tpm.ico"), "packaging/windows")]

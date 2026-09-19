@@ -438,3 +438,65 @@ def test_stopping_the_source_takes_the_alarm_card_away(monitor, tmp_path):
     monitor.stop_source("Ada")
     s = monitor.snapshot()
     assert s["alarm"] is None and s["verdict"]["key"] == "verdict.stopped" and not s["running"]
+
+
+def _sig_row(id_, status, score, *, generic=False, covered_by=None, sensors=("xmeas_1", "xmeas_4", "xmv_3")):
+    """One evaluated signature row as signatures.evaluate() returns it."""
+    return {"id": id_, "fault": None if generic else 1, "name": id_, "name_i18n": {}, "columns": [] if generic else list(sensors), "generic": generic,
+            "pattern": "mean_shift", "confidence": "documented", "visible": True, "suggestion": "Check the A feed", "suggestion_i18n": {}, "note": "",
+            "source": "test", "status": status, "score": score, "scores": [score], "direction": "rising", "projected": score, "matched": 1,
+            "n": len(sensors), "resolved": [{"column": s, "sensor": s, "ind": 0.6, "z": 3.0, "how": {"key": "sig.how.shift.up", "vars": {"z": "3.0"}}} for s in sensors],
+            "missing": [], "since": "t0", "partial": False, "covered_by": covered_by}
+
+
+def test_a_covered_generic_pattern_never_takes_the_cause_from_the_failure_type_that_explains_it(monitor):
+    """TE demo, the cycle before Fault 1 occurs: the plain mean shift on Fault 1's own sensors is already "occurring"
+    while Fault 1 itself is still "imminent" (rising). The alarm names Fault 1 ("drifting towards"), never "no known
+    failure type matches" next to a panel that says the generic row is explained by Fault 1."""
+    rows = [_sig_row("G-shift", "occurring", 0.67, generic=True, covered_by="F01"), _sig_row("F01", "imminent", 0.60)]
+    best, also = signatures.best_cause(rows)
+    assert best["id"] == "F01" and also == []
+    a = monitor._alarm("drift", [], [], [], rows, "2026-01-01T00:00:10")
+    assert a["kind"] == "occurring" and a["trip"]["key"] == "sig.towards" and a["trip"]["sig"] == "F01"
+    assert a["cause"]["sig"] == "F01" and a["cause"]["status"] == "imminent" and not a["cause"]["generic"]
+    assert a["suggestion"]["text"] == "Check the A feed" and a["id"].startswith("occurring:F01:")
+    # Fault 1 confirmed a cycle later: the plain "occurring" card with a new alarm id, so the user is told again
+    rows = [_sig_row("G-shift", "occurring", 0.8, generic=True, covered_by="F01"), _sig_row("F01", "occurring", 0.9)]
+    b = monitor._alarm("drift", [], [], [], rows, "2026-01-01T00:00:20")
+    assert b["trip"]["key"] == "sig.occurring" and b["id"] != a["id"] and b["cause"]["sig"] == "F01"
+    # a generic pattern that nothing explains is still the cause, and a plain early warning stays one
+    assert signatures.best_cause([_sig_row("G-shift", "occurring", 0.7, generic=True)])[0]["id"] == "G-shift"
+    c = monitor._alarm("watch", [], [], [], [_sig_row("F01", "imminent", 0.4)], "2026-01-01T00:00:30")
+    assert c["kind"] == "imminent" and c["trip"]["key"] == "sig.imminent"
+    # the drift alarm has tripped already (percent thresholds) when Fault 1 becomes imminent: the card stays an alarm
+    # ("drifting towards Fault 1") instead of stepping back from "Alarm" to "Early warning"
+    d = monitor._alarm("drift", [], [], [], [_sig_row("F01", "imminent", 0.4)], "2026-01-01T00:00:40")
+    assert d["kind"] == "occurring" and d["trip"]["key"] == "sig.towards" and d["cause"]["status"] == "imminent"
+
+
+def test_the_alarm_endpoint_is_small_and_follows_the_card(client):
+    """GET /api/live/alarm: what the app polls on every page (a toast and a dot on rail item 7)."""
+    r = client.get("/api/live/alarm")
+    assert r.status_code == 200 and r.json() == {"running": False, "source": "none", "alarm": None}
+    m = client.app.state.live
+    m.state["alarm"] = {"id": "occurring:F01:t", "kind": "occurring"}
+    assert client.get("/api/live/alarm").json()["alarm"]["id"] == "occurring:F01:t"
+
+
+def test_the_source_status_line_is_sent_as_translatable_messages(monitor, tmp_path):
+    """The page translates the status line of the data source (fi / sv showed the server's English before)."""
+    monitor.start_demo({"rate": 50, "interval": 2, "baseline_cycles": 2, "scenario": "te"})
+    s = monitor.snapshot()["source"]
+    assert s["name_msg"]["key"] == "src.name.te" and [m["key"] for m in s["detail_msg"]] == ["src.demo.slow"]
+    assert s["detail"] == s["detail_msg"][0]["text"] and "xmeas_1" in s["detail"]
+    monitor.stop_source("Ada")
+    s = monitor.snapshot()["source"]
+    assert s["kind"] == "none" and s["name_msg"] is None and s["detail_msg"][0]["key"] == "src.stopped"
+    src = tmp_path / "te.csv"
+    frame(60, 3).to_csv(src, index=False)
+    monitor.start_simulation({"path": str(src), "rate": 500, "interval": 1, "baseline_cycles": 1})
+    s = monitor.snapshot()["source"]
+    assert s["detail_msg"][0]["key"].startswith("src.replay") and s["detail_msg"][0]["vars"]["file"] == "te.csv"
+    monitor.stop_source()
+    live = (STATIC / "js" / "views" / "live.js").read_text(encoding="utf-8")
+    assert "s.detail_msg.map(tm).join(' ')" in live and "s.name_msg ? tm(s.name_msg) : s.name" in live

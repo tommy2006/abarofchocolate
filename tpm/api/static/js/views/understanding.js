@@ -1,7 +1,7 @@
 /* View 1: what the system understood — signal catalog with evidence, hypotheses, role override,
    correlation heatmap, clusters, dataset assumptions and what remains uncertain. */
 import { state, t, el, clear, runApi, fmt, conf, infStatus, chip, section, table, viewHead, needRun, empty, evidenceButton, fetchEvidence, evidenceList, decisionBar, postDecision, hiddenHint, kv, roleAllows, bus, meter, unavailableNote, navigate } from '../core.js';
-import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praStrip, cappedList, sensorKind, sensorKindColor, SENSOR_KINDS, strongestEdges, drawNetwork } from '../charts.js';
+import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praStrip, cappedList, sensorKind, sensorKindColor, SENSOR_KINDS, strongestEdges, drawNetwork, basicMore } from '../charts.js';
 import { openChat, signalContext } from '../chat.js';
 import { plainBox } from '../plain.js';
 import { renameBar, loadSignalNames, renameSignalDialog } from '../rename.js';
@@ -18,8 +18,46 @@ const FB = {
   'und.unitPlaceholder': 'unit, e.g. kPa',
   'und.useHeader': 'Use the header as the name',
   'und.nameSaved': 'Saved and logged.',
+  // the profile's guesses and reasons in plain words (tpm/profile/roles.py writes them in engine terms)
+  'und.guess.lead': 'Probably {guess}',
+  'und.guess.flow': 'a flow (its values change fast and are noisy)',
+  'und.guess.pressure': 'a pressure or a level (its values change at a medium pace)',
+  'und.guess.temperature': 'a temperature (its values change slowly and smoothly)',
+  'und.guess.analyzer': 'an analyser or lab value (updated only from time to time)',
+  'und.guess.valve': 'a valve or a controller output (set in steps)',
+  'und.guess.power': 'a power or a speed',
+  'und.unitop.cluster': 'moves together with the other sensors of group {c}: probably the same part of the plant',
+  'und.why.steps': 'It changes in steps, like a valve or a set-point being moved.',
+  'und.why.steps100': 'It changes in steps and always stays between 0 and 100, like a valve position in percent.',
+  'und.why.held': 'Its value stays the same for about {n} readings and then jumps: it is updated only from time to time, like an analyser.',
+  'und.why.bounded': 'It changes smoothly but always stays between 0 and 100, like a controller output in percent.',
+  'und.why.smooth': 'It changes slowly and smoothly, like a temperature.',
+  'und.why.noisy': 'It jumps a lot from one reading to the next compared with its range, like a flow.',
+  'und.why.medium': 'It is neither very smooth nor very noisy, like a pressure or a level.',
+  'und.why.llm': 'The local AI model guessed it from how the values behave; it never saw the column names.',
 };
 const tt = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [a, b] of Object.entries(vars || {})) v = v.replaceAll(`{${a}}`, b); } return v; };
+/** An instrument guess in plain words: "Probably a flow (its values change fast and are noisy)"; '' without a guess. */
+function guessWords(hypothesis, kind) {
+  if (!hypothesis || hypothesis === 'unknown') return '';
+  return tt('und.guess.lead', { guess: FB['und.guess.' + kind] ? tt('und.guess.' + kind) : hypothesis });
+}
+/** "shared unit operation of cluster C02" -> "moves together with the other sensors of group C02: ..." */
+function unitOpWords(h) { const m = /cluster\s+(\S+)/i.exec(String(h || '')); return m ? tt('und.unitop.cluster', { c: m[1] }) : String(h || ''); }
+/** The reason of a guess in plain words; a reason written by a language model (free text) stays as it is. */
+function whyWords(text) {
+  const s = String(text || '');
+  let m;
+  if (/^step-like signal bounded to 0-100/.test(s)) return tt('und.why.steps100');
+  if (/^step-like signal/.test(s)) return tt('und.why.steps');
+  if ((m = /^sample-and-hold with period ~([\d.]+)/.exec(s))) return tt('und.why.held', { n: Math.round(Number(m[1])) || m[1] });
+  if (/^continuous but bounded to 0-100/.test(s)) return tt('und.why.bounded');
+  if (/^low noise .*very high autocorrelation/.test(s)) return tt('und.why.smooth');
+  if (/^high noise level .*relative to its variance/.test(s)) return tt('und.why.noisy');
+  if (/^noise level [\d.]+, autocorrelation [\d.-]+$/.test(s)) return tt('und.why.medium');
+  if (/^language-model hypothesis/.test(s)) return tt('und.why.llm');
+  return s;
+}
 
 const ROLES = ['continuous_measured', 'actuator_like', 'held_sampled', 'constant', 'derived_redundant', 'counter', 'timestamp', 'categorical', 'text', 'identifier', 'unknown'];
 
@@ -108,7 +146,7 @@ export async function render(main, params = {}) {
     plainHost.append(vizBox(vt('und.net.title'), vt('und.net.help'), netNode, note));
     if (!edges.length) netNode.replaceChildren(empty(vt('und.net.none')));
     else {
-      const nodes = signals.map((s) => ({ id: s.id, label: fileName(s) ? `${String(fileName(s)).slice(0, 14)}` : s.id, kind: kindOf(s), cluster: s.cluster_id, hover: `<b>${fullName(s)}</b><br>${kindLabel(kindOf(s))}${s.instrument_hypothesis ? ' — ' + s.instrument_hypothesis : ''}${s.cluster_id ? '<br>' + t('und.cluster') + ' ' + s.cluster_id : ''}` }));
+      const nodes = signals.map((s) => ({ id: s.id, label: fileName(s) ? `${String(fileName(s)).slice(0, 14)}` : s.id, kind: kindOf(s), cluster: s.cluster_id, hover: `<b>${fullName(s)}</b><br>${guessWords(s.instrument_hypothesis, kindOf(s)) || kindLabel(kindOf(s))}${s.cluster_id ? '<br>' + t('und.cluster') + ' ' + s.cluster_id : ''}` }));
       requestAnimationFrame(() => { drawNetwork(netNode, nodes, edges, { height: signals.length > 30 ? 600 : 460, onClick: openSignal, kindLabel }); (view._charts = view._charts || []).push(netNode); });
     }
   }
@@ -122,12 +160,12 @@ export async function render(main, params = {}) {
   /** One sensor: what it probably measures, how sure, why, part of the plant; accept / question / correct the guess. */
   const card = (s) => {
     const kd = kindOf(s); const inf = infBySubject[s.id]; const c = Math.max(0, Math.min(1, Number(s.instrument_confidence ?? (inf && inf.confidence) ?? 0)));
-    const why = inf && inf.reasoning ? inf.reasoning : (SP[s.id] || '');
+    const why = inf && inf.reasoning ? whyWords(inf.reasoning) : (SP[s.id] || '');
     return el('div', { class: 'sensor-card' + (s.excluded ? ' excluded' : ''), style: { borderTopColor: sensorKindColor(kd) }, dataset: { signal: s.id } },
       el('div', { class: 'sensor-card-head' }, el('span', { class: 'sensor-dot', style: { background: sensorKindColor(kd) }, 'aria-hidden': 'true' }), el('b', { text: fullName(s) }), el('span', { class: 'chip solid', text: kindLabel(kd) })),
-      el('div', { class: 'sensor-guess', text: guessOf(s) || vt('und.types.noGuess') }),
+      el('div', { class: 'sensor-guess', text: guessWords(guessOf(s), kd) || vt('und.types.noGuess') }),
       el('div', { class: 'sensor-conf', title: vt('und.types.confidence') }, el('span', { class: 'small muted', text: vt('und.types.confidence') }), el('span', { class: 'bar' }, el('i', { style: { width: c * 100 + '%', background: c < 0.4 ? 'var(--fail)' : c < 0.65 ? 'var(--warn)' : 'var(--ok)' } })), el('span', { class: 'small', text: fmt.pct(c) })),
-      s.unit_operation_hypothesis ? el('div', { class: 'small' }, el('span', { class: 'muted', text: vt('und.types.unitop') + ': ' }), s.unit_operation_hypothesis, s.unit_operation_confidence !== null && s.unit_operation_confidence !== undefined ? el('span', { class: 'dim', text: ` (${fmt.pct(s.unit_operation_confidence)})` }) : null) : null,
+      s.unit_operation_hypothesis ? el('div', { class: 'small' }, el('span', { class: 'muted', text: vt('und.types.unitop') + ': ' }), unitOpWords(s.unit_operation_hypothesis), s.unit_operation_confidence !== null && s.unit_operation_confidence !== undefined ? el('span', { class: 'dim', text: ` (${fmt.pct(s.unit_operation_confidence)})` }) : null) : null,
       why ? el('div', { class: 'small sensor-why' }, el('span', { class: 'muted', text: vt('und.types.why') + ': ' }), why) : null,
       el('div', { class: 'sensor-actions' }, inf ? guessDecision(inf) : null, basic ? nameButton(s) : el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => openSignal(s.id) }, vt('und.types.details'))));
   };
@@ -136,9 +174,12 @@ export async function render(main, params = {}) {
   if (!roleAllows('operator')) {
     // basic mode: the three sensors the system is least sure about, as problem -> reason -> answer, with the two
     // things a person can do right there: name the sensor, or accept / question / correct the guess
-    const unsure = signals.filter((s) => !s.excluded && !s.display_name && guessOf(s) && s.id !== params.signal).sort((a, b) => (a.instrument_confidence ?? 0) - (b.instrument_confidence ?? 0)).slice(0, 3);
-    for (const s of unsure) plainHost.append(praStrip({ verdict: 'attention', problem: vt('und.unsure.problem', { name: fullName(s) }), reason: vt('und.unsure.reason', { guess: guessOf(s) || vt('und.types.noGuess'), pct: fmt.pct(s.instrument_confidence ?? 0) }), fix: [vt('und.unsure.fix1'), vt('und.unsure.fix2')],
-      extra: [el('div', { class: 'pra-btns' }, nameButton(s)), infBySubject[s.id] ? el('div', { class: 'brief-decide' }, guessDecision(infBySubject[s.id])) : null] }));
+    // (the one it is least sure about, as a short strip; how many more Operator mode lists)
+    const allUnsure = signals.filter((s) => !s.excluded && !s.display_name && guessOf(s) && s.id !== params.signal).sort((a, b) => (a.instrument_confidence ?? 0) - (b.instrument_confidence ?? 0));
+    const unsure = allUnsure.slice(0, 1);
+    for (const s of unsure) plainHost.append(praStrip({ verdict: 'attention', problem: vt('und.unsure.problem', { name: fullName(s) }), reason: vt('und.unsure.reason', { guess: (FB['und.guess.' + kindOf(s)] ? tt('und.guess.' + kindOf(s)) : guessOf(s)) || vt('und.types.noGuess'), pct: fmt.pct(s.instrument_confidence ?? 0) }), fix: [vt('und.unsure.fix1'), vt('und.unsure.fix2')],
+      extra: [el('div', { class: 'pra-btns' }, nameButton(s)), infBySubject[s.id] ? el('div', { class: 'brief-decide' }, guessDecision(infBySubject[s.id])) : null], compact: true }));
+    const more = basicMore(allUnsure.length - unsure.length); if (more) plainHost.append(more);
   } else if (signals.length) {
     // operator / engineer: one card per sensor, filter by kind, capped with "show more"
     const cardsHost = el('div');

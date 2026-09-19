@@ -43,12 +43,34 @@ const FB = {
   'live.alarm.toast.genericImminent': 'Warning: the process is starting to drift',
   'live.event.generic.occurring': 'The process is drifting: {name} (match {score}%) on {sensors}.',
   'live.event.generic.imminent': 'The process is starting to drift: {name} (match {score}%) on {sensors}.',
+  'live.alarm.trip.towards': 'The process is drifting towards a known failure type: {name}',
+  'live.alarm.toast.towards': 'ALARM: drifting towards {name}',
 };
 const tx = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [a, b] of Object.entries(vars || {})) v = v.replaceAll(`{${a}}`, String(b)); } return v; };
 const NOTICE_KIND = { ok: 'ok', watch: 'warn', drift: 'fail', quality: 'warn', untrusted: 'fail', learn: '', wait: '' };
 const CHIP_KIND = { ok: 'ok', watch: 'warn', alarm: 'fail', dead: 'fail', missing: 'fail' };
 const SIG_KIND = { quiet: '', imminent: 'warn', occurring: 'fail', na: '', invisible: '' };
 const LEVEL_KIND = ['', 'warn', 'fail'];
+
+// ---------------------------------------------------------------- alarm toasts (once per alarm, remembered across pages)
+/** The toast of an alarm card. Used by this page and by the app-wide watcher (app.js), so an alarm reaches the user on
+    every page. */
+export function alarmToast(a) {
+  const trip = a.trip || {};
+  if (a.kind === 'drift') return t('live.alarm.toast.drift');
+  if (a.kind === 'quality') return t('live.alarm.toast.quality');
+  if (a.cause && a.cause.generic) return a.kind === 'imminent' ? tx('live.alarm.toast.genericImminent') : t('live.alarm.toast.drift');
+  if (trip.key === 'sig.towards') return tx('live.alarm.toast.towards', { name: sigName(trip) });
+  return t('live.alarm.toast.' + a.kind, { name: sigName(trip) });
+}
+/** Toast a new alarm once (the id changes when the alarm or its cause changes); returns true when it was new. */
+export function noteAlarm(a) {
+  const id = a ? a.id : '';
+  if (id === store.get('live.lastAlarm', '')) return false;
+  store.set('live.lastAlarm', id);
+  if (a) toast(alarmToast(a), a.kind === 'imminent' || a.kind === 'quality' ? 'warn' : 'fail');
+  return !!a;
+}
 
 export async function render(main, params) {
   const view = el('div', { class: 'view' });
@@ -82,12 +104,13 @@ export async function render(main, params) {
     const bits = [];
     if (s.kind === 'none') bits.push(el('span', { class: 'muted', text: t('live.src.none') }));
     else {
-      bits.push(chip(t('live.src.' + s.kind), 'info'), ' ', el('b', { text: s.name }), ' ');
+      bits.push(chip(t('live.src.' + s.kind), 'info'), ' ', el('b', { text: s.name_msg ? tm(s.name_msg) : s.name }), ' ');
       bits.push(el('span', { class: 'small dim', text: t('live.status.rows', { n: fmt.int(s.rows) }) + ' · ' + t('live.status.every', { every: fmt.dur(snap.cfg.interval), rows: fmt.int(snap.expected_rows) }) + ' · ' + (!snap.running ? tx('live.status.finished') : snap.baseline_ready ? t('live.status.monitoring') : t('live.status.learning', { done: snap.learning, total: snap.cfg.baseline_cycles })) }));
       if (snap.next_at && snap.running) bits.push(el('span', { class: 'small dim', text: ' · ' + t('live.status.next', { time: fmt.time(snap.next_at) }) }));
     }
     statusBox.append(el('div', {}, bits));
-    if (s.detail && s.kind !== 'none') statusBox.append(el('div', { class: 'small dim', text: s.detail }));
+    // the server sends the status line as message keys (translated here); its English text is the fallback
+    if (s.detail && s.kind !== 'none') statusBox.append(el('div', { class: 'small dim', text: (s.detail_msg || []).length ? s.detail_msg.map(tm).join(' ') : s.detail }));
     if (s.error) statusBox.append(el('div', { class: 'notice fail small', text: s.error }));
     if (settingsUI) settingsUI.stop.hidden = s.kind === 'none';
   }
@@ -105,6 +128,7 @@ export async function render(main, params) {
     // 1. ALARM: what tripped, when
     const generic = !!(cause.sig && cause.generic);
     const tripText = trip.key === 'drift' ? t('live.alarm.trip.drift', { n: trip.n }) : trip.key === 'quality' ? t('live.alarm.trip.quality', { n: trip.n })
+      : trip.key === 'sig.towards' ? tx('live.alarm.trip.towards', { name: sigName(trip) })
       : generic ? tx(a.kind === 'imminent' ? 'live.alarm.trip.genericImminent' : 'live.alarm.trip.genericOccurring', { name: bareName(trip) }) : t('live.alarm.trip.' + a.kind, { name: sigName(trip) });
     const alarmStep = step(1, 'alarm', el('b', { text: tripText }), el('span', { class: 'sure', text: t('live.alarm.since', { time: fmt.time(a.since) }) + (trip.score !== undefined ? ' · ' + t('live.alarm.match', { score: pct(trip.score) }) : '') }));
 
@@ -449,21 +473,7 @@ export async function render(main, params) {
     if (r.ok) { toast(t('live.sim.demoStarted'), 'ok'); showTab('monitor'); await poll(true); } else toast(errText(r), 'fail');
   }
 
-  // ---------------------------------------------------------------- alarm toasts (once per alarm, remembered across page changes)
-  function alarmToast(a) {
-    const trip = a.trip || {};
-    if (a.kind === 'drift') return t('live.alarm.toast.drift');
-    if (a.kind === 'quality') return t('live.alarm.toast.quality');
-    if (a.cause && a.cause.generic) return a.kind === 'imminent' ? tx('live.alarm.toast.genericImminent') : t('live.alarm.toast.drift');
-    return t('live.alarm.toast.' + a.kind, { name: sigName(trip) });
-  }
-  function checkAlarm() {
-    const a = snap && snap.alarm;
-    const id = a ? a.id : '';
-    if (id === store.get('live.lastAlarm', '')) return;
-    store.set('live.lastAlarm', id);
-    if (a) toast(alarmToast(a), a.kind === 'imminent' || a.kind === 'quality' ? 'warn' : 'fail');
-  }
+  const checkAlarm = () => noteAlarm(snap && snap.alarm);
 
   // ---------------------------------------------------------------- tabs + polling
   function paintTabs() {
