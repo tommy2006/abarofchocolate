@@ -16,6 +16,7 @@ import re as _re
 import time
 from typing import Any, Optional
 
+from ..quality._common import is_problem
 from ..quality.trust import signal_trust_summary
 from .actions import ACTION_TYPES, apply_action, assess_new_file, evaluate_action, parse_action
 from .coverage import regime_coverage
@@ -30,7 +31,7 @@ def _candidate_actions(ws: Any, settings: Any, dq: dict[str, Any], coverage: dic
     cands: list[dict[str, Any]] = []
     checks = ws.checks()
     verdicts = ws.trust()
-    if any(c.check_type == "duplicate_rows" and c.status != "pass" for c in checks):
+    if any(c.check_type == "duplicate_rows" and is_problem(c.status) for c in checks):
         cands.append({"type": "drop_duplicates", "params": {}, "source": "auto"})
     n_batches = max(1, len(verdicts))
     per_signal = signal_trust_summary(verdicts)
@@ -139,7 +140,7 @@ def run_assess(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) -> 
     combined = round(sum(w * v for w, v in parts if v is not None) / wsum, 4) if wsum else None
     summary_text = f"Combined score {combined if combined is not None else 'n/a'} (fitness {fit_score if fit_score is not None else 'n/a'}, coverage {cov_score if cov_score is not None else 'n/a'}, data quality {dq['overall']}). More data: {'yes' if more['would_help'] else 'no' if more['would_help'] is False else 'unclear'}. Less data: {'yes' if less['would_help'] else 'no'}. {len(recommendations)} recommendation(s)."
     out = {
-        "dq_scores": {k: dq[k] for k in CATEGORIES + ["overall", "mean_trust", "n_untrusted_batches", "n_batches", "n_signals", "counts", "details", "worst_signals", "evidence_ids"]},
+        "dq_scores": {k: dq.get(k) for k in CATEGORIES + ["overall", "mean_trust", "n_untrusted_batches", "n_batches", "n_signals", "counts", "details", "worst_signals", "evidence_ids", "not_testable"]},
         "coverage": coverage, "fitness": fitness, "combined_score": combined, "weights": {"fitness": 0.4, "coverage": 0.3, "data_quality": 0.3},
         "recommendations": recommendations, "evaluations": evaluations, "more_data_verdict": more, "less_data_verdict": less,
         "summary": summary_text, "seconds": round(time.time() - t0, 2), "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -77,10 +77,10 @@ def build_suspicious_rows(ws, settings, flags: list[Flag], points_meta: Optional
             add_signal(e, sc.signal, m, sc.direction, sc.explanation.rstrip("."))
         e["strength"] = max(e["strength"], max(devs) if devs and max(devs) > 0 else 3.0 * float(f.score))
 
-    # ---- data-quality checks: out-of-range, impossible values, local spikes
+    # ---- data-quality checks: out-of-range, implausible and impossible values, local spikes
     for c in ws.read_jsonl("checks"):
         ct = c.get("check_type")
-        if ct not in ("out_of_range", "impossible_value", "local_spike") or c.get("status") == "pass":
+        if ct not in ("out_of_range", "plausibility", "impossible_value", "local_spike") or c.get("status") in ("pass", "not_testable"):
             continue
         sig = (c.get("signals") or [None])[0]
         vals = c.get("values") or {}
@@ -106,6 +106,8 @@ def build_suspicious_rows(ws, settings, flags: list[Flag], points_meta: Optional
                     expl = f"{sig} jumped {z:.0f} times the local noise {'upwards' if direction == 'up' else 'downwards' if direction == 'down' else 'away'} from its neighbours and came straight back"
                 elif ct == "impossible_value":
                     expl = f"{sig} held an impossible value (not a finite, plausible number)"
+                elif ct == "plausibility":
+                    expl = f"{sig} read a value outside its plausible range ({z:.0f} times its normal spread from its usual level)"
                 else:
                     expl = f"{sig} was {z:.0f} times its normal spread away from its usual level"
                 add_signal(e, sig, z, direction, expl)

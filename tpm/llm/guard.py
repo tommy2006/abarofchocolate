@@ -97,6 +97,9 @@ GENERIC_COLUMN_WORDS = {
     "time", "timestamp", "datetime", "date", "id", "index", "idx", "row", "rows", "sample", "samples", "run", "runs",
     "batch", "group", "label", "labels", "class", "target", "value", "values", "step", "cycle", "seq", "sequence",
     "status", "state", "mode", "type", "name", "unit", "units", "fault", "anomaly", "normal", "split", "fold", "set",
+    # "source" (the Tennessee-Eastman files have a meta column of that name): rewriting it inside sentences and keys
+    # turned the app's own fields narrative_source / source into "[column]" and dropped them
+    "source",
 }
 # category / label values that are everyday words of this domain: redacting them would only damage the code-written
 # sentences around them ("normal operation"), and they say nothing about a particular dataset
@@ -136,6 +139,10 @@ _DECIMAL_TOKEN_RE = re.compile(r"(?<![\w.])(?:\d+\.\d+|\.\d+)(?:[eE][-+]?\d+)?(?
 # word boundaries where "_" separates words too: a column name inside press_r__roll_mean is still found
 _LB = r"(?<![^\W_])"
 _LA = r"(?![^\W_])"
+# "name = number" / "name: number" inside a sentence; with ROW_TEXT_MIN_SIGNALS different signals it is a raw row written
+# as text ("row 3: S01=0.251, S02=3660, ..."), which rounding alone would let through
+_PAIR_RE = re.compile(r"(?<![\w\[])(\[column\]|[A-Za-z_][\w.-]{0,63})\s*[=:]\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
+ROW_TEXT_MIN_SIGNALS = 5
 
 KNOWN_VOCAB = {
     "continuous_measured", "actuator_like", "held_sampled", "constant", "derived_redundant", "counter", "timestamp",
@@ -458,6 +465,19 @@ class _Redactor:
     def find_long_number(self, s: str) -> bool:
         return any(_token_sig_digits(m.group(0)) > self.digits for m in _DECIMAL_TOKEN_RE.finditer(s))
 
+    def row_pairs(self, s: str) -> int:
+        """How many different signals appear as 'signal = number' (or 'signal: number') in one string. Signals are
+        aliases (S01), [column], or the dataset's original column names."""
+        if "=" not in s and ":" not in s:
+            return 0
+        seen: set[str] = set()
+        for m in _PAIR_RE.finditer(s):
+            ident = m.group(1)
+            low = ident.lower()
+            if ALIAS_RE.match(ident) or ident == REDACT_COLUMN or low in self._names_ci or ident in self._names_cs:
+                seen.add(low)
+        return len(seen)
+
     # ---- rewriting ----
     def _sub(self, pattern: Optional[re.Pattern], repl: Any, s: str, counter: str) -> str:
         if pattern is None:
@@ -538,9 +558,14 @@ class _Sanitizer:
             return node
         if isinstance(node, str):
             self.n_strings += 1
-            out = self.red.redact(node, numbers=not (in_rule or key in NUMBER_EXEMPT_KEYS))
+            numbers = not (in_rule or key in NUMBER_EXEMPT_KEYS)
+            out = self.red.redact(node, numbers=numbers)
             if self.cfg.forbid_categorical_values and (in_values or not _is_text_key(key)) and not (_is_known_string(node) or _is_known_string(out)):
                 raise _Drop(f"free-text/categorical value under key '{key or '?'}'")
+            if numbers and self.cfg.forbid_row_like_structures:
+                n_pairs = self.red.row_pairs(out)
+                if n_pairs >= ROW_TEXT_MIN_SIGNALS:
+                    raise _Drop(f"a raw row written as text ({n_pairs} signal=value pairs)")
             return out
         return node
 
@@ -724,6 +749,10 @@ def verify_invariant(sanitized: Any, amap: Optional[dict[str, str]], vocab: Opti
             out.append(f"data vocabulary value at {path}")
         if numbers and red.find_long_number(s):
             out.append(f"number with more than {digits} significant digits inside a string at {path}")
+        if numbers and cfg.forbid_row_like_structures:
+            n_pairs = red.row_pairs(s)
+            if n_pairs >= ROW_TEXT_MIN_SIGNALS:
+                out.append(f"row-like text ({n_pairs} signal=value pairs) at {path}")
 
     def walk(node: Any, key: Optional[str], path: str, in_rule: bool) -> None:
         if len(out) >= 20:
@@ -823,6 +852,16 @@ def _is_empty(v: Any) -> bool:
     return v is None or v == "" or v == [] or v == {}
 
 
+def _has_content(v: Any) -> bool:
+    """False for None, "", and lists / dicts that hold nothing else (at any depth): a payload stripped down to empty
+    skeletons ({"signals": [{}]}) has nothing useful left to send."""
+    if isinstance(v, dict):
+        return any(_has_content(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_has_content(x) for x in v)
+    return not (v is None or v == "")
+
+
 def check(payload: dict[str, Any], settings: Settings, strict: Optional[bool] = None, ws: Any = None) -> GuardResult:
     """Sanitise `payload` for an external model and decide whether the result may leave. Never raises.
     ws (optional) gives the guard the run's column names, source file name and text-column values to redact."""
@@ -860,7 +899,7 @@ def check(payload: dict[str, Any], settings: Settings, strict: Optional[bool] = 
         amap.update(_collect_alias_map(sanitized))
         sanitized = _strip_names(sanitized, amap, notes)
         if amap:
-            notes.append(f"aliased {len([a for a in amap.values() if a != REDACT_COLUMN])} original column names")
+            notes.append(f"alias map of {len([a for a in amap.values() if a != REDACT_COLUMN])} original column names applied (names_aliased counts the replacements)")
 
     # 3. sanitise: drop keys, round floats, redact strings; fail-closed per field
     vrec = vocabulary_record(ws)
@@ -893,7 +932,7 @@ def check(payload: dict[str, Any], settings: Settings, strict: Optional[bool] = 
     def blocked(reason: str) -> GuardResult:
         return GuardResult(False, reason, {}, artifact_types, stats, notes, strict, amap, counts)
 
-    useful = [k for k, v in sanitized.items() if ARTIFACT_KEYS.get(str(k)) != "meta" and not _is_empty(v)]
+    useful = [k for k, v in sanitized.items() if ARTIFACT_KEYS.get(str(k)) != "meta" and _has_content(v)]
     if not useful:
         why = "; ".join(n for n in notes if n.startswith("dropped"))[:300]
         return blocked("nothing useful left after sanitising" + (f" ({why})" if why else ""))
@@ -946,6 +985,94 @@ def verify_texts(texts: list[str], settings: Settings, ws: Any = None, amap: Opt
     return verify_invariant([t for t in texts if isinstance(t, str)], names, data_vocabulary(ws) + file_tokens, cfg)
 
 
+# ----------------------------------------------------------------------------------------------
+# local calls: audit mode. Nothing is removed (the model runs on this machine); the ledger records what the guard
+# WOULD have removed had the call gone out, so a reviewer can see how much more a local model is shown.
+# ----------------------------------------------------------------------------------------------
+
+LOCAL_WHY = ("local route: the model runs on this machine and nothing leaves it, so the guard removes nothing (a local "
+             "model may see exact readings, original column names and rows)")
+LOCAL_CHAT_WHY = ("local route (chat tool agent): the model runs on this machine and nothing leaves it; its local tools may "
+                  "read exact rows (sql, min / max, the full series) so that it can answer 'why this row?'")
+_COUNT_KEYS = ("names_aliased", "floats_rounded", "numbers_in_strings_rounded", "times_redacted", "values_redacted", "files_redacted", "keys_dropped", "fields_dropped", "items_dropped", "human_notes_dropped", "invariant_violations")
+
+
+def changes_phrase(counts: dict[str, Any], digits: int = 3) -> str:
+    """'replaced 4 original column names by aliases, rounded 31 numbers to 3 significant digits, ...' (it follows "the
+    guard would have" / "the guard has") from sanitiser counts."""
+    c = {k: int(v) for k, v in (counts or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    parts = []
+    if c.get("names_aliased"):
+        parts.append(f"replaced {c['names_aliased']} original column name(s) by aliases")
+    n_round = c.get("floats_rounded", 0) + c.get("numbers_in_strings_rounded", 0)
+    if n_round:
+        parts.append(f"rounded {n_round} number(s) to {digits} significant digits")
+    if c.get("times_redacted"):
+        parts.append(f"removed {c['times_redacted']} date / time stamp(s)")
+    if c.get("values_redacted"):
+        parts.append(f"removed {c['values_redacted']} text / label value(s)")
+    if c.get("files_redacted"):
+        parts.append(f"removed {c['files_redacted']} file name(s)")
+    n_drop = c.get("keys_dropped", 0) + c.get("fields_dropped", 0) + c.get("items_dropped", 0)
+    if n_drop:
+        parts.append(f"dropped {n_drop} field(s) or item(s) (single readings, rows, long series, free text)")
+    if c.get("human_notes_dropped"):
+        parts.append(f"dropped {c['human_notes_dropped']} human note(s)")
+    return ", ".join(parts) if parts else "changed nothing"
+
+
+def audit_local(payload: Any, settings: Settings, ws: Any = None) -> tuple[str, dict[str, Any]]:
+    """Audit mode for a local call: (guard_reason, sanitizer record) for the ledger. The payload is NOT changed; the
+    record says what the guard would have done had it gone to an external model (strictness of the active profile).
+    Never raises; takes milliseconds (the run's text vocabulary is scanned once and cached)."""
+    try:
+        g = check(payload if isinstance(payload, dict) else {"payload": payload}, settings, strict=settings.active_profile.guard_strict, ws=ws)
+    except Exception as e:  # the audit must never cost the local call
+        return LOCAL_WHY + ".", {"mode": "audit", "applied": False, "error": str(e)[:200]}
+    counts = {k: int(v) for k, v in (g.sanitizer or {}).items() if k in _COUNT_KEYS and isinstance(v, int) and not isinstance(v, bool) and v}
+    phrase = changes_phrase(counts, settings.guard.external_sig_digits)
+    then = "it could have left" if g.allowed else f"it would still have been blocked ({g.reason[:160]})"
+    reason = f"{LOCAL_WHY}. Audit only, nothing was removed: had it gone out, the guard would have {phrase}; {then}."
+    rec: dict[str, Any] = {"mode": "audit", "applied": False, "would_be": "allowed" if g.allowed else "blocked", **counts}
+    if not g.allowed:
+        rec["would_be_reason"] = g.reason[:300]
+    notes = [str(n)[:200] for n in (g.notes or []) if not str(n).startswith("alias map")][:8]
+    if notes:
+        rec["notes"] = notes
+    return reason[:500], rec
+
+
+def audit_messages(messages: list[dict[str, Any]], settings: Settings, ws: Any = None) -> tuple[str, dict[str, Any]]:
+    """Audit mode for the local tool agent: (guard_reason, sanitizer record). The message texts are NOT changed; the
+    record counts what the string sanitiser would have replaced had they gone out, and how many tool results carried
+    exact rows. Never raises."""
+    try:
+        cfg = settings.guard
+        texts = [str(m.get("content") or "") for m in messages or [] if isinstance(m, dict)]
+        ws_names, file_tokens = _names_from_ws(ws)
+        red = _Redactor(cfg, ws_names if _aliasing_on(cfg, settings.active_profile.guard_strict) else {}, data_vocabulary(ws), file_tokens)
+        row_texts = 0
+        for t in texts:
+            if red.row_pairs(t) >= ROW_TEXT_MIN_SIGNALS:
+                row_texts += 1
+            red.redact(t)
+        counts = {k: int(v) for k, v in red.counts.items() if k in _COUNT_KEYS and v}
+        n_sql = sum(t.count("Tool result for sql") for t in texts)
+    except Exception as e:
+        return LOCAL_CHAT_WHY + ".", {"mode": "audit", "applied": False, "error": str(e)[:200]}
+    phrase = changes_phrase(counts, cfg.external_sig_digits)
+    extra = ""
+    if n_sql or row_texts:
+        extra = f"; {n_sql + row_texts} message part(s) carry exact rows and would not have been allowed out"
+    reason = f"{LOCAL_CHAT_WHY}. Audit only, nothing was removed: had these messages gone out, the guard would have {phrase}{extra}."
+    rec: dict[str, Any] = {"mode": "audit", "applied": False, "messages": len(texts), **counts}
+    if n_sql:
+        rec["sql_results"] = n_sql
+    if row_texts:
+        rec["row_like_texts"] = row_texts
+    return reason[:500], rec
+
+
 def explain(settings: Settings, strict: Optional[bool] = None, language: str = "en") -> str:
     """Plain-language description for the UI: what may leave the machine under the current settings."""
     cfg = settings.guard
@@ -991,8 +1118,15 @@ def explain(settings: Settings, strict: Optional[bool] = None, language: str = "
         "- human notes on flags / diagnoses" + (" (dropped in strict mode)" if strict else " (kept in non-strict mode)"),
         "",
         "Last check: just before sending, the cleaned payload is tested once more (no long numbers, no dates, no column names, "
-        "no data values, no long number lists, no removed fields). If that test fails, or nothing useful is left, the payload is "
-        "blocked: the task is answered by the local model instead, then by a code template. Every block, fallback and what "
-        "the cleaner changed is written to the egress ledger.",
+        "no data values, no long number lists, no raw rows written as text, no removed fields). If that test fails, or nothing "
+        "useful is left, the payload is blocked: the task is answered by the local model instead, then by a code template. "
+        "Every block, fallback and what the cleaner changed is written to the egress ledger.",
+        "",
+        "Local model calls: the local model runs on this machine and nothing it reads leaves it, so the guard removes nothing "
+        "from its prompts; the chat's local tools may even read exact rows, to answer 'why this row?'. The guard still looks at "
+        "every local call in audit mode: the ledger records what it would have removed had the call gone out.",
+        "",
+        "Proof on a real run: `python -m tpm guard-demo --run <run>` sends one real payload of the run through the guard (and a "
+        "deliberately unsafe one, which is blocked and never sent) and shows the before / after.",
     ]
     return "\n".join(lines)

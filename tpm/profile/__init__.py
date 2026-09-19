@@ -15,13 +15,13 @@ from typing import Any, Optional
 from ..contracts import SignalDescriptor
 from .fingerprints import compute_fingerprints, load_dynamics_sample
 from .relations import compute_relations
-from .roles import ACTOR, STAGE, apply_override, heuristic_hypotheses, llm_hypotheses, structural_role  # noqa: F401
+from .roles import ACTOR, MANIPULATED_MIN_SCORE, STAGE, apply_override, heuristic_hypotheses, llm_hypotheses, llm_unit_operations, manipulated_evidence, structural_role, check_hypotheses  # noqa: F401
 
 __all__ = ["run_profile", "apply_override", "write_catalog", "build_understanding"]
 
 ROLE_TEXT = {
     "continuous_measured": "a continuously varying measurement",
-    "actuator_like": "a step-like manipulated variable (actuator-like)",
+    "actuator_like": "a step-like manipulated variable (actuator-like, manipulated_evidence, MANIPULATED_MIN_SCORE)",
     "held_sampled": "a sample-and-hold measurement (updated every few samples)",
     "constant": "constant",
     "derived_redundant": "a derived / redundant signal (function of other signals)",
@@ -183,9 +183,20 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     progress(0.72, "structural roles")
     descriptors: list[SignalDescriptor] = []
     role_counts: dict[str, int] = {}
+    derived_desc = {x.get("column"): x.get("description") for x in (ws.read_json("derived_signals.json") or []) if isinstance(x, dict)}
     for c, a in zip(signal_cols, aliases):
         fp = fps[c]
         role, conf, reasoning, alts = structural_role(fp, red_by_alias.get(a))
+        # manipulated vs measured: a continuous signal that behaves like a valve position / controller output is an
+        # actuator. Its value pinned at a limit is then a saturated actuator (a process symptom), not a dead sensor.
+        m_score, m_reasons = manipulated_evidence(a, fp, rel)
+        fp["manipulated"] = {"score": m_score, "reasons": m_reasons}
+        if c in derived_desc:  # a rate derived from an event log: a measurement of how often something happens
+            role, conf, reasoning, alts = "continuous_measured", 0.7, f"derived from the event log: {derived_desc[c]}", []
+        elif role == "continuous_measured" and m_score >= MANIPULATED_MIN_SCORE:
+            role, conf = "actuator_like", round(min(0.85, 0.35 + 0.5 * m_score), 3)
+            reasoning = "behaves like a manipulated variable (valve position / controller output): " + "; ".join(m_reasons)
+            alts = ["a measured percentage (for example a level in %)"]
         ev_fp = ws.evidence.add("distribution", f"{a}: n={fp.get('count')}, missing {float(fp.get('missing_rate') or 0):.1%}, mean {_fmt(fp.get('mean'))}, std {_fmt(fp.get('std'))}, range [{_fmt(fp.get('min'))}, {_fmt(fp.get('max'))}], {fp.get('n_unique')} distinct, shape {fp.get('distribution_shape')}", signals=[a], values={k: v for k, v in fp.items() if k != "sampling"}, computed_by="profile.fingerprints", n_samples=int(fp.get("count") or 0))
         ev_ids = [ev_fp.id]
         if fp.get("n_samples_dynamics"):
@@ -203,6 +214,8 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
         ws.log.record(ACTOR, "inference", "inference", inf.id, {"subject": a, "claim": inf.claim, "confidence": inf.confidence, "status": status}, evidence_ids=ev_ids)
         excluded = role in ("constant",) or (fp.get("count") or 0) == 0
         d = SignalDescriptor(id=a, source_column=c if schema.had_header else None, column_index=int(col_index.get(c, -1)), dtype=str(ptypes.get(c, "")), structural_role=role, structural_confidence=round(conf, 3), cluster_id=cluster_of.get(a), related_signals=related.get(a, [])[:8], fingerprint=fp, confidence=round(conf, 3), inference_ids=[inf.id], evidence_ids=ev_ids, excluded=excluded, excluded_reason=("constant" if role == "constant" else ("all missing" if (fp.get("count") or 0) == 0 else None)))
+        if c in derived_desc:  # a derived event-log signal reads as what it is: "share of level = ERROR in the last 50 rows"
+            d.display_name = derived_desc[c][:80]
         descriptors.append(d)
         role_counts[role] = role_counts.get(role, 0) + 1
 
@@ -236,6 +249,13 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     if domain["hypotheses_enabled"] and not options.get("skip_llm") and budget_left > llm_reserve:
         progress(0.85, "asking the language model for hypotheses (optional)")
         llm_info = llm_hypotheses(ws, settings, descriptors, rel, domain_ll, options.get("domain_hint"))
+        budget_left = float(ctx.get("time_budget_s", settings.time_budget_s)) - (time.time() - float(ctx.get("t_start", t0)))
+        if budget_left > llm_reserve:
+            progress(0.9, "asking the language model to name the process units (optional)")
+            llm_info["unit_operations"] = llm_unit_operations(ws, settings, descriptors, rel, options.get("domain_hint"))
+    if domain["hypotheses_enabled"]:
+        n_tests = check_hypotheses(ws, descriptors, rel)
+        ws.log.record(ACTOR, "hypothesis_tests", "dataset", ws.run_id, {"n_tested": n_tests})
 
     # ---------------- artifacts
     progress(0.95, "writing catalog")
@@ -245,6 +265,12 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     ws.write_json("understanding.json", und)
     summary = {"n_signals": len(descriptors), "n_excluded": sum(1 for d in descriptors if d.excluded), "roles": role_counts, "n_clusters": len(rel.get("clusters", {})), "n_pairs": len(rel.get("pairs", [])), "n_redundant": sum(1 for r in rel.get("redundancy", []) if r.get("derived")), "n_hypotheses": n_hyp, "llm": llm_info, "domain_likelihood": domain_ll, "sampling": sample["description"], "seconds": round(time.time() - t0, 2)}
     summary["message"] = f"{len(descriptors)} signals profiled: " + ", ".join(f"{k}={v}" for k, v in sorted(role_counts.items(), key=lambda kv: -kv[1])) + f"; {summary['n_clusters']} clusters, {summary['n_pairs']} related pairs"
+    try:  # every hypothesis and hypothesis test of this stage gets its own decision-log entry (one transaction)
+        from ..log.stage_log import log_stage_inferences
+
+        summary["n_inferences_logged"] = log_stage_inferences(ws, "profile")
+    except Exception:
+        pass
     ws.log.record(ACTOR, "catalog", "dataset", ws.run_id, {k: v for k, v in summary.items() if k != "message"}, evidence_ids=[e_s.id])
     progress(1.0, summary["message"])
     return summary

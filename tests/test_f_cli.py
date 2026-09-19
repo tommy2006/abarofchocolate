@@ -155,8 +155,9 @@ def test_rules_file_is_loaded_into_workspace(tmp_path, samples):
     meta = json.loads((ws / "t_rules" / "meta.json").read_text(encoding="utf-8"))
     assert meta["options"]["rules"] == ["S03 must stay between 100 and 140.", "S07 must not change by more than 5 per sample."]
     assert meta["options"]["rules_file"].endswith("rules.txt")
-    rj = json.loads((ws / "t_rules" / "rules.json").read_text(encoding="utf-8"))
-    assert len(rj) >= 2 and rj[0]["id"] == "RULE-001"
+    # compiled once, by the quality stage (not in --stages here): no uncompiled drafts that would later be duplicated
+    assert "quality stage is not in --stages" in r.stdout
+    assert not (ws / "t_rules" / "rules.json").exists()
 
 
 def test_samples_exist_and_are_small(samples):

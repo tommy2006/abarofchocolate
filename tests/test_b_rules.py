@@ -319,6 +319,9 @@ def test_add_rules_from_file_and_run_quality_option(tmp_path):
     summary = run_quality(ws2, settings, {"options": {"rules_file": str(EXAMPLE)}})
     assert summary["n_rules_loaded"] == 8 and summary["n_rule_checks"] > 0
     assert all(r.status == "active" for r in ws2.rules())
+    ids = [r.id for r in ws2.rules()]
+    again = run_quality(ws2, settings, {"options": {"rules_file": str(EXAMPLE)}})  # a rerun loads the same file again
+    assert again["n_rules_loaded"] == 8 and [r.id for r in ws2.rules()] == ids  # reused, never duplicated
     ws3 = build_workspace(tmp_path, settings, df, truth, run_id="run_file3")
     summary3 = run_quality(ws3, settings, {"options": {}})
     assert summary3["n_rules_loaded"] == 0 and summary3["n_rule_checks"] == 0 and not ws3.rules()

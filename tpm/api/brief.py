@@ -282,6 +282,8 @@ T: dict[str, dict[str, str]] = {
         "pw.relation_break": "sensors that stopped moving with their partners", "pw.local_spike": "single odd readings", "pw.out_of_order": "rows out of time order",
         "pw.duplicate": "duplicate rows", "pw.gap": "gaps in time", "pw.irregular_sampling": "uneven time between readings", "pw.empty_rows": "empty rows",
         "pw.redundancy_violation": "copies that no longer match their source", "pw.rule": "broken operating rules", "pw.other": "other data problems",
+        "pw.frozen_block": "rows frozen in many sensors at once", "pw.missing_block": "rows missing in many sensors at once", "pw.quantization_block": "resolution changes in many sensors at once",
+        "pw.plausibility": "values outside their plausible range", "it.ck.h.nt": "This check could not be run on this data.", "it.ck.p.use.nt": "It says nothing either way: it is neither passed nor failed.",
         "dq.h.caution.1": "The data can be used. One of {n} batches has smaller problems, mostly {top}.",
         "dq.h.bad.1": "One of {n} batches cannot be trusted. The main reason: {top}.",
         "ov.p.data.caution.1": "Data: one of {n} batches has smaller problems, mostly {top}.",
@@ -500,6 +502,8 @@ T: dict[str, dict[str, str]] = {
         "pw.relation_break": "anturit, jotka eivät enää seuraa pariaan", "pw.local_spike": "yksittäiset oudot lukemat", "pw.out_of_order": "rivit väärässä aikajärjestyksessä",
         "pw.duplicate": "kaksoisrivit", "pw.gap": "aukot ajassa", "pw.irregular_sampling": "epätasainen lukemien väli", "pw.empty_rows": "tyhjät rivit",
         "pw.redundancy_violation": "kopiot, jotka eivät enää vastaa lähdettään", "pw.rule": "rikotut käyttösäännöt", "pw.other": "muut dataongelmat",
+        "pw.frozen_block": "rivit, jotka ovat jumissa monessa anturissa yhtä aikaa", "pw.missing_block": "rivit, jotka puuttuvat monesta anturista yhtä aikaa", "pw.quantization_block": "tarkkuuden muutokset monessa anturissa yhtä aikaa",
+        "pw.plausibility": "uskottavan alueensa ulkopuoliset arvot", "it.ck.h.nt": "Tätä tarkistusta ei voitu tehdä tälle datalle.", "it.ck.p.use.nt": "Se ei kerro kumpaankaan suuntaan: sitä ei lasketa läpäistyksi eikä hylätyksi.",
         "dq.h.bad.1": "Yhteen erään {n}:stä ei voi luottaa. Tärkein syy: {top}.",
         "ov.p.data.bad.1": "Data: yhteen erään {n}:stä ei voi luottaa. Tärkein syy: {top}.",
         "mon.p.points.1": "Lisäksi löytyi yksi yksittäinen outo lukema. Se on häiriö tai manipulointi; pelkästä datasta sitä ei voi päätellä.",
@@ -714,6 +718,8 @@ T: dict[str, dict[str, str]] = {
         "pw.relation_break": "givare som inte längre följer sina partner", "pw.local_spike": "enstaka udda mätvärden", "pw.out_of_order": "rader i fel tidsordning",
         "pw.duplicate": "dubblettrader", "pw.gap": "luckor i tiden", "pw.irregular_sampling": "ojämn tid mellan mätvärden", "pw.empty_rows": "tomma rader",
         "pw.redundancy_violation": "kopior som inte längre stämmer med sin källa", "pw.rule": "brutna driftregler", "pw.other": "andra dataproblem",
+        "pw.frozen_block": "rader som är frysta i många givare samtidigt", "pw.missing_block": "rader som saknas i många givare samtidigt", "pw.quantization_block": "upplösningsändringar i många givare samtidigt",
+        "pw.plausibility": "värden utanför sitt rimliga område", "it.ck.h.nt": "Den här kontrollen kunde inte köras på dessa data.", "it.ck.p.use.nt": "Den säger ingenting åt något håll: den räknas varken som godkänd eller underkänd.",
         "dq.h.bad.1": "En av {n} batchar går inte att lita på. Främsta orsaken: {top}.",
         "ov.p.data.bad.1": "Data: en av {n} batchar går inte att lita på, främst på grund av {top}.",
         "mon.p.points.1": "Dessutom hittades ett enstaka udda mätvärde. Det är en störning eller en manipulation; enbart data kan inte avgöra det.",
@@ -937,12 +943,13 @@ def _not_ready(state: str, lang: str) -> dict[str, Any]:
 # facts (language independent, cached per run)
 # =====================================================================================================
 _DUP = {"duplicate", "duplicate_rows", "duplicate_key", "duplicate_timestamp", "duplicate_ts"}
-_PROBLEMS = {"stuck", "stale", "missing", "dropout", "out_of_range", "impossible_value", "unit_shift", "saturation", "quantization_change", "sign_violation", "relation_break", "local_spike", "out_of_order", "gap", "irregular_sampling", "empty_rows", "redundancy_violation"}
+_PROBLEMS = {"stuck", "stale", "missing", "dropout", "out_of_range", "impossible_value", "unit_shift", "saturation", "quantization_change", "sign_violation", "relation_break", "local_spike", "out_of_order", "gap", "irregular_sampling", "empty_rows", "redundancy_violation",
+             "frozen_block", "missing_block", "quantization_block", "plausibility"}  # round 6: grouped (common-mode) findings and plausible ranges
 
 
 def problem_key(check_type: Any) -> Optional[str]:
     ct = str(check_type or "")
-    if not ct or ct.endswith("_ok"):
+    if not ct or ct.endswith("_ok") or ct.endswith("_not_testable"):
         return None
     if ct.startswith("rule"):
         return "rule"
@@ -1589,7 +1596,9 @@ def _item_check(ws: Any, c: dict[str, Any], lang: str) -> dict[str, Any]:
     sigs = [str(s) for s in (c.get("signals") or [])]
     sensor = _sensor(names, sigs[0], lang) if sigs else ""
     cid = c.get("check_id") or c.get("id")
-    if status == "pass" or key is None:
+    if status == "not_testable":  # neither passed nor failed (round 6): e.g. timeliness without a time column
+        head, use, level = tr(lang, "it.ck.h.nt"), tr(lang, "it.ck.p.use.nt"), "ok"
+    elif status == "pass" or key is None:
         head, use, level = tr(lang, "it.ck.h.pass"), tr(lang, "it.ck.p.use.pass"), "ok"
     else:
         problem = tr(lang, "pw." + key)

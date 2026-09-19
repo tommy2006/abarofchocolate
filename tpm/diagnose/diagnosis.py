@@ -15,6 +15,32 @@ from ..contracts import Diagnosis, Flag, PropagationStep, SignalContribution
 CAUSE_WORDS = {"process": "a process fault", "sensor": "a sensor fault", "data": "a data-quality issue", "mixed": "a mix of process and data problems", "unknown": "an unclassified deviation"}
 
 
+RECORD_WORDS = [
+    ("sensor fault on", "entry problem in column"), ("a sensor fault", "an entry problem in one column"),
+    ("froze at one value", "repeats the same value"), ("is frozen at a constant value", "repeats the same value"),
+    ("an instrument problem", "an entry or export problem in one column"), ("faulty instrument", "faulty entries"),
+    ("inspect the instrument behind", "check how the values of"), ("(wiring, freeze, calibration)", "are entered or exported"),
+    ("a process fault", "a change in the business process"), ("the process itself", "the business process itself"),
+]
+
+
+def is_sensor_data(ws) -> bool:
+    """True unless the profile says the table is clearly not a sensor stream (business records, event logs)."""
+    try:
+        dl = (ws.read_json("domain") or {}).get("domain_likelihood") or {}
+    except Exception:
+        return True
+    return not dl or float(dl.get("sensor_stream", 1.0)) >= 0.4
+
+
+def speak_domain(text: str, sensor: bool) -> str:
+    if sensor or not text:
+        return text
+    for a, b in RECORD_WORDS:
+        text = text.replace(a, b)
+    return text
+
+
 def _fault_type(main: Flag, pattern: Optional[dict[str, Any]], human_labels: list[dict[str, Any]]) -> tuple[str, Optional[str]]:
     """Pattern name if the operator named it, a human-labelled example if one matches (same leading signal
     and the same top-2 set), else a generic name. A human label overrides the code's cause class."""
@@ -25,6 +51,14 @@ def _fault_type(main: Flag, pattern: Optional[dict[str, Any]], human_labels: lis
             if hl.get("cause_class"):
                 main.likely_cause_class = str(hl["cause_class"])
             return f"{hl['fault_type']} (human-labelled example {hl.get('diagnosis_id', '')})".strip(), "human"
+    det = main.cause_detail or {}
+    kind = det.get("kind")
+    if kind == "actuator_saturation":
+        return f"actuator saturation: {det.get('signal')} pinned at its {det.get('side', 'upper')} limit", None
+    if kind == "common_freeze":
+        return f"data problem: {len(det.get('signals') or [])} signals frozen in the same rows", None
+    if kind == "duplicate_rows":
+        return "data problem: duplicated rows", None
     if main.likely_cause_class == "sensor" and main.signals_ranked:
         return f"sensor fault on {main.signals_ranked[0].signal}", None
     if main.likely_cause_class == "data":
@@ -33,7 +67,14 @@ def _fault_type(main: Flag, pattern: Optional[dict[str, Any]], human_labels: lis
     if pattern:
         if pattern.get("name"):
             return str(pattern["name"]), None
-        return f"{pattern['id']} (unnamed)", None
+        hyp = pattern.get("hypothesis") or {}
+        if hyp.get("named"):
+            return f"{pattern['id']}: possibly {hyp.get('name')}", None
+        return f"{pattern['id']} ({'cannot name' if hyp else 'unnamed'})", None
+    spread = det.get("spread")
+    if spread:
+        grp = f" (cluster {spread['cluster']})" if spread.get("cluster") else ""
+        return f"{CAUSE_WORDS.get(main.likely_cause_class, 'deviation')} spread over about {spread.get('n_signals_for_half', '?')} signals{grp}", None
     return f"{CAUSE_WORDS.get(main.likely_cause_class, 'deviation')} on {', '.join(top) or 'several signals'}", None
 
 
@@ -58,9 +99,15 @@ def _steps(main: Flag, ranked: list[SignalContribution], onset_flag: Optional[Fl
         steps.append(f"When it started: {onset_flag.statement}")
     else:
         steps.append(f"When it started: the deviation is first visible at row {main.row_start} of group {main.group_id} (no separate onset estimate).")
+    det = main.cause_detail or {}
+    spread = det.get("spread")
+    if spread:
+        grp = f", mostly in cluster {spread['cluster']}" if spread.get("cluster") else ""
+        steps.append(f"What changed: no single signal dominates. The strongest one carries only {spread['top_share']:.0%} of the deviation and the five strongest {spread['top5_share']:.0%}; about {spread['n_signals_for_half']} signals are needed to explain half of it{grp}. Treat the ranking below as a group, not as a precise order.")
     if ranked:
         first = ranked[0]
-        steps.append(f"What changed first: {first.explanation} It carries {first.contribution:.0%} of the deviation.")
+        ref = det.get("lag_reference")
+        steps.append(f"What changed first: {first.explanation} It carries {first.contribution:.0%} of the deviation." + (f" Lags are counted from {ref}, the first of these signals to move." if ref else ""))
         rest = [s for s in ranked[1:] if s.contribution >= 0.05]
         if rest:
             steps.append("What followed: " + " ".join(f"{s.explanation} ({s.contribution:.0%})" for s in rest[:3]) + ".")
@@ -73,10 +120,19 @@ def _steps(main: Flag, ranked: list[SignalContribution], onset_flag: Optional[Fl
         "mixed": "Why the cause is mixed: some of the deviating signals were distrusted by the data-quality checks while others moved consistently, so a process effect and a data problem may overlap.",
         "unknown": "Why the cause is unclassified: the contributions are spread over signals whose relations do not confirm either a single-sensor break or a coherent multi-signal process change.",
     }[main.likely_cause_class if main.likely_cause_class in ("process", "sensor", "data", "mixed") else "unknown"]
+    kind = det.get("kind")
+    if kind == "actuator_saturation":
+        why = f"Why we think it is a process problem and not a broken instrument: {det.get('signal')} behaves like a manipulated variable (a valve position or controller output) and sits at its {det.get('side', 'upper')} limit. A controller drives its valve to the limit when it can no longer hold its target, so the frozen value is saturation, a symptom of the process (for example a lost feed), not a dead sensor."
+    elif kind == "common_freeze":
+        why = f"Why we think it is a data problem: {len(det.get('signals') or [])} signals ({', '.join((det.get('signals') or [])[:5])}) froze in the same rows" + (" although they are not related to each other" if not det.get("related") else "") + ". Independent instruments do not all fail at the same moment; the recording or a shared data feed stopped updating. No single sensor is named for that reason."
+    elif kind == "duplicate_rows":
+        why = f"Why we think it is a data problem: {float(det.get('duplicate_share') or 0):.0%} of these rows are exact copies of other rows, so the recording repeated itself."
     steps.append(why)
-    steps.append(f"How confident we are: {conf:.0%}. It rests on {main.score:.1f}x the calibrated threshold over {main.row_end - main.row_start + 1} rows, detectors {', '.join(dets) if dets else 'the ensemble'} scored out-of-fold (no model saw this group while fitting)." + (f" Uncertainties: {'; '.join(uncertainty[:3])}." if uncertainty else ""))
+    steps.append(f"How confident we are: {conf:.0%} (a heuristic score, not a calibrated probability: it combines detector agreement, how far and how long the score stayed above the threshold, and the baseline's confidence, minus a share for every uncertainty listed). It rests on {main.score:.1f}x the calibrated threshold over {main.row_end - main.row_start + 1} rows, detectors {', '.join(dets) if dets else 'the ensemble'} scored out-of-fold (no model saw this group while fitting)." + (f" Uncertainties: {'; '.join(uncertainty[:3])}." if uncertainty else ""))
     if pattern:
         steps.append(f"Similar events: this matches {pattern['id']}{' (' + pattern['name'] + ')' if pattern.get('name') else ''}, seen {pattern.get('n_events', 0)} times in {len(pattern.get('groups_affected', []))} group(s); pattern classifier reliability {pattern.get('classifier_reliability') if pattern.get('classifier_reliability') is not None else 'n/a'}.")
+        if (pattern.get("hypothesis") or {}).get("text"):
+            steps.append(f"Which known failure type: {pattern['hypothesis']['text']}.")
     checks = {
         "sensor": f"What to check: inspect the instrument behind {ranked[0].signal if ranked else 'the leading signal'} (wiring, freeze, calibration) and compare it with its peers {', '.join(s.signal for s in ranked[1:3]) or 'in the same cluster'} before acting on the process.",
         "data": "What to check: the data path (units, scaling, transmission gaps) of the leading signal in this batch; re-run detection once the data-quality issue is fixed.",
@@ -84,7 +140,14 @@ def _steps(main: Flag, ranked: list[SignalContribution], onset_flag: Optional[Fl
         "mixed": "What to check: fix or exclude the distrusted signal first, then re-evaluate whether the remaining deviation persists.",
         "unknown": "What to check: trend the leading signals against their peers over the flagged window; if the deviation recurs in other groups, name the pattern so future events are typed automatically.",
     }
-    steps.append(checks[main.likely_cause_class if main.likely_cause_class in checks else "unknown"])
+    if kind == "actuator_saturation":
+        steps.append(f"What to check: why the controller had to drive {det.get('signal')} to its limit. Look upstream first: the supply that feeds it (a lost feed, a blocked line, a closed manual valve), then the controller's setpoint and tuning. The valve itself is doing its job; replacing its sensor would not help.")
+    elif kind == "common_freeze":
+        steps.append("What to check: the data recording for these rows (historian, network link, export job). Do not replace any sensor on this evidence. Exclude or refill these rows and run the analysis again.")
+    elif kind == "duplicate_rows":
+        steps.append("What to check: the export or logging step that wrote the same rows twice. Remove the duplicates and run the analysis again.")
+    else:
+        steps.append(checks[main.likely_cause_class if main.likely_cause_class in checks else "unknown"])
     return steps
 
 
@@ -129,7 +192,11 @@ def build_diagnosis(ws, diag_id: str, group: str, flags: list[Flag], onset_flag:
             if e not in evidence_ids:
                 evidence_ids.append(e)
     summary = plain_summary(fault_type, group, main, ranked, conf, chain)
-    return Diagnosis(id=diag_id, flag_ids=[f.id for f in flags] + ([onset_flag.id] if onset_flag is not None else []), group_id=group, pattern_id=main.pattern_id, fault_type=fault_type, cause_class=main.likely_cause_class, ranked_signals=ranked, propagation=chain, steps=steps, summary=summary, confidence=round(conf, 3), uncertainty=uncertainty, assumptions=assumptions[:8], evidence_ids=evidence_ids, narrative_source="template" if src is None else "human+template")
+    sensor = is_sensor_data(ws)
+    if not sensor:  # business records / event logs: no sensors, instruments or process units in the wording
+        fault_type, summary = speak_domain(fault_type, False), speak_domain(summary, False)
+        steps = [speak_domain(x, False) for x in steps]
+    return Diagnosis(id=diag_id, flag_ids=[f.id for f in flags] + ([onset_flag.id] if onset_flag is not None else []), group_id=group, pattern_id=main.pattern_id, fault_type=fault_type, cause_class=main.likely_cause_class, cause_detail=main.cause_detail, ranked_signals=ranked, propagation=chain, steps=steps, summary=summary, confidence=round(conf, 3), uncertainty=uncertainty, assumptions=assumptions[:8], evidence_ids=evidence_ids, narrative_source="template" if src is None else "human+template")
 
 
 def build_point_diagnosis(ws, diag_id: str, point_flags: list[Flag], suspicious: Optional[dict[str, Any]]) -> Diagnosis:
@@ -206,7 +273,16 @@ def plain_summary(fault_type: str, group: str, main: Flag, ranked: list[SignalCo
         share = f" and accounts for {r.contribution:.0%} of the deviation" if r.contribution >= 0.1 else ""
         parts.append(f"{r.signal} {_DIR_WORDS.get(r.direction or 'deviating', 'deviated')}{share}")
     second = ("The signal " if len(parts) == 1 else "The signals involved: ") + "; ".join(parts) + "." if parts else ""
+    det = main.cause_detail or {}
     third = _CAUSE_SENTENCE.get(main.likely_cause_class, _CAUSE_SENTENCE["unknown"])
+    if det.get("kind") == "actuator_saturation":
+        third = f"{det.get('signal')} is a valve or controller output that ran to its {det.get('side', 'upper')} limit: the controller could not keep up, which points to a problem in the process (for example a lost feed), not to a broken sensor."
+    elif det.get("kind") == "common_freeze":
+        third = "Several signals froze at the same moment, which independent instruments do not do: this is a problem with the recorded data, not with any one sensor."
+    elif det.get("kind") == "duplicate_rows":
+        third = "Many of these rows are exact copies of other rows: the recording repeated itself, so this is a data problem."
+    if det.get("spread"):
+        second = f"No single signal stands out: the change is spread over about {det['spread'].get('n_signals_for_half', 'several')} signals" + (f" of cluster {det['spread']['cluster']}" if det["spread"].get("cluster") else "") + "."
     prop = ""
     if chain:
         c0 = chain[0]

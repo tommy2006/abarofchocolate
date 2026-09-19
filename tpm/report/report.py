@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+import numpy as np
 import math
 import os
 import re
@@ -54,7 +56,7 @@ LLM_MAX_TOKENS = 1600  # the narrative JSON needs ~600-1000 tokens; 700 cut it m
 LLM_WAIT_S = 75.0  # blocking callers (pipeline stage, CLI) wait at most this long for the model summary
 LLM_RETRY_S = 600.0  # after a failed model call, do not try again for this long (unless the artifacts change)
 # artifacts whose change makes a cached report stale / a cached model summary stale
-_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger", "suspicious_rows.json", "group_scores.json")
+_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger", "suspicious_rows.json", "group_scores.json", "quality_summary.json")
 _NARRATIVE_INPUTS = ("schema", "signals", "checks", "trust", "flags", "patterns", "diagnoses")
 
 
@@ -110,6 +112,22 @@ def _thousands(v: Any, lang: str = "en") -> str:
     except Exception:
         return "" if v is None else str(v)
     return out if lang == "en" else out.replace(",", "\u00a0")
+
+
+def _quality_verdict(t: Any, qsum: dict[str, Any], trust: list[dict[str, Any]], n_batches: int, st_counts: Any) -> str:
+    """One plain sentence on the whole run: untrusted | partly untrusted | usable but not clean | clean. Runs whose
+    quality stage wrote no quality_summary.json (older runs) get the same verdict derived from trust and checks."""
+    n_bad = sum(1 for x in trust if not x.get("trusted", True))
+    n_b = len(trust) or n_batches
+    v = str(qsum.get("verdict") or "")
+    if not v:
+        v = "untrusted" if n_bad and 2 * n_bad >= max(1, n_b) else "partly_untrusted" if n_bad else "usable_with_problems" if st_counts.get("fail") else "clean"
+    share = qsum.get("untrusted_batch_row_share")
+    pct = _pct(share if isinstance(share, (int, float)) else (n_bad / max(1, n_b)))
+    top = str(qsum.get("top_problem") or "")
+    key = {"untrusted": "dq_verdict_untrusted", "partly_untrusted": "dq_verdict_partly", "usable_with_problems": "dq_verdict_usable"}.get(v, "dq_verdict_clean")
+    because = f", mainly because of {top}" if top and str(getattr(t, "lang", "en")).startswith("en") else ""  # the problem words are English
+    return t(key, n_bad=n_bad, n_batches=n_b, pct=pct, because=because, n_fail=st_counts.get("fail", 0), n_warn=st_counts.get("warn", 0))
 
 
 def _short(s: Any, n: int = 140) -> str:
@@ -258,6 +276,8 @@ def _score_timelines(ws: Workspace, schema: Optional[dict[str, Any]], flags: lis
 
 
 def _ledger_summary(ws: Workspace, ledger: list[dict[str, Any]]) -> dict[str, Any]:
+    # records of `tpm guard-demo` (guard_result demo_allowed / demo_blocked) were shown, never sent: not model calls
+    ledger = [r for r in ledger if str(r.get("guard_result") or "") not in ("demo_allowed", "demo_blocked")]
     own = {
         "n_local": sum(1 for r in ledger if r.get("route") == "local"),
         "n_external": sum(1 for r in ledger if r.get("route") == "external" and r.get("guard_result") in ("allowed", None, "")),
@@ -278,12 +298,38 @@ def _ledger_summary(ws: Workspace, ledger: list[dict[str, Any]]) -> dict[str, An
     return own
 
 
+# ---- data-flow additions, round 6 (agent E): who wrote the explanations, the egress-guard demonstration --------------
+_COVERAGE_HEADING = {"en": "Who wrote the explanations", "fi": "Kuka selitykset kirjoitti", "sv": "Vem skrev förklaringarna"}
+
+
+def _dataflow_round6(ws: Workspace, settings: Settings, lang: str) -> dict[str, Any]:
+    """{"coverage": {heading, sentence, details} | None, "guard_demo": tpm.llm.guard_demo.report_context() | None}.
+    Both parts are optional: a missing module or a run without diagnoses / demonstration renders nothing."""
+    out: dict[str, Any] = {"coverage": None, "guard_demo": None}
+    try:
+        from ..llm.ledger import coverage_details, coverage_sentence, narrative_coverage
+
+        cov = narrative_coverage(ws, settings)
+        if (cov.get("diagnoses") or {}).get("total"):
+            out["coverage"] = {"heading": _COVERAGE_HEADING.get(lang, _COVERAGE_HEADING["en"]), "sentence": coverage_sentence(cov, lang), "details": coverage_details(cov, lang)}
+    except Exception:
+        pass
+    try:
+        from ..llm.guard_demo import report_context
+
+        out["guard_demo"] = report_context(ws, lang)
+    except Exception:
+        pass
+    return out
+# ---- end of the round-6 data-flow additions ------------------------------------------------------------------------
+
+
 def _dataflow_statement(ws: Workspace, settings: Settings, t: Translator, summ: dict[str, Any], prof) -> str:
     try:
         from ..llm import ledger as _ledger  # agent D
 
-        try:
-            s = _ledger.data_flow_statement(ws, settings, language=t.lang)
+        try:  # extras=False: who wrote the explanations and the guard demonstration have blocks of their own below
+            s = _ledger.data_flow_statement(ws, settings, language=t.lang, extras=False)
         except TypeError:
             s = _ledger.data_flow_statement(ws, settings)
         if isinstance(s, str) and s.strip():
@@ -396,6 +442,153 @@ def _trust_series(trust: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if chunk:
             worst = min(chunk, key=lambda c: c[1])
             out.append({"label": chunk[0][0], "score": round(worst[1], 4), "trusted": all(c[2] for c in chunk), "n": len(chunk)})
+    return out
+
+
+MAX_TRENDS = 8
+
+
+def _drift_trends(ws: Workspace, flags: list[dict[str, Any]], signals: list[dict[str, Any]], baseline: Any) -> Optional[dict[str, Any]]:
+    """Gradual drift as its own output: for the strongest drift events (then the longest other events), the leading
+    signal's level through the event with its normal band (median +- 3 robust spreads on the baseline rows) and a
+    trend test (Kendall's tau on time, Theil-Sen slope). Reads dataset.parquet locally; nothing leaves the machine."""
+    if not ws.exists("dataset"):
+        return None
+    try:
+        from scipy.stats import kendalltau, theilslopes
+    except Exception:
+        return None
+    drift = [f for f in flags if f.get("kind") == "drift"]
+    others = [f for f in flags if f.get("kind") == "anomaly" and (int(f.get("row_end") or 0) - int(f.get("row_start") or 0)) >= 60]
+    pick = sorted(drift, key=lambda f: -float(f.get("severity") or 0))[:MAX_TRENDS]
+    if len(pick) < MAX_TRENDS:
+        pick += sorted(others, key=lambda f: -(int(f.get("row_end") or 0) - int(f.get("row_start") or 0)))[: MAX_TRENDS - len(pick)]
+    if not pick:
+        return {"items": [], "n_drift": 0}
+    col_of = {s.get("id"): s.get("source_column") or s.get("id") for s in signals}
+    name_of = {s.get("id"): s.get("display_name") or s.get("id") for s in signals}
+    try:
+        con = ws.duckdb().cursor()
+    except Exception:
+        con = ws.duckdb()
+    ranges = [(int(a), int(b)) for rr in ((baseline or {}).get("ranges") or {}).values() for a, b in rr][:400] if isinstance(baseline, dict) else []
+    items = []
+    for f in pick:
+        ranked = f.get("signals_ranked") or []
+        if not ranked:
+            continue
+        sig = ranked[0].get("signal")
+        col = col_of.get(sig)
+        if not col:
+            continue
+        a, b = int(f["row_start"]), int(f["row_end"])
+        lo = max(0, a - max(40, (b - a) // 4))
+        try:
+            q = f'SELECT "{col}" FROM dataset WHERE __row__ BETWEEN ? AND ? ORDER BY __row__'
+            vals = [r[0] for r in con.execute(q, [lo, b]).fetchall()]
+            band = None
+            if ranges:
+                cond = " OR ".join(f"(__row__ BETWEEN {s0} AND {e0})" for s0, e0 in ranges[:200])
+                base = [r[0] for r in con.execute(f'SELECT "{col}" FROM dataset WHERE {cond} USING SAMPLE 20000 ROWS').fetchall() if r[0] is not None]
+                if len(base) >= 30:
+                    med = float(np.median(base))
+                    mad = 1.4826 * float(np.median(np.abs(np.asarray(base, dtype=float) - med))) or float(np.std(base)) or 1e-9
+                    band = (med - 3 * mad, med + 3 * mad)
+        except Exception:
+            continue
+        v = np.asarray([x for x in vals if x is not None], dtype=float)
+        if len(v) < 10:
+            continue
+        step = max(1, len(v) // 300)
+        vs = v[::step]
+        inside = v[(a - lo):] if a - lo < len(v) else v
+        tau, p = kendalltau(np.arange(len(inside)), inside)
+        slope = theilslopes(inside[:: max(1, len(inside) // 400)])[0] * max(1, len(inside) // 400) if len(inside) >= 10 else 0.0
+        marks = [i for i, x in enumerate(vs) if band and (x < band[0] or x > band[1])]
+        sig_word = "significant" if (p is not None and p < 0.01 and abs(tau) >= 0.2) else "not significant"
+        items.append({"flag": f.get("id"), "kind": f.get("kind"), "group": f.get("group_id"), "signal": sig, "name": name_of.get(sig, sig), "rows": [a, b],
+                      "svg": charts.trend_plot(list(vs), band, marks, label=f"{name_of.get(sig, sig)} - {f.get('id')}", x_labels=(f"row {lo}", f"row {b}")),
+                      "tau": None if tau is None or np.isnan(tau) else round(float(tau), 2), "p": None if p is None or np.isnan(p) else float(p), "slope": round(float(slope), 6), "significance": sig_word,
+                      "outside_share": round(len(marks) / max(1, len(vs)), 3), "band": None if band is None else [round(band[0], 4), round(band[1], 4)]})
+    return {"items": items, "n_drift": len(drift)}
+
+
+def _diverse(diags: list[dict[str, Any]], sev: dict[int, float]) -> list[dict[str, Any]]:
+    """A varied sample instead of the top-N of one artefact: diagnoses are grouped by (cause, pattern / fault type) and
+    taken round-robin, the most severe of each group first."""
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for d in diags:
+        key = (str(d.get("cause_class") or "unknown"), str(d.get("pattern_id") or d.get("fault_type") or ""))
+        buckets.setdefault(key, []).append(d)
+    for b in buckets.values():
+        b.sort(key=lambda d: (-sev[id(d)], -float(d.get("confidence") or 0)))
+    order = sorted(buckets, key=lambda k: -sev[id(buckets[k][0])])
+    out: list[dict[str, Any]] = []
+    i = 0
+    while len(out) < len(diags):
+        added = False
+        for k in order:
+            if i < len(buckets[k]):
+                out.append(buckets[k][i])
+                added = True
+        if not added:
+            break
+        i += 1
+    return out
+
+
+def _heatmap_ctx(relations: Any, signals: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Correlation heatmap (strongest-related signals, at most 40) and a lead / lag summary in words."""
+    if not isinstance(relations, dict):
+        return None
+    corr = relations.get("corr") or {}
+    pairs = relations.get("pairs") or []
+    if not corr:
+        return None
+    strength: dict[str, float] = {}
+    for pr in pairs:
+        for k in (pr.get("a"), pr.get("b")):
+            if k:
+                strength[k] = strength.get(k, 0.0) + abs(float(pr.get("r") or 0.0))
+    names = [s.get("id") for s in signals if s.get("id") in corr and not s.get("excluded")]
+    names = sorted(names, key=lambda a: -strength.get(a, 0.0))[:40]
+    names.sort()
+    display = {s.get("id"): (s.get("display_name") or s.get("id")) for s in signals}
+    matrix = [[(corr.get(a) or {}).get(b) for b in names] for a in names]
+    lags = []
+    for pr in sorted(pairs, key=lambda p: -abs(float(p.get("r") or 0.0))):
+        lag = int(pr.get("lag") or 0)
+        if lag >= 1 and abs(float(pr.get("r") or 0.0)) >= 0.5:
+            lags.append({"lead": pr.get("a"), "follow": pr.get("b"), "lag": lag, "r": round(float(pr.get("r") or 0.0), 2)})
+        if len(lags) >= 12:
+            break
+    return {"svg": charts.heatmap([display.get(n, n) for n in names], matrix, cell=11 if len(names) > 25 else 14, title="correlation heatmap"), "n": len(names), "lags": lags}
+
+
+def _baseline_ctx(baseline: Any) -> Optional[dict[str, Any]]:
+    """Why this baseline, which others were considered, and what breaks if it is wrong."""
+    if not isinstance(baseline, dict):
+        return None
+    cands = []
+    for c in baseline.get("candidates") or []:
+        if isinstance(c, dict):
+            cands.append({"strategy": c.get("strategy") or c.get("name"), "score": c.get("score"), "fraction": c.get("fraction"), "separation": c.get("separation"), "generalization": c.get("generalization"), "coverage": c.get("coverage")})
+    cands.sort(key=lambda c: -(float(c.get("score") or 0)))
+    chosen = baseline.get("strategy")
+    runner = next((c for c in cands if c.get("strategy") != chosen), None)
+    top = next((c for c in cands if c.get("strategy") == chosen), cands[0] if cands else None)
+    margin = (float(top.get("score") or 0) - float(runner.get("score") or 0)) if (top and runner) else None
+    return {"candidates": cands[:6], "chosen": chosen, "runner_up": runner.get("strategy") if runner else None, "margin": None if margin is None else round(margin, 3), "fraction": baseline.get("selected_fraction_of_sample"), "confidence": baseline.get("confidence")}
+
+
+def _eval_headline(evaluation: Any) -> list[dict[str, Any]]:
+    """Plain numbers per label column: precision, recall, false alarms, detection, confidence calibration."""
+    out = []
+    for col, c in ((evaluation or {}).get("columns") or {}).items():
+        if not isinstance(c, dict) or "row_level" not in c:
+            continue
+        rl, gl = c.get("row_level") or {}, c.get("group_level") or {}
+        out.append({"column": col, "normal": c.get("normal_value"), "precision": rl.get("precision"), "recall": rl.get("recall"), "flagged": rl.get("flagged_fraction"), "false_alarm": gl.get("false_alarm_rate"), "detection": gl.get("detection_rate"), "n_normal": gl.get("n_groups_normal"), "n_abnormal": gl.get("n_groups_abnormal"), "calibration": c.get("confidence_calibration") or []})
     return out
 
 
@@ -544,12 +737,17 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     by_cat = [(t.cat(k), dict(v)) for k, v in cats.items() if sum(v.values()) > 0]
     failed = sorted([c for c in checks if c.get("status") in ("fail", "warn")], key=lambda c: (c.get("status") != "fail", -float(c.get("severity") or 0)))[:MAX_CHECK_ROWS]
     untrusted = [x for x in trust if not x.get("trusted", True)]
+    # run-level verdict (round 6): never "fine" while checks fail; "not testable" is neither a pass nor a failure
+    verdict_text = _quality_verdict(t, ws.read_json("quality_summary.json", {}) or {}, trust, n_batches, st_counts)
+    nt_cats = sorted({str(c.get("category")) for c in checks if c.get("status") == "not_testable"})
+    not_testable_text = t("dq_not_testable", n=st_counts.get("not_testable", 0), cats=", ".join(t.cat(c) for c in nt_cats)) if nt_cats else ""
     rule_rows = []
     checks_by_rule = Counter(str(c.get("rule_id")) for c in checks if c.get("rule_id"))
     for r in rules:
         comp = r.get("compiled")
         rule_rows.append({"id": r.get("id"), "text": r.get("text"), "status": r.get("status"), "compiled": _short(json.dumps(comp, ensure_ascii=False), 220) if comp else "", "explanation_text": clean_text(r.get("compile_explanation")), "compile_source": r.get("compile_source"), "compile_confidence": r.get("compile_confidence"), "explanation": r.get("compile_explanation"), "n_checks": checks_by_rule.get(str(r.get("id")), 0)})
-    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "trust_series": _trust_series(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
+    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "n_not_testable": st_counts.get("not_testable", 0), "verdict_text": verdict_text, "not_testable_text": not_testable_text,
+               "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail"), "not_testable": t("not_testable")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "trust_series": _trust_series(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
 
     # ---- detect
     tl = _score_timelines(ws, schema, flags, detect_meta, t)
@@ -567,13 +765,13 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     flags_by_kind = [(t.kind(k), n) for k, n in Counter(str(f.get("kind")) for f in sustained).most_common(8)]
     flags_by_cause = [(t.cause(k), n) for k, n in Counter(str(f.get("likely_cause_class")) for f in sustained if f.get("likely_cause_class")).most_common(8)]
     suspicious = _suspicious(ws, point_flags, evidence, explain, t)
-    detect = {"flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
+    detect = {"trends": _drift_trends(ws, sustained, signals, baseline), "baseline_why": _baseline_ctx(baseline), "heatmap": _heatmap_ctx(relations, signals), "flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
 
     # ---- diagnoses
     diag_rows = []
     flag_sev = {f.get("id"): float(f.get("severity") or 0) for f in flags}
     diag_sev = {id(d): max([flag_sev.get(i, 0.0) for i in (d.get("flag_ids") or [])] or [0.0]) for d in diags}
-    diags_sorted = sorted(diags, key=lambda d: (-diag_sev[id(d)], -float(d.get("confidence") or 0))) if len(diags) > MAX_DIAGNOSES else diags
+    diags_sorted = _diverse(diags, diag_sev) if len(diags) > MAX_DIAGNOSES else diags
     for i_d, d in enumerate(diags_sorted[:MAX_DIAGNOSES]):
         if i_d >= MAX_DIAG_CARDS:  # compact row: what, where, how sure, and the first whole sentences of the summary
             crit_c = d.get("critique") or None
@@ -613,6 +811,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         "ledger": [{**r, "purpose": _short(r.get("purpose"), 90), "artifact_types": ", ".join(r.get("artifact_types") or [])} for r in ledger[:200]], "n_ledger": len(ledger), "summary": summ, "statement": statement,
         "guard_items": t("s8_guard_items", min_n=g.min_aggregate_n, max_series=g.max_series_points, max_vals=g.max_numeric_values_per_payload, max_bytes=g.max_payload_bytes),
     }
+    dataflow.update(_dataflow_round6(ws, settings, lang))  # round 6 (E): who wrote the explanations; guard demonstration
 
     # ---- dataset / overview
     n_excluded = sum(1 for s in signals if s.get("excluded")) + (len(schema.get("label_columns") or []) + len(schema.get("meta_columns") or []) if schema else 0)
@@ -630,6 +829,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         overview.append(t("overview_dataset_missing"))
     if checks:
         overview.append(t("overview_quality", n_checks=len(checks), n_pass=quality["n_pass"], n_warn=quality["n_warn"], n_fail=quality["n_fail"], n_untrusted=len(untrusted), n_batches=n_batches))
+        overview.append(" ".join(x for x in (verdict_text, not_testable_text) if x))
     if flags or patterns:
         overview.append(t("overview_detect", n_flags=len(sustained), n_groups_flagged=len({f.get("group_id") for f in sustained}), n_patterns=len(patterns)))
     if suspicious and (suspicious["rows"] or suspicious["point_flags"]):
@@ -653,7 +853,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         for k, v in list(nested.items())[:3]:
             cols = sorted({c for row in v.values() for c in row.keys()})[:8]
             tables.append({"name": k, "cols": cols, "rows": [(gk, [row.get(c) for c in cols]) for gk, row in list(v.items())[:60]]})
-        eval_ctx = {"scalars": _scalars(evaluation), "tables": tables}
+        eval_ctx = {"scalars": _scalars(evaluation), "tables": tables, "headline": _eval_headline(evaluation), "rule": (evaluation or {}).get("event_rule")}
     assess_ctx = None
     if isinstance(assessor, dict) and assessor:
         lc = assessor.get("learning_curve")

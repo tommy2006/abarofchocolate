@@ -78,16 +78,32 @@ discounts, duplicated rows, a batch entered two days late, a copy-pasted constan
 The operator experience is the same: the flag names the responsible columns, the diagnosis separates "broken data"
 from "broken process", and every claim links to evidence IDs.
 
-### C. Log / free-text records (bonus, third domain — walkthrough only)
+### C. Log / free-text records (third domain - implemented and run)
 
-A log table (timestamp, host, level, component, message, latency) enters through the same reader. `message` gets
-the `text` role: the profile stage derives per-batch numeric features (template rarity after masking digits,
-token entropy, embedding distance to the batch centroid with the local embedding model, count per template). From
-there the pipeline is unchanged: a new error template appearing in one component is an abrupt correlation-structure
-break attributed to the derived rarity feature; a slowly growing share of retries is a gradual drift in a frequency
-feature; the rule "no more than 5 ERROR lines per minute per host" compiles to the existing rolling-count check.
-What is *not* generic — parsing free text into templates — is exactly the adapter: a feature extractor in the
-profile stage, behind the same `SignalDescriptor` contract.
+`samples/demo_log.csv` (made by `samples/make_demo_log.py`, truth in `samples/demo_log_truth.json`) is a web-service
+event log: timestamp, service, level, status code, latency, bytes, user id and a free-text message, with four planted
+problems (a database incident, a logging bug that writes latency 0, 100 rows written twice, a slow memory leak).
+
+The only adapter is `tpm/ingest/events_adapter.py`. On event-like tables (the domain estimate says event log, or not a
+sensor stream and there is a time column) it turns what logs are made of into ordinary numeric signals:
+
+- for every per-row category (2-12 values that change from row to row, e.g. `level`, `service`): the share of each of
+  its rarest values over the last 50 rows (`share of level = ERROR in the last 50 rows`);
+- for every free-text column: the length of the text.
+
+Nothing depends on column names; sensor tables are untouched (tested). From there the pipeline is unchanged. Result of
+`python -m tpm run samples/demo_log.csv`:
+
+| Planted | Found |
+|---|---|
+| database incident (30 % errors, db/api 4x slower), rows 8000-8599 | drift, rows 8014-9043, led by *share of level = ERROR* rising and *share of INFO* falling; cause: process |
+| logging bug (latency written as 0), rows 13000-13299 | data problem on latency ("repeats the same value"), rows 12998-13404; cause: data |
+| 100 duplicated rows, 13200-13299 | inside the same data finding (duplicate-row check) |
+| slow worker memory leak, rows 16000-17499 | not found: only 10 % of the rows are worker jobs, so the latency mix hides it (a per-service latency signal would need the grouping below) |
+
+Also exposed and fixed by this domain and by the business records of section B: whole numbers in a narrow band that
+repeat without order (customer id, user id, status code) are identifiers or codes, not measurements; diagnoses on
+records and logs use data words ("entry problem in a column", "repeats the same value") instead of sensor words.
 
 ## 4. What stays fixed by design
 

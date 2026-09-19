@@ -7,6 +7,9 @@ Three layers, all recorded in Critique.checks / objections:
   2. cross-checks    per-detector agreement recorded in the event evidence (fraction of detectors firing)
   3. devil's advocate an LLM objection list citing evidence ids (tpm.llm.complete("critique")), with a
                      template fallback that always produces objections citing evidence ids.
+  4. alternatives    (round 6) the critique argues the other explanations - a data problem, a process change, a
+                     saturated actuator, a single broken sensor - from the evidence of the event; an alternative at
+                     least as well supported as the diagnosis weakens or rejects it, and every disagreement is logged.
 The verdict (supported | weakened | rejected) adjusts the diagnosis confidence.
 """
 from __future__ import annotations
@@ -62,6 +65,68 @@ def code_checks(ws, diag: Diagnosis, flags_by_id: dict[str, Any], baseline: dict
         bad = [st for st in diag.propagation if "does not match" in st.explanation]
         checks.append(_check("propagation_consistent", not bad, f"{len(bad)} propagation step(s) contradict the learned lead/lag structure" if bad else "propagation order is consistent with learned relations", 0.1))
     return checks
+
+
+ALT_NAMES = {"data": "a data problem", "process": "a process change", "actuator_saturation": "a saturated actuator (valve at its limit)", "sensor": "a single broken sensor"}
+
+
+def _roles(ws) -> dict[str, str]:
+    try:
+        return {s.id: s.structural_role for s in ws.signals()}
+    except Exception:
+        return {}
+
+
+def alternatives(ws, diag: Diagnosis, main: Any) -> list[dict[str, Any]]:
+    """Support (0..1) for each explanation of the event, from its own evidence. The diagnosis' own explanation is
+    included, so the critique can compare like with like."""
+    ranked = list(diag.ranked_signals or [])
+    det = diag.cause_detail or (getattr(main, "cause_detail", None) or {})
+    tc = (getattr(main, "trust_context", None) or {}) if main is not None else {}
+    untrusted = set(tc.get("untrusted_signals") or [])
+    roles = _roles(ws)
+    stuck = [r for r in ranked if r.direction == "stuck"]
+    moved = [r for r in ranked if r.direction != "stuck" and r.contribution >= 0.12]
+    top = ranked[0] if ranked else None
+    out: list[dict[str, Any]] = []
+    # a data problem
+    data_s, data_why = 0.0, []
+    if det.get("kind") in ("common_freeze", "duplicate_rows", "untrusted_signal"):
+        data_s, data_why = 0.8, [f"the cause rule saw {det.get('kind').replace('_', ' ')}"]
+    if len(stuck) >= 2:
+        data_s = max(data_s, 0.65)
+        data_why.append(f"{len(stuck)} of the listed signals froze in the same rows")
+    if top is not None and top.signal in untrusted:
+        data_s = max(data_s, 0.75)
+        data_why.append(f"{top.signal} was distrusted by the data-quality checks")
+    if tc and not tc.get("trusted", True):
+        data_s = max(data_s, 0.55)
+        data_why.append("the batch was marked untrusted")
+    out.append({"cause": "data", "support": data_s, "why": "; ".join(data_why) or "no data-quality finding overlaps these rows"})
+    # a saturated actuator
+    act = [r for r in stuck if roles.get(r.signal) == "actuator_like"]
+    sat_s = 0.8 if det.get("kind") == "actuator_saturation" else (0.6 if act else 0.0)
+    out.append({"cause": "actuator_saturation", "support": sat_s, "why": (f"{det.get('signal')} pinned at its {det.get('side')} limit" if det.get("kind") == "actuator_saturation" else (f"{act[0].signal} is a valve / controller output that stopped moving" if act else "no valve or controller output is frozen here"))})
+    # a process change
+    proc_s = 0.0
+    if len(moved) >= 2:
+        proc_s = 0.55 + (0.15 if diag.propagation else 0.0)
+    if det.get("spread"):
+        proc_s = max(proc_s, 0.5)
+    out.append({"cause": "process", "support": proc_s, "why": (f"{len(moved)} signals moved together" + (" along learned relations" if diag.propagation else "")) if moved else "fewer than two signals moved"})
+    # a single broken sensor
+    sen_s = 0.0
+    if top is not None and top.contribution >= 0.45 and all(r.contribution < 0.15 for r in ranked[1:]) and top.signal not in untrusted and roles.get(top.signal) != "actuator_like":
+        sen_s = 0.6 + (0.1 if top.direction in ("stuck", "noisy", "shifted") else 0.0)
+    if det.get("spread"):
+        sen_s = min(sen_s, 0.2)
+    out.append({"cause": "sensor", "support": sen_s, "why": (f"{top.signal} alone carries {top.contribution:.0%} while the others stay below 15%" if sen_s else "no single signal dominates") if top is not None else "no ranked signals"})
+    return out
+
+
+def _own_cause(diag: Diagnosis) -> str:
+    det = diag.cause_detail or {}
+    return "actuator_saturation" if det.get("kind") == "actuator_saturation" else diag.cause_class
 
 
 def template_objections(diag: Diagnosis, checks: list[dict[str, Any]]) -> list[str]:
@@ -148,17 +213,29 @@ def critique_diagnosis(ws, settings, diag: Diagnosis, flags_by_id: dict[str, Any
     """model_objections: (objections, source) already obtained from the model (the concurrent external path asks the
     model in a worker and applies the answer here); given, no model call is made."""
     checks = code_checks(ws, diag, flags_by_id, baseline, patterns_by_id, window)
+    flags = [flags_by_id[f] for f in diag.flag_ids if f in flags_by_id]
+    main = max(flags, key=lambda f: f.score * (f.row_end - f.row_start + 1)) if flags else None
+    alts = alternatives(ws, diag, main)
+    own = _own_cause(diag)
+    own_s = next((a["support"] for a in alts if a["cause"] == own), 0.0)
+    rivals = sorted([a for a in alts if a["cause"] != own and a["support"] >= 0.5], key=lambda a: -a["support"])
+    disagree = [a for a in rivals if a["support"] >= max(0.5, own_s)]
+    for a in rivals[:3]:
+        checks.append(_check(f"alternative_{a['cause']}", a not in disagree, f"{ALT_NAMES.get(a['cause'], a['cause'])}: support {a['support']:.2f} ({a['why']}) vs {own_s:.2f} for the diagnosis", 0.25 if a in disagree else 0.1))
     objections = template_objections(diag, checks)
+    for a in disagree[:2]:
+        objections.insert(0, f"Alternative at least as likely: {ALT_NAMES.get(a['cause'], a['cause'])} - {a['why']} [cites {', '.join(diag.evidence_ids[:2]) or '(no evidence)'}]")
     source = "template"
     if use_llm or model_objections is not None:
         llm_objs, src = model_objections if model_objections is not None else llm_objections(ws, settings, diag, checks, language)
         if llm_objs:
             objections = [f"[{src}] {o}" for o in llm_objs] + objections
             source = f"{src}+template"
+    before = diag.confidence
     failed_weight = sum(c["weight"] for c in checks if not c["passed"])
     total_weight = sum(c["weight"] for c in checks) or 1.0
     penalty = failed_weight / total_weight
-    critical = any(not c["passed"] and c["name"] in ("top_signal_trusted",) for c in checks)
+    critical = any(not c["passed"] and c["name"] in ("top_signal_trusted",) for c in checks) or any(a["support"] >= 0.75 and a["support"] > own_s + 0.15 for a in disagree)
     if critical or penalty >= 0.6:
         verdict = "rejected"
         adjusted = max(0.05, diag.confidence * 0.4)
@@ -172,5 +249,8 @@ def critique_diagnosis(ws, settings, diag: Diagnosis, flags_by_id: dict[str, Any
     diag.confidence = round(float(adjusted), 3)
     if verdict != "supported":
         diag.uncertainty = list(diag.uncertainty) + [f"critique verdict: {verdict} ({', '.join(c['name'] for c in checks if not c['passed'])})"]
-    ws.log.record("system:diagnose", "critique", "diagnosis", diag.id, {"verdict": verdict, "adjusted_confidence": diag.confidence, "failed_checks": [c["name"] for c in checks if not c["passed"]], "source": source}, diag.evidence_ids)
+    ws.log.record("system:diagnose", "critique", "diagnosis", diag.id, {"verdict": verdict, "adjusted_confidence": diag.confidence, "failed_checks": [c["name"] for c in checks if not c["passed"]], "source": source, "alternatives": [{"cause": a["cause"], "support": a["support"]} for a in alts]}, diag.evidence_ids)
+    if disagree or verdict != "supported":
+        # the critique changed its mind: keep a separate, findable record of what it disagreed with and by how much
+        ws.log.record("system:critique", "critique_disagrees" if disagree else "critique_lowered_confidence", "diagnosis", diag.id, {"diagnosis_cause": own, "alternatives": [{"cause": a["cause"], "support": a["support"], "why": a["why"]} for a in disagree], "verdict": verdict, "confidence_before": before, "confidence_after": diag.confidence}, diag.evidence_ids)
     return diag

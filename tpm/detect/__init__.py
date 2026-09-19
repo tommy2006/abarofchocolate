@@ -24,7 +24,7 @@ from .baseline import BaselineResult, Sample, estimate_baseline, ranges_to_mask
 from .cascade import build_cascades, chain_for_flag
 from .ensemble import FoldMap, FoldModel, ScoreStore, _fit_fold, calibrate_ensemble_threshold, fit_final_model, fit_fold_models, load_final_model, make_folds, pilot_and_select, save_models, score_all_rows
 from .evaluate import run_evaluation
-from .events import FlagIds, build_flags, find_segments, segment_score, severity_of, trust_context
+from .events import FlagIds, build_flags, find_segments, segment_score, severity_of, trust_context, sustained_mask
 from .patterns import assign_to_pattern, build_patterns, name_pattern
 
 DETECT_KINDS = {"anomaly", "drift", "changepoint", "cascade"}
@@ -131,8 +131,9 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
     # persist flags: keep flags from other stages (dq/rule), replace ours
     existing = [f for f in ws.read_jsonl("flags") if f.get("kind") not in DETECT_KINDS]
     ws.rewrite_jsonl("flags", existing + [f.model_dump() for f in flags])
-    for f in flags[:2000]:
-        ws.log.record("system:detect", "flag", "flag", f.id, {"kind": f.kind, "group_id": f.group_id, "row_start": f.row_start, "row_end": f.row_end, "score": f.score, "cause": f.likely_cause_class, "pattern_id": f.pattern_id, "top_signals": [s.signal for s in f.signals_ranked[:3]]}, f.evidence_ids)
+    from ..log.stage_log import log_flags, log_stage_inferences  # decision log: EVERY flag gets its own entry (no cap), written in bulk
+
+    flag_log = log_flags(ws, flags)
     ws.write_json("propagation", {fid: [s.model_dump() for s in steps] for fid, steps in chains.items()})
     try:
         from .suspicious import build_suspicious_rows
@@ -146,12 +147,18 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
     if inputs.label_columns:
         t0 = time.time()
         try:
-            evaluation = run_evaluation(ws, inputs, store, flags, settings)
+            evaluation = run_evaluation(ws, inputs, store, flags, settings, rule=(ev_meta or {}).get("event_rule"))
         except Exception as e:
             notes.append(f"evaluation failed: {e}")
         lap("evaluation", t0)
 
-    n_flagged_rows = int((store.ens >= 1.0).sum())
+    # rows inside sustained events (the event rule), not every single reading above the row threshold
+    _er = (ev_meta or {}).get("event_rule") or {}
+    n_flagged_rows = 0
+    for _g, _idx in store.group_indices().items():
+        _o = np.argsort(store.rows[_idx], kind="stable")
+        n_flagged_rows += int(sustained_mask(store.ens[_idx][_o], int(_er.get("persist_rows") or 1), float(_er.get("sustained_threshold") or 1.0)).sum())
+    n_rows_above_row_threshold = int((store.ens >= 1.0).sum())
     meta = {
         "detectors_configured": detector_names,
         "detectors_used": selection["selected"],
@@ -165,15 +172,18 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
         "patterns": pat_meta,
         "rows_flagged": n_flagged_rows,
         "rows_flagged_fraction": round(n_flagged_rows / max(1, store.n), 4),
+        "rows_above_row_threshold": n_rows_above_row_threshold,
+        "event_rule": _er,
         "timing_s": timing | {"total": round(time.time() - t_start, 2)},
         "time_budget_s": budget.seconds,
         "memory": memory_snapshot(),
         "notes": notes,
         "evaluation_written": evaluation is not None,
-        "score_semantics": "scores.parquet: `ensemble` is normalized so that 1.0 is the calibrated threshold (is_flagged = ensemble >= 1); per-detector columns are score/threshold; top-k shares are the ensemble attribution.",
+        "score_semantics": "scores.parquet: `ensemble` is normalized so that 1.0 is the calibrated row threshold (is_flagged = ensemble >= 1 for one reading); an EVENT needs the median score of event_rule.persist_rows consecutive rows to reach event_rule.sustained_threshold; per-detector columns are score/threshold; top-k shares are the ensemble attribution.",
     }
     ws.write_json("detect_meta", meta)
-    ws.log.record("system:detect", "stage_summary", "dataset", "detect", {"n_flags": len(flags), "n_patterns": len(patterns), "detectors": selection["selected"], "seconds": round(time.time() - t_start, 1), "rows_flagged_fraction": meta["rows_flagged_fraction"]})
+    n_inf_logged = log_stage_inferences(ws, "detect")  # claims of the detect modules that have no entry of their own yet
+    ws.log.record("system:detect", "stage_summary", "dataset", "detect", {"n_flags": len(flags), "n_flags_logged": flag_log["n"], "log_seconds": flag_log["seconds"], "n_inferences_logged_at_end": n_inf_logged, "n_patterns": len(patterns), "detectors": selection["selected"], "seconds": round(time.time() - t_start, 1), "rows_flagged_fraction": meta["rows_flagged_fraction"]})
     progress(1.0, "done")
     msg = f"{len(flags)} flags ({ev_meta['n_groups_with_events']} of {ev_meta['n_groups']} groups), {len(patterns)} patterns, detectors {'+'.join(selection['selected'])}, baseline '{baseline.strategy}' (conf {baseline.confidence:.2f}), {time.time() - t_start:.0f}s"
     return {"message": msg, "n_flags": len(flags), "n_patterns": len(patterns), "detectors": selection["selected"], "baseline_strategy": baseline.strategy, "baseline_confidence": round(baseline.confidence, 3), "rows_flagged_fraction": meta["rows_flagged_fraction"], "seconds": round(time.time() - t_start, 1), "evaluation": None if evaluation is None else {c: r.get("auroc_ensemble") for c, r in evaluation.get("columns", {}).items()}}
@@ -257,6 +267,7 @@ def _slice_res(res: dict[str, Any], idx: np.ndarray) -> dict[str, Any]:
 
 
 def score_batch(ws, settings, batch_df, batch_id: str, trust: Optional[TrustVerdict] = None) -> list[Flag]:
+    _rule = ((ws.read_json("detect_meta") or {}).get("events") or {}).get("event_rule") or {}  # same event rule as the full run
     from .attribution import attribute_event
     from .changepoints import analyse_group_onset
 
@@ -289,7 +300,7 @@ def score_batch(ws, settings, batch_df, batch_id: str, trust: Optional[TrustVerd
         g = str(groups[s])
         idx = np.arange(s, e)
         sub = _slice_res(res, idx)
-        segs = find_segments(ens[s:e], min_len, max(min_len, window), window=window)
+        segs = find_segments(ens[s:e], min_len, max(min_len, window), window=window, persist=_rule.get("persist_rows"), sustain_thr=_rule.get("sustained_threshold"))
         onset = None
         if segs:
             try:
@@ -308,7 +319,7 @@ def score_batch(ws, settings, batch_df, batch_id: str, trust: Optional[TrustVerd
             lead = ", ".join(f"{r.signal} ({r.contribution:.0%}, {r.direction})" for r in ranked[:3])
             stmt = f"{'Drift' if kind == 'drift' else 'Anomaly'} in batch {batch_id}, group {g}, rows {row_start}-{row_end - 1} ({n_ev} rows): ensemble score {mean_norm:.1f}x threshold (peak {peak:.1f}x). Leading signals: {lead}. Likely cause: {att['cause']} ({att['cause_reason']})."
             ev_ids = list(att["evidence_ids"]) + ([onset.evidence_id] if onset is not None and onset.evidence_id else [])
-            fl = Flag(id=ids.next(), kind=kind, batch_id=batch_id, group_id=g, row_start=row_start, row_end=row_end - 1, severity=severity_of(mean_norm, n_ev, window), score=round(mean_norm, 4), threshold=1.0, detector="ensemble:" + "+".join(fm.selected), statement=stmt, signals_ranked=ranked, evidence_ids=ev_ids, likely_cause_class=att["cause"], confidence=round(conf, 3), trust_context=tctx)
+            fl = Flag(id=ids.next(), kind=kind, batch_id=batch_id, group_id=g, row_start=row_start, row_end=row_end - 1, severity=severity_of(mean_norm, n_ev, window), score=round(mean_norm, 4), threshold=1.0, detector="ensemble:" + "+".join(fm.selected), statement=stmt, signals_ranked=ranked, evidence_ids=ev_ids, likely_cause_class=att["cause"], cause_detail=att.get("cause_detail"), confidence=round(conf, 3), trust_context=tctx)
             fl.pattern_id = assign_to_pattern(fl, patterns) if patterns else None
             flags.append(fl)
         if onset is not None:
@@ -317,7 +328,9 @@ def score_batch(ws, settings, batch_df, batch_id: str, trust: Optional[TrustVerd
     flags.extend(cascade_flags)
     for f in flags:
         ws.append_jsonl("flags", f.model_dump())
-        ws.log.record("system:detect", "flag", "flag", f.id, {"kind": f.kind, "batch_id": batch_id, "group_id": f.group_id, "row_start": f.row_start, "row_end": f.row_end, "score": f.score, "cause": f.likely_cause_class, "pattern_id": f.pattern_id}, f.evidence_ids)
+    from ..log.stage_log import log_flags  # one entry per flag, all of the batch in one transaction
+
+    log_flags(ws, flags)
     if chains:
         prop = ws.read_json("propagation", {}) or {}
         prop.update({fid: [s.model_dump() for s in steps] for fid, steps in chains.items()})

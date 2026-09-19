@@ -279,13 +279,18 @@ def complete(
                         _release(ws)
 
     # ---------------- local ----------------
+    # The local model runs on this machine: nothing leaves it, so the guard removes nothing. It still looks at the payload
+    # in audit mode, and the ledger says what it would have removed had the call gone out (guard_mod.audit_local).
     local = OllamaProvider(settings)
     guard_result = "fallback" if came_from_external else "n/a"
-    guard_reason = ("; ".join(errors)[:400]) if came_from_external else "local route: guard not required"
+    if came_from_external:
+        guard_reason, audit = ("; ".join(errors)[:300] + "; answered on this machine instead (nothing left it)"), None
+    else:
+        guard_reason, audit = guard_mod.audit_local(payload, settings, ws=ws)
     model = local.pick_model() if local.is_available() else None
     if model is None:
         err = "ollama not reachable" if not local.is_available() else f"none of the configured models is pulled ({', '.join(local.candidate_models())})"
-        _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=settings.local_llm.model, payload=payload, artifact_types=artifact_types, guard_result=guard_result, guard_reason=guard_reason, ok=False, error=err)
+        _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=settings.local_llm.model, payload=payload, artifact_types=artifact_types, guard_result=guard_result, guard_reason=guard_reason, ok=False, error=err, sanitizer=audit)
         errors.append(err)
     else:
         sys_t, user_t = prompts_mod.render(task, payload, language=language, system_override=system, schema=schema)
@@ -296,7 +301,7 @@ def complete(
                     text, parsed, latency = _chat_with_repair(local, msgs, schema, max_tokens or 1500, model=model)
             else:
                 text, parsed, latency = _chat_with_repair(local, msgs, schema, max_tokens or 1500, model=model)
-            rec = _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=artifact_types, guard_result=guard_result, guard_reason=guard_reason, response_text=text, latency_ms=latency, ok=True)
+            rec = _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=artifact_types, guard_result=guard_result, guard_reason=guard_reason, response_text=text, latency_ms=latency, ok=True, sanitizer=audit)
             res = _finish(text, parsed, schema, f"llm-local:{model}", model, "local", rec.id, latency)
             if res.ok:
                 return res
@@ -304,7 +309,7 @@ def complete(
             res.error = "; ".join(errors)
             return res
         except Exception as e:
-            _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=artifact_types, guard_result=guard_result, guard_reason=guard_reason, ok=False, error=str(e)[:500])
+            _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=artifact_types, guard_result=guard_result, guard_reason=guard_reason, ok=False, error=str(e)[:500], sanitizer=audit)
             errors.append(f"local failed: {e}")
 
     # ---------------- template ----------------
@@ -375,24 +380,27 @@ def local_chat(
     artifact_types: Optional[list[str]] = None,
     temperature: Optional[float] = None,
 ) -> LLMResult:
-    """Raw multi-turn call to the LOCAL model (used by the tool agent). Ledger-recorded; never external."""
+    """Raw multi-turn call to the LOCAL model (used by the tool agent). Ledger-recorded; never external. The messages
+    are sent as they are (the agent's local tools may have read exact rows); the ledger records, in audit mode, what the
+    guard would have replaced had they gone out."""
     settings = _settings(settings)
     local = OllamaProvider(settings)
     model = local.pick_model() if local.is_available() else None
     payload = {"messages": messages}
     types = artifact_types or ["chat"]
+    guard_reason, audit = guard_mod.audit_messages(messages, settings, ws=ws)
     if model is None:
         err = "ollama not reachable" if not local.is_available() else "no configured model pulled"
-        _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=settings.local_llm.model, payload=payload, artifact_types=types, guard_result="n/a", guard_reason="local route", ok=False, error=err)
+        _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=settings.local_llm.model, payload=payload, artifact_types=types, guard_result="n/a", guard_reason=guard_reason, ok=False, error=err, sanitizer=audit)
         return LLMResult(text="", data=None, source="template", route="none", ok=False, error=err)
     try:
         text, parsed, latency = local.chat(messages, schema=schema, max_tokens=max_tokens or 1200, model=model, temperature=temperature)
         if schema and parsed is None:
             parsed = extract_json(text)
-        rec = _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=types, guard_result="n/a", guard_reason="local route", response_text=text, latency_ms=latency, ok=True)
+        rec = _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=types, guard_result="n/a", guard_reason=guard_reason, response_text=text, latency_ms=latency, ok=True, sanitizer=audit)
         return _finish(text, parsed, schema, f"llm-local:{model}", model, "local", rec.id, latency)
     except Exception as e:
-        _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=types, guard_result="n/a", guard_reason="local route", ok=False, error=str(e)[:500])
+        _record(ws, task=task, purpose=purpose, route="local", provider=settings.local_llm.provider, model=model, payload=payload, artifact_types=types, guard_result="n/a", guard_reason=guard_reason, ok=False, error=str(e)[:500], sanitizer=audit)
         return LLMResult(text="", data=None, source="template", model=model, route="local", ok=False, error=str(e))
 
 

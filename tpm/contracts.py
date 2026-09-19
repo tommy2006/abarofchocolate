@@ -138,12 +138,17 @@ class DatasetSchema(BaseModel):
 
 
 CheckCategory = Literal["completeness", "validity", "consistency", "timeliness", "rule"]
-CheckStatus = Literal["pass", "warn", "fail"]
+# "not_testable" (round 6): the check could not be run on this data (e.g. timeliness without a time column). It is
+# neither a pass nor a problem: consumers must not count it as passed, failed or warned (see tpm.quality.is_problem).
+CheckStatus = Literal["pass", "warn", "fail", "not_testable"]
 
 
 class CheckResult(BaseModel):
     check_id: str  # "CHK-000012"
-    check_type: str  # "missing" | "stuck" | "out_of_range" | "gap" | "duplicate" | "unit_shift" | "rule:<rule_id>" | ...
+    # "missing" | "stuck" | "out_of_range" | "plausibility" | "gap" | "duplicate_rows" | "unit_shift" | "rule:<rule_id>" | ...
+    # grouped (common-mode) findings: "frozen_block" | "missing_block" | "quantization_block" (one check for many signals)
+    # "timeliness_not_testable" (status not_testable)
+    check_type: str
     category: str  # CheckCategory
     signals: list[str] = Field(default_factory=list)
     batch_id: str
@@ -153,6 +158,7 @@ class CheckResult(BaseModel):
     statement: str
     evidence_ids: list[str] = Field(default_factory=list)
     rule_id: Optional[str] = None  # traceability to the originating rule
+    # values["confidence"] (0..1, heuristic) + values["confidence_basis"] (plain words) on every check since round 6
     values: dict[str, Any] = Field(default_factory=dict)
     row_start: Optional[int] = None
     row_end: Optional[int] = None
@@ -165,6 +171,11 @@ class TrustVerdict(BaseModel):
     trust_score: float  # 0..1
     untrusted_signals: list[str] = Field(default_factory=list)  # unreliable for a meaningful share of the batch
     local_untrusted: list[dict[str, Any]] = Field(default_factory=list)  # [{signal,row_start,row_end,check_type,severity}] unreliable only in those rows
+    # record-level problems (duplicated records, rows frozen or missing in many signals at once, empty rows): these rows
+    # are untrusted for EVERY signal. [{row_start,row_end,check_type,check_id}] (largest first, capped); the share of
+    # the batch rows they cover is untrusted_row_share (round 6)
+    untrusted_rows: list[dict[str, Any]] = Field(default_factory=list)
+    untrusted_row_share: float = 0.0
     n_rows: Optional[int] = None  # batch rows the exposure weighting used (what-if recomputations reuse it)
     reasons: list[str] = Field(default_factory=list)
     check_ids: list[str] = Field(default_factory=list)
@@ -219,6 +230,9 @@ class Flag(BaseModel):
     signals_ranked: list[SignalContribution] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     likely_cause_class: str = "unknown"  # CauseClass
+    # what exactly the cause rule saw: {"kind": "actuator_saturation" | "common_freeze" | "duplicate_rows" |
+    # "single_sensor" | ..., ...} and {"spread": {...}} when no single signal dominates the deviation
+    cause_detail: Optional[dict[str, Any]] = None
     confidence: float = 0.5
     pattern_id: Optional[str] = None
     trust_context: Optional[dict[str, Any]] = None  # trust verdict summary of the batch
@@ -263,6 +277,7 @@ class Diagnosis(BaseModel):
     pattern_id: Optional[str] = None
     fault_type: str  # pattern name or "PATTERN-A (unnamed)" or "sensor fault" ...
     cause_class: str = "unknown"  # CauseClass
+    cause_detail: Optional[dict[str, Any]] = None  # copied from the main flag (see Flag.cause_detail)
     ranked_signals: list[SignalContribution] = Field(default_factory=list)
     propagation: list[PropagationStep] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)  # step-by-step explanation for a non-expert

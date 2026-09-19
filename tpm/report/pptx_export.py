@@ -834,7 +834,16 @@ class _Deck:
         rows = [[_thousands(summ.get("n_local", 0), lang), _thousands(summ.get("n_external", 0), lang), _thousands(summ.get("n_blocked", 0), lang), _thousands(summ.get("n_fallback", 0), lang), _thousands(summ.get("bytes_external", 0), lang)]]
         self.table(slide, MARGIN, y, SLIDE_W - 2 * MARGIN, [t("calls_local"), t("calls_external"), t("calls_blocked"), t("calls_fallback"), t("bytes_external")], rows, [20, 20, 20, 20, 20], size=13, row_h=0.45)
         y += 0.36 + 0.45 + 0.12
-        self.text(slide, MARGIN - INSET, y, SLIDE_W - 2 * MARGIN, CONTENT_BOTTOM - y + 0.05, [{"text": t("s8_intro"), "size": 10.5, "color": MUTED, "after": 0}], role="body")
+        foot = []  # round 6: who wrote the explanations, and the guard demonstration on this run (when made)
+        if df.get("coverage"):
+            foot.append({"text": str(df["coverage"].get("sentence") or ""), "size": 10.5, "color": INK, "after": 3})
+        gd = df.get("guard_demo")
+        if gd:
+            first = next(iter(gd.get("unsafe") or []), "")
+            foot.append({"text": f"{gd.get('title')}: {first}".strip(": "), "size": 10, "color": MUTED, "after": 0})
+        if not foot:
+            foot = [{"text": t("s8_intro"), "size": 10.5, "color": MUTED, "after": 0}]
+        self.text(slide, MARGIN - INSET, y, SLIDE_W - 2 * MARGIN, CONTENT_BOTTOM - y + 0.05, foot, role="body")
         self.finish(slide, n, [r.get("id") for r in (df.get("ledger") or [])[:12]], t("section_8"))
 
     def slide_assessor(self, n: int) -> None:

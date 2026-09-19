@@ -6,9 +6,10 @@
     python -m tpm report <run_id> [--format html|pdf|pptx|all] [--lang en|fi|sv|all] [--out FILE|DIR] [--no-llm]
     python -m tpm email <run_id> --to a@b.c [--lang en] [--pdf] [--pptx]
     python -m tpm export <run_id> [--out DIR]
-    python -m tpm verify-log <run_id>
+    python -m tpm verify-log <run_id> [--json]          (hash chain + completeness audit of the decision log)
     python -m tpm bench-llm --run <run_id> [--profile hybrid] [--tasks a,b] [--n 3] [--routes local,external] [--dry-run]
-    python -m tpm models | bakeoff | demo | doctor | list
+    python -m tpm guard-demo --run <run_id> [--profile hybrid|eu-hosted] [--send] [--json]
+    python -m tpm models [--run <run_id>] | bakeoff | demo | doctor | list
 """
 from __future__ import annotations
 
@@ -115,18 +116,6 @@ def _parse_opt(kv: str) -> tuple[str, Any]:
     if "," in v and k.endswith("s"):
         return k, [x.strip() for x in v.split(",") if x.strip()]
     return k, v
-
-
-def _read_rules_file(path: Path) -> list[str]:
-    lines = []
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        s = raw.strip()
-        if not s or s.startswith("#"):
-            continue
-        s = s.lstrip("-*0123456789. ").strip()
-        if s:
-            lines.append(s)
-    return lines
 
 
 class _ProgressDisplay:
@@ -247,17 +236,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         rp = Path(args.rules)
         if not rp.exists():
             return _fail(f"rules file not found: {rp}")
-        texts = _read_rules_file(rp)
-        options["rules"] = texts
-        options["rules_file"] = str(rp.resolve())
-        from .contracts import Rule
-        from .workspace import Workspace
+        from .quality.rules import load_rules_file
 
-        ws0 = Workspace(run_id=run_id, settings=settings)
-        if not ws0.exists("rules"):
-            ws0.write_json("rules", [Rule(id=f"RULE-{i + 1:03d}", text=t, author="human", status="approved", compile_source="template").model_dump() for i, t in enumerate(texts)])
-        ws0.close()
-        _p(f"Loaded {len(texts)} rule(s) from {rp}")
+        texts = load_rules_file(rp)  # the same reader the quality stage uses: prose lines of the file are not rules
+        options["rules"] = texts  # recorded in meta.json
+        options["rules_file"] = str(rp.resolve())  # compiled once, by the quality stage (no drafts written here: they became duplicates)
+        _p(f"Loaded {len(texts)} rule(s) from {rp}; the quality stage compiles them into checks")
+        if stages and "quality" not in stages:
+            _p("  note: the quality stage is not in --stages, so the rules are not compiled in this run")
 
     display = _ProgressDisplay(settings.time_budget_s, quiet=args.quiet)
     _p(f"{BANNER} - run {run_id}")
@@ -368,7 +354,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     langs = [args.lang] if args.lang and args.lang != "all" else settings.report.languages
     fmt = (getattr(args, "format", None) or "html").lower()
-    formats = ["html", "pdf", "pptx"] if fmt == "all" else [fmt]
+    formats = ["html", "pdf", "pptx", "summary"] if fmt == "all" else [fmt]
     single = len(langs) == 1 and len(formats) == 1
     out_dir = Path(args.out) if args.out and not single else None
     if out_dir is not None:
@@ -384,9 +370,14 @@ def cmd_report(args: argparse.Namespace) -> int:
             if "html" in formats:
                 out = generate_report(ws, settings, lang, use_llm=not args.no_llm, out_path=target(lang, "html"))
                 _p(f"Report written: {out}")
-            if "pdf" in formats or "pptx" in formats:
+            if "pdf" in formats or "pptx" in formats or "summary" in formats:
                 t0 = time.time()
-                ctx = export_context(ws, settings, lang)  # collected once per language, shared by both documents
+                ctx = export_context(ws, settings, lang)  # collected once per language, shared by every document
+                if "summary" in formats:
+                    from .report.summary_pdf import generate_summary
+
+                    out = generate_summary(ws, settings, lang, out_path=target(lang, "summary"), context=ctx)
+                    _p(f"One-page summary written: {out}")
                 if "pdf" in formats:
                     from .report.pdf import browser_pdf, generate_pdf
 
@@ -444,18 +435,28 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_verify_log(args: argparse.Namespace) -> int:
+    """Chain check (exit code 0 / 1), then the completeness audit: per object type, how many objects the run's
+    artifacts hold and how many have an entry of their own in the log, with the reason for every gap."""
     settings = _settings(args)
     ws = _open_ws(args.run_id, settings)
+    from .log.completeness import audit, format_audit
+
     try:
         res = ws.log.verify_chain()
         n = ws.log.count()
+        comp = None if getattr(args, "no_audit", False) else audit(ws)
     finally:
         ws.close()
+    if getattr(args, "json", False):
+        _p(json.dumps({"chain": {**res, "total": n}, "completeness": comp}, indent=1, default=str))
+        return 0 if res.get("ok") else 1
     if res.get("ok"):
         _p(f"OK: hash chain intact, {res['checked']} entries verified ({n} total)")
-        return 0
-    _p(f"FAIL: chain broken at seq {res.get('first_bad_seq')} after {res.get('checked')} good entries")
-    return 1
+    else:
+        _p(f"FAIL: chain broken at seq {res.get('first_bad_seq')} after {res.get('checked')} good entries")
+    for line in format_audit(comp) if comp else []:
+        _p(line)
+    return 0 if res.get("ok") else 1
 
 
 def _ollama_tags(base_url: str, timeout: float = 2.5) -> Optional[list[dict[str, Any]]]:
@@ -537,6 +538,12 @@ def cmd_models(args: argparse.Namespace) -> int:
             _p(f"  {'[x]' if ok else '[ ]'} {m}" + ("" if ok else f"   ->  ollama pull {m}"))
     key = settings.external_llm.api_key
     _p(f"External model: {settings.external_llm.provider}/{settings.external_llm.model}  API key {'present' if key else 'NOT set'} ({settings.external_llm.api_key_env}); route allowed by profile: {settings.active_profile.allow_external}")
+    try:
+        line = _coverage_line(settings, getattr(args, "run", None))
+    except Exception as e:  # the model listing must not fail because of one run
+        line = f"Explanations: could not be read ({e})"
+    if line:
+        _p(line)
     return 0
 
 
@@ -564,6 +571,55 @@ def cmd_bench_llm(args: argparse.Namespace) -> int:
     _p(bench.format_table(result))
     _p(f"Written: {ws.dir / (bench.DRY_RUN_FILE if args.dry_run else bench.BENCH_FILE)}")
     return 0
+
+
+def cmd_guard_demo(args: argparse.Namespace) -> int:
+    """Prove the egress guard on a real run: a real payload before / after the guard, an operator question naming
+    original columns, and a deliberately unsafe payload that is blocked and never sent (tpm.llm.guard_demo)."""
+    settings = _settings(argparse.Namespace(settings=getattr(args, "settings", None), workspace=getattr(args, "workspace", None), profile=None))
+    ws = _open_ws(args.run, settings)
+    from .llm import guard_demo
+
+    try:
+        result = guard_demo.run_demo(ws, settings, profile=args.profile, send=bool(args.send), language=args.lang or "en")
+    except ValueError as e:
+        ws.close()
+        return _fail(str(e))
+    except Exception as e:  # a broken artifact must not end in a traceback
+        ws.close()
+        return _fail(f"the guard demonstration failed: {e}")
+    try:
+        if args.json:
+            _p(json.dumps(result, indent=1, ensure_ascii=False, default=str))
+        else:
+            for line in guard_demo.format_demo(result, ws.dir):
+                _p(line)
+    finally:
+        ws.close()
+    if (result.get("unsafe") or {}).get("verdict") != "blocked" or (result.get("headers_check") or {}).get("found"):
+        _err("the guard let raw material through: see the lines above")
+        return 2
+    return 0
+
+
+def _coverage_line(settings: Any, run_id: Optional[str]) -> Optional[str]:
+    """`tpm models`: who wrote the explanations of a run (the latest one by default), in one plain sentence."""
+    from .workspace import Workspace
+
+    runs = Workspace.list_runs(settings)
+    rid = run_id if run_id and run_id not in ("latest", "last") else (runs[0]["run_id"] if runs else None)
+    if not rid or not (settings.workspace_path / rid / "status.json").exists():
+        return None
+    from .llm.ledger import narrative_coverage
+
+    ws = Workspace.open(rid, settings)
+    try:
+        cov = narrative_coverage(ws, settings)
+    finally:
+        ws.close()
+    if not (cov.get("diagnoses") or {}).get("total"):
+        return None
+    return f"Explanations in run {rid}: {cov['sentence']}" + "".join(f"\n  {d}" for d in cov.get("details") or [])
 
 
 def cmd_bakeoff(args: argparse.Namespace) -> int:
@@ -728,6 +784,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def cmd_showcase(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    from .showcase import run_showcase
+
+    try:
+        res = run_showcase(args.run_id, settings, rules_file=args.rules, chat_q=not args.no_chat, lang=args.lang)
+    except Exception as e:
+        return _fail(str(e))
+    r = res["rules"]
+    _p(f"1. Rules -> checks ({r['n_checks']} checks on every batch):")
+    for x in r["rules"]:
+        _p(f"   {x['id']} [{x['status']}] {x['text']}  ->  {x['results'] or 'not compiled'}")
+    h = res["human_in_the_loop"]
+    _p("2. Human in the loop:")
+    for d in h.get("decisions", []):
+        _p(f"   {d['action']:8s} {d['diagnosis']}: {d['note']}")
+    if h.get("downstream"):
+        ds = h["downstream"]
+        _p(f"   downstream: the event of {ds['event_of']} was diagnosed again -> {ds['after']['id']}: '{ds['after']['fault_type']}' (was '{ds['before']['fault_type']}')")
+    c = res["chat"]
+    if c.get("question"):
+        _p(f"3. Why-chat on {c['flag']} ({c.get('source')}, {c.get('seconds')} s):")
+        _p(f"   Q: {c['question']}")
+        _p("   A: " + " ".join(str(c.get("answer") or "")[:600].split()))
+    _p(f"4. Report: {res.get('report') or res.get('report_error')}")
+    _p("   Results: showcase.json in the run folder")
+    return 0
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     settings = _settings(args)
     from .workspace import Workspace
@@ -779,7 +864,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     re_ = sub.add_parser("report", help="(re)generate the report: HTML, PDF document, PowerPoint deck")
     re_.add_argument("run_id")
-    re_.add_argument("--format", choices=["html", "pdf", "pptx", "all"], default="html", help="html (default) | pdf | pptx | all")
+    re_.add_argument("--format", choices=["html", "pdf", "pptx", "summary", "all"], default="html", help="html (default) | pdf | pptx | summary (one page) | all")
     re_.add_argument("--lang", help="en | fi | sv | all")
     re_.add_argument("--out", help="output file (one language and one format), otherwise an output directory")
     re_.add_argument("--pdf-engine", choices=["native", "browser"], default="native", help="native = built-in typeset PDF (default); browser = headless Edge/Chrome print of the HTML report when installed")
@@ -802,8 +887,10 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--lang", choices=["en", "fi", "sv"])
     ex.set_defaults(fn=cmd_export)
 
-    vl = sub.add_parser("verify-log", help="verify the decision-log hash chain")
+    vl = sub.add_parser("verify-log", help="verify the decision-log hash chain and audit its completeness")
     vl.add_argument("run_id")
+    vl.add_argument("--json", action="store_true", help="print the chain check and the completeness audit as JSON")
+    vl.add_argument("--no-audit", action="store_true", help="only the chain check")
     vl.set_defaults(fn=cmd_verify_log)
 
     mo = sub.add_parser("models", help="show local/external model availability")
@@ -811,7 +898,16 @@ def build_parser() -> argparse.ArgumentParser:
     mo.add_argument("--pull", metavar="NAME", help="download a model through the local Ollama, with progress (e.g. qwen3:4b)")
     mo.add_argument("--use", metavar="NAME", help="use this installed model from now on ('auto' = best installed model for this machine)")
     mo.add_argument("--embedding", action="store_true", help="with --use: choose the search (embedding) model instead of the chat model")
+    mo.add_argument("--run", metavar="RUN_ID", help="say who wrote the explanations of this run (default: the latest run)")
     mo.set_defaults(fn=cmd_models)
+
+    gd = sub.add_parser("guard-demo", help="prove the egress guard on a real run: before / after, and an unsafe payload that is blocked")
+    gd.add_argument("--run", required=True, metavar="RUN_ID", help="run id, or 'latest'")
+    gd.add_argument("--profile", choices=["hybrid", "eu-hosted"], help="the external profile the guard speaks for (default: the active one if it allows external models, else hybrid)")
+    gd.add_argument("--send", action="store_true", help="afterwards send the REAL payload once through the normal router (needs the key; off by default). The unsafe payload is never sent.")
+    gd.add_argument("--lang", choices=["en", "fi", "sv"], help="language of the model reply when --send is used")
+    gd.add_argument("--json", action="store_true", help="print the result as JSON (it is always written to guard_demo.json)")
+    gd.set_defaults(fn=cmd_guard_demo)
 
     bl = sub.add_parser("bench-llm", help="time a finished run's model tasks on the local and the external route")
     bl.add_argument("--run", required=True, metavar="RUN_ID", help="run id, or 'latest'")
@@ -839,6 +935,13 @@ def build_parser() -> argparse.ArgumentParser:
     do = sub.add_parser("doctor", help="check the environment and print fixes")
     do.add_argument("--profile", choices=["no-egress", "hybrid", "eu-hosted"])
     do.set_defaults(fn=cmd_doctor)
+
+    sc = sub.add_parser("showcase", help="on a finished run: compile + run rules, accept/question/override diagnoses (with the downstream effect), ask the why-chat, regenerate the report")
+    sc.add_argument("--run", dest="run_id", required=True)
+    sc.add_argument("--rules", help="plain-language rules file (default: 4 rules written from the run's own catalogue)")
+    sc.add_argument("--no-chat", action="store_true", help="skip the why-chat question (the local model can take a minute)")
+    sc.add_argument("--lang", choices=["en", "fi", "sv"], default="en")
+    sc.set_defaults(fn=cmd_showcase)
 
     li = sub.add_parser("list", help="list runs in the workspace")
     li.add_argument("--limit", type=int, default=20)

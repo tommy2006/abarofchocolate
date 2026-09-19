@@ -30,13 +30,25 @@ def _score_table(store):
     return pa.table({"__row__": pa.array(store.rows.astype(np.int64)), "ens": pa.array(store.ens.astype(np.float32))})
 
 
-def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any]]:
+def run_evaluation(ws, inputs, store, flags, settings, rule: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
     labels = list(inputs.label_columns or [])
     if not labels:
         return None
     con = ws.duckdb()
     window = int(settings.detect.window)
-    out: dict[str, Any] = {"note": "evaluation only; labels never used for detection", "assumption": "the label value with the lowest mean anomaly score is treated as 'normal' (see normal_choice)", "columns": {}}
+    from .events import find_segments
+
+    persist = int((rule or {}).get("persist_rows") or 1)
+    sthr = float((rule or {}).get("sustained_threshold") or 1.0)
+    min_len = int(settings.detect.min_event_len)
+
+    def event_rows(sm: np.ndarray) -> np.ndarray:
+        """Rows inside events exactly as the detect stage finds them (one reading above threshold is not an event)."""
+        m = np.zeros(len(sm), dtype=bool)
+        for a_, b_ in find_segments(sm, min_len, max(min_len, window), window=window, persist=persist if persist > 1 else None, sustain_thr=sthr):
+            m[a_:b_] = True
+        return m
+    out: dict[str, Any] = {"note": "evaluation only; labels never used for detection", "event_rule": rule or {"persist_rows": 1, "sustained_threshold": 1.0}, "assumption": "the label value with the lowest mean anomaly score is treated as 'normal' (see normal_choice)", "columns": {}}
     order = np.argsort(store.rows, kind="stable")
     rows_sorted = store.rows[order]
     ens_sorted = store.ens[order]
@@ -78,11 +90,6 @@ def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any
         g = codes_sorted[ok]
         res: dict[str, Any] = {"normal_value": normal, "n_distinct": n_distinct, "abnormal_fraction": round(float(y.mean()), 4) if len(y) else None}
         res["auroc_ensemble"] = None if len(y) == 0 else (None if _auroc(s, y) is None else round(_auroc(s, y), 4))
-        flagged = s >= 1.0
-        tp = int((flagged & (y == 1)).sum())
-        fp = int((flagged & (y == 0)).sum())
-        fn = int((~flagged & (y == 1)).sum())
-        res["row_level"] = {"precision": round(tp / max(1, tp + fp), 4), "recall": round(tp / max(1, tp + fn), 4), "flagged_fraction": round(float(flagged.mean()), 4) if len(flagged) else None}
         # per-group detection / false alarms / delay
         det, fa, delays = [], [], []
         classes_by_group: dict[str, str] = {}
@@ -93,12 +100,14 @@ def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any
         cut = np.flatnonzero(gs[1:] != gs[:-1]) + 1
         starts = np.concatenate([[0], cut]) if len(gs) else np.zeros(0, dtype=int)
         ends = np.concatenate([cut, [len(gs)]]) if len(gs) else np.zeros(0, dtype=int)
+        flagged_sorted = np.zeros(len(gs), dtype=bool)
         for a, b in zip(starts, ends):
             group = store.groups[int(gs[a])]
             ym, sm, r = ys[a:b], ss[a:b], rs[a:b]
             has_abn = bool(ym.any())
-            fm = sm >= 1.0
-            is_flagged = group in flagged_groups or bool(fm.any())
+            fm = event_rows(sm)  # the event rule, not every single reading above threshold
+            flagged_sorted[a:b] = fm
+            is_flagged = bool(fm.any()) or group in flagged_groups
             if has_abn:
                 det.append(is_flagged)
                 onset_i = int(np.argmax(ym == 1))
@@ -108,6 +117,19 @@ def run_evaluation(ws, inputs, store, flags, settings) -> Optional[dict[str, Any
                     delays.append(int(r[onset_i + hit[0]] - onset_row))
             else:
                 fa.append(is_flagged)
+        tp = int((flagged_sorted & (ys == 1)).sum())
+        fp = int((flagged_sorted & (ys == 0)).sum())
+        fn = int((~flagged_sorted & (ys == 1)).sum())
+        res["row_level"] = {"precision": round(tp / max(1, tp + fp), 4), "recall": round(tp / max(1, tp + fn), 4), "flagged_fraction": round(float(flagged_sorted.mean()), 4) if len(flagged_sorted) else None, "rows_above_row_threshold_fraction": round(float((ss >= 1.0).mean()), 4) if len(ss) else None}
+        # how often an event's confidence was right, on this labelled data (evaluation only; never fed back)
+        abn_groups = {store.groups[int(gs[a_])] for a_, b_ in zip(starts, ends) if ys[a_:b_].any()}
+        bins = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.85), (0.85, 1.01)]
+        calib = []
+        for lo_, hi_ in bins:
+            fl_ = [f for f in ev_flags if f.kind in ("anomaly", "drift") and lo_ <= float(f.confidence or 0) < hi_]
+            if fl_:
+                calib.append({"confidence": f"{lo_:.0%}-{min(hi_, 1.0):.0%}", "n_events": len(fl_), "share_in_abnormal_groups": round(sum(1 for f in fl_ if f.group_id in abn_groups) / len(fl_), 4)})
+        res["confidence_calibration"] = calib
         res["group_level"] = {"n_groups_abnormal": len(det), "detection_rate": round(float(np.mean(det)), 4) if det else None, "n_groups_normal": len(fa), "false_alarm_rate": round(float(np.mean(fa)), 4) if fa else None, "median_detection_delay_rows": (None if not delays else float(np.median(delays))), "delay_note": "delay is measured from the first labelled-abnormal row of the group; when labels are group-level (abnormal from row 0) it reflects time-to-first-flag, not true onset delay"}
         # patterns vs label classes (group level)
         if n_distinct >= 2:

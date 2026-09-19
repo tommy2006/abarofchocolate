@@ -894,7 +894,9 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         items, ok = _read_artifact(state.ws(run_id), "trust")
         untrusted = [t for t in items if not t.get("trusted", True)]
         worst = min(items, key=lambda t: t.get("trust_score", 1.0)) if items else None
-        return {"available": ok, "items": items, "n": len(items), "n_untrusted": len(untrusted), "untrusted": untrusted, "worst": worst, "overall": (sum(t.get("trust_score", 0) for t in items) / len(items)) if items else None}
+        # run-level verdict in plain words (round 6, quality_summary.json): the UI must not call the data fine while checks fail
+        summary = state.ws(run_id).read_json("quality_summary.json", None)
+        return {"available": ok, "items": items, "n": len(items), "n_untrusted": len(untrusted), "untrusted": untrusted, "worst": worst, "overall": (sum(t.get("trust_score", 0) for t in items) / len(items)) if items else None, "summary": summary}
 
     @app.get("/api/runs/{run_id}/rules")
     def get_rules(run_id: str) -> dict[str, Any]:

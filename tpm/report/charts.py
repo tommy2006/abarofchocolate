@@ -86,16 +86,16 @@ def stacked_bars(rows: Sequence[tuple[str, dict[str, int]]], width: int = 640, l
     w = width - pad_l - pad_r
     parts = [f'<svg class="bars" viewBox="0 0 {width} {height}" width="100%" role="img">']
     for i, (name, counts) in enumerate(rows):
-        total = max(1, sum(int(counts.get(k, 0)) for k in ("pass", "warn", "fail")))
+        total = max(1, sum(int(counts.get(k, 0)) for k in ("pass", "warn", "fail", "not_testable")))
         y0 = gap + i * (row_h + gap)
         parts.append(f'<text x="{pad_l - 8}" y="{y0 + row_h * 0.7:.1f}" font-size="12" text-anchor="end" fill="{PALETTE["ink"]}">{escape(str(name))}</text>')
         x0 = pad_l
-        for k in ("pass", "warn", "fail"):
+        for k in ("pass", "warn", "fail", "not_testable"):  # not testable: grey, neither a pass nor a failure
             c = int(counts.get(k, 0))
             if c <= 0:
                 continue
             ww = w * c / total
-            parts.append(f'<rect x="{x0:.1f}" y="{y0}" width="{ww:.1f}" height="{row_h}" fill="{PALETTE[k]}"><title>{escape(labels.get(k, k))}: {c}</title></rect>')
+            parts.append(f'<rect x="{x0:.1f}" y="{y0}" width="{ww:.1f}" height="{row_h}" fill="{PALETTE.get(k, PALETTE["muted"])}"><title>{escape(labels.get(k, k))}: {c}</title></rect>')
             if ww > 22:
                 parts.append(f'<text x="{x0 + ww / 2:.1f}" y="{y0 + row_h * 0.7:.1f}" font-size="11" text-anchor="middle" fill="#fff">{c}</text>')
             x0 += ww
@@ -208,3 +208,69 @@ def dataflow_diagram(
 def badge(text: str, kind: str = "muted") -> str:
     color = PALETTE.get(kind, PALETTE["muted"])
     return f'<span class="badge" style="background:{color}">{escape(str(text))}</span>'
+
+
+def heatmap(labels: Sequence[str], matrix: Sequence[Sequence[Optional[float]]], cell: int = 11, title: str = "") -> str:
+    """Signed correlation heatmap (blue negative, red positive, white none). Labels on both axes; readable up to
+    about 60 signals; the value is in each cell's tooltip."""
+    n = len(labels)
+    if n == 0:
+        return ""
+    pad = 46
+    w = pad + n * cell + 8
+    h = pad + n * cell + 26
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-label="{escape(title or "correlation heatmap")}">']
+    fs = max(6, min(10, cell - 2))
+    for i, lab in enumerate(labels):
+        y = pad + i * cell + cell - 2
+        out.append(f'<text x="{pad - 3}" y="{y}" font-size="{fs}" text-anchor="end" fill="{PALETTE["ink"]}">{escape(str(lab))}</text>')
+        x = pad + i * cell + cell - 2
+        out.append(f'<text x="{x}" y="{pad - 4}" font-size="{fs}" text-anchor="start" transform="rotate(-90 {x} {pad - 4})" fill="{PALETTE["ink"]}">{escape(str(lab))}</text>')
+    for i in range(n):
+        for j in range(n):
+            v = matrix[i][j] if i < len(matrix) and j < len(matrix[i]) else None
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                col = "#f3f4f6"
+            else:
+                a = max(-1.0, min(1.0, float(v)))
+                k = int(255 * (1 - abs(a)))
+                col = f"rgb(255,{k},{k})" if a >= 0 else f"rgb({k},{k},255)"
+            out.append(f'<rect x="{pad + j * cell}" y="{pad + i * cell}" width="{cell}" height="{cell}" fill="{col}"><title>{escape(str(labels[i]))} ~ {escape(str(labels[j]))}: {"" if v is None else f"{float(v):.2f}"}</title></rect>')
+    ly = pad + n * cell + 14
+    out.append(f'<text x="{pad}" y="{ly}" font-size="9" fill="{PALETTE["muted"]}">blue = move in opposite directions, red = move together, white = unrelated</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def trend_plot(values: Sequence[float], band: Optional[tuple[float, float]], marks: Sequence[int] = (), width: int = 640, height: int = 110, label: str = "", x_labels: Optional[tuple[str, str]] = None) -> str:
+    """A signal's level over an event with its normal band (shaded) and markers where it is outside the band."""
+    vals = [float(v) for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    if len(vals) < 2:
+        return ""
+    lo_b, hi_b = band if band else (None, None)
+    vmin = min(vals + ([lo_b] if lo_b is not None else []))
+    vmax = max(vals + ([hi_b] if hi_b is not None else []))
+    span = (vmax - vmin) or 1.0
+    pad_l, pad_r, pad_t, pad_b = 52, 8, 14, 18
+    w, h = width - pad_l - pad_r, height - pad_t - pad_b
+    n = len(vals)
+    x = lambda i: pad_l + w * i / max(1, n - 1)  # noqa: E731
+    y = lambda v: pad_t + h - (v - vmin) / span * h  # noqa: E731
+    parts = [f'<svg class="spark" viewBox="0 0 {width} {height}" width="100%" preserveAspectRatio="none" role="img" aria-label="{escape(label)}">']
+    parts.append(f'<rect x="{pad_l}" y="{pad_t}" width="{w}" height="{h}" fill="#fff" stroke="{PALETTE["grid"]}"/>')
+    if lo_b is not None and hi_b is not None:
+        parts.append(f'<rect x="{pad_l}" y="{y(hi_b):.1f}" width="{w}" height="{max(1.0, y(lo_b) - y(hi_b)):.1f}" fill="{PALETTE["primary_soft"]}" opacity="0.55"><title>normal band</title></rect>')
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
+    parts.append(f'<polyline points="{pts}" fill="none" stroke="{PALETTE["primary"]}" stroke-width="1.4" vector-effect="non-scaling-stroke"/>')
+    for i in marks:
+        if 0 <= i < n:
+            parts.append(f'<circle cx="{x(i):.1f}" cy="{y(vals[i]):.1f}" r="2.2" fill="{PALETTE["fail"]}"/>')
+    parts.append(f'<text x="{pad_l - 4}" y="{pad_t + 4}" font-size="10" text-anchor="end" fill="{PALETTE["muted"]}">{_fmt(vmax)}</text>')
+    parts.append(f'<text x="{pad_l - 4}" y="{pad_t + h}" font-size="10" text-anchor="end" fill="{PALETTE["muted"]}">{_fmt(vmin)}</text>')
+    if x_labels:
+        parts.append(f'<text x="{pad_l}" y="{height - 4}" font-size="10" fill="{PALETTE["muted"]}">{escape(str(x_labels[0]))}</text>')
+        parts.append(f'<text x="{pad_l + w}" y="{height - 4}" font-size="10" text-anchor="end" fill="{PALETTE["muted"]}">{escape(str(x_labels[1]))}</text>')
+    if label:
+        parts.append(f'<text x="{pad_l + 4}" y="{pad_t + 12}" font-size="11" fill="{PALETTE["ink"]}" font-weight="600">{escape(label)}</text>')
+    parts.append("</svg>")
+    return "".join(parts)

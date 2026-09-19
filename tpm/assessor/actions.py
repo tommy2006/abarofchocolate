@@ -24,7 +24,7 @@ from typing import Any, Optional
 import numpy as np
 
 from ..contracts import now_iso
-from ..quality._common import GROUP_COL, ROW_COL, finite_sql, load_catalog, numeric_signals, quote_ident, time_column_in
+from ..quality._common import GROUP_COL, ROW_COL, finite_sql, is_problem, load_catalog, numeric_signals, quote_ident, time_column_in
 from .coverage import coverage_signals, project_units, regime_coverage, unit_definition
 from .fitness import compare_with_without, learning_curve
 from .scores import CATEGORIES, compute_dq_scores, worst_signals
@@ -217,7 +217,12 @@ def _state(ws: Any, settings: Any, need_coverage: bool = True) -> dict[str, Any]
 
 def _delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     keys = CATEGORIES + ["overall", "mean_trust"]
-    return {k: {"before": before.get(k), "after": after.get(k), "delta": round(float(after.get(k, 0) - before.get(k, 0)), 4)} for k in keys}
+    out: dict[str, Any] = {}
+    for k in keys:
+        b, a = before.get(k), after.get(k)
+        # a category that could not be tested (score None, e.g. timeliness without a time column) has no delta
+        out[k] = {"before": b, "after": a, "delta": round(float(a) - float(b), 4) if (a is not None and b is not None) else 0.0}
+    return out
 
 
 def _fmt_delta(d: dict[str, Any]) -> str:
@@ -268,7 +273,7 @@ def _eval_drop_signal(ws, settings, action, params, st, budget, ev_ids):
         w = worst.get(s)
         if w and (w["untrusted_batches"] > 0 or w["severity_sum"] > 0):
             reasons.append(f"{s} has data-quality problems ({', '.join(w['types'])}) in {w['untrusted_batches']} of {st['n_batches']} batches")
-            ev.extend(c.evidence_ids[0] for c in st["checks"] if s in c.signals and c.status != "pass" and c.evidence_ids)
+            ev.extend(c.evidence_ids[0] for c in st["checks"] if s in c.signals and is_problem(c.status) and c.evidence_ids)
         if s in near_const:
             reasons.append(f"{s} is (almost) constant and carries no information")
         elif s in redundant:
@@ -328,8 +333,8 @@ def _eval_drop_range(ws, settings, action, params, st, budget, ev_ids):
     a, b = int(params.get("row_start", 0)), int(params.get("row_end", -1))
     if b < a:
         return _result(action, "neutral", "The row range is empty.", {}, [], 0.2)
-    inside = [c for c in st["checks"] if c.status != "pass" and c.category != "rule" and c.row_start is not None and c.row_end is not None and c.row_start >= a and c.row_end <= b]
-    overl = [c for c in st["checks"] if c.status != "pass" and c.category != "rule" and c.row_start is not None and c.row_end is not None and not (c.row_end < a or c.row_start > b)]
+    inside = [c for c in st["checks"] if is_problem(c.status) and c.category != "rule" and c.row_start is not None and c.row_end is not None and c.row_start >= a and c.row_end <= b]
+    overl = [c for c in st["checks"] if is_problem(c.status) and c.category != "rule" and c.row_start is not None and c.row_end is not None and not (c.row_end < a or c.row_start > b)]
     after = compute_dq_scores(st["checks"], st["verdicts"], st["n_batches"], st["n_signals"], settings, exclude_rows=(a, b))
     eff = {"dq_scores": _delta(st["dq"], after), "rows_removed": b - a + 1, "checks_inside": len(inside), "checks_overlapping": len(overl)}
     ev = [e for c in overl for e in c.evidence_ids][:20]
@@ -342,7 +347,7 @@ def _eval_drop_range(ws, settings, action, params, st, budget, ev_ids):
 
 
 def _eval_drop_duplicates(ws, settings, action, params, st, budget, ev_ids):
-    dups = [c for c in st["checks"] if c.check_type in ("duplicate_rows", "duplicate_key") and c.status != "pass"]
+    dups = [c for c in st["checks"] if c.check_type in ("duplicate_rows", "duplicate_key") and is_problem(c.status)]
     n = sum(int((c.values or {}).get("n", 0)) for c in dups if c.check_type == "duplicate_rows")
     total = sum(int(b.get("n_rows", 0)) for b in st["batches"]) or 1
     after = compute_dq_scores(st["checks"], st["verdicts"], st["n_batches"], st["n_signals"], settings, exclude_types=("duplicate_rows", "duplicate_key"))
