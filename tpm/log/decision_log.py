@@ -16,8 +16,9 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from ..contracts import LogEntry, now_iso
 
@@ -73,6 +74,7 @@ class DecisionLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._tl = threading.local()  # per-thread write buffer, see buffered()
         # Several connections open the same log at the same moment (the API answers /status and /events for a
         # run while the pipeline thread opens its own Workspace). On a fresh database that race ended in
         # "database is locked" and killed the run before its first stage. Autocommit mode + busy timeout +
@@ -106,6 +108,13 @@ class DecisionLog:
         evidence_ids: Optional[Iterable[str]] = None,
     ) -> LogEntry:
         actor, action, object_type, object_id, payload, ev = _normalize(actor, action, object_type, object_id, payload, evidence_ids)
+        buf = getattr(self._tl, "buf", None)
+        if buf is not None:  # inside buffered(): kept in order, written in bulk (no LogEntry to return yet)
+            buf.append((actor, action, object_type, object_id, payload, ev))
+            if len(buf) >= self._tl.flush_every:
+                self._tl.buf = []
+                self.record_many(buf)
+            return None  # type: ignore[return-value]
         with self._lock:
             last: Exception | None = None
             for attempt in range(80):
@@ -131,6 +140,24 @@ class DecisionLog:
                     last = e
                     time.sleep(0.02 + 0.005 * attempt)
             raise last if last is not None else RuntimeError("decision log write failed")
+
+    @contextmanager
+    def buffered(self, flush_every: int = MANY_CHUNK) -> Iterator[None]:
+        """record() calls made by THIS thread inside the block are kept in their order and written with record_many
+        (one transaction per chunk) at the end of the block, or every `flush_every` entries. Other threads write as
+        usual. While buffering, record() returns None: use it only where the returned entry is not needed (a stage
+        writing one or two records per object). Nested blocks join the outer one; an exception still flushes."""
+        if getattr(self._tl, "buf", None) is not None:
+            yield
+            return
+        self._tl.buf = []
+        self._tl.flush_every = max(1, int(flush_every))
+        try:
+            yield
+        finally:
+            buf, self._tl.buf = self._tl.buf, None
+            if buf:
+                self.record_many(buf)
 
     def record_many(self, entries: Iterable[Any], chunk_size: int = MANY_CHUNK) -> list[LogEntry]:
         """Append many entries in their order and return them as LogEntry objects. Items are (actor, action,

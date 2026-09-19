@@ -249,7 +249,8 @@ def run_diagnose(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str
     flags = ws.flags()
     progress(0.05, f"{len(flags)} flags loaded")
     budget = float(min(getattr(settings, "time_budget_s", 1200) * 0.15, 300.0))
-    diags = _diagnose(ws, settings, flags, opts, start_id=0, use_llm=not opts.get("no_llm", False), budget_s=budget)
+    with ws.log.buffered():  # 2-3 records per diagnosis (diagnosis, critique, disagreement): written in bulk
+        diags = _diagnose(ws, settings, flags, opts, start_id=0, use_llm=not opts.get("no_llm", False), budget_s=budget)
     ws.rewrite_jsonl("diagnoses", [d.model_dump() for d in diags])
     verdicts: dict[str, int] = {}
     causes: dict[str, int] = {}

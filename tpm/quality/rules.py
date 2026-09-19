@@ -920,7 +920,13 @@ def load_rules_file(path: str | Path) -> list[str]:
 def add_rules_from_file(ws: Any, settings: Any, path: str | Path, author: str = "file", auto_status: Optional[str] = None) -> list[Rule]:
     """Compile every rule line of a file. ``auto_status`` may set 'active' for trusted files (logged)."""
     added: list[Rule] = []
+    known = {" ".join(r.text.split()).lower(): r for r in ws.rules()}
     for line in load_rules_file(path):
+        same = known.get(" ".join(line.split()).lower())
+        if same is not None:  # the same file loaded again (a rerun, `run --rules` then showcase): keep the rule, its id and its status
+            ws.log.record("system:quality", "rule_reused", "rule", same.id, {"status": same.status, "by": f"file:{Path(path).name}"})
+            added.append(same)
+            continue
         r = compile_rule(ws, settings, line, author=author)
         if auto_status and r.compiled is not None:
             rules = ws.rules()
@@ -932,6 +938,7 @@ def add_rules_from_file(ws: Any, settings: Any, path: str | Path, author: str = 
             _save_rules(ws, rules)
             ws.log.record("system:quality", "rule_status", "rule", r.id, {"status": auto_status, "by": f"file:{Path(path).name}"})
         added.append(r)
+        known[" ".join(r.text.split()).lower()] = r
     ws.log.record("system:quality", "rules_loaded", "rules", str(path), {"n": len(added), "n_compiled": sum(r.compiled is not None for r in added)})
     return added
 

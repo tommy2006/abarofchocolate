@@ -118,18 +118,6 @@ def _parse_opt(kv: str) -> tuple[str, Any]:
     return k, v
 
 
-def _read_rules_file(path: Path) -> list[str]:
-    lines = []
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        s = raw.strip()
-        if not s or s.startswith("#"):
-            continue
-        s = s.lstrip("-*0123456789. ").strip()
-        if s:
-            lines.append(s)
-    return lines
-
-
 class _ProgressDisplay:
     """Console progress: stage, %, message, elapsed vs budget. Uses \\r updates on a TTY, plain lines otherwise."""
 
@@ -248,17 +236,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         rp = Path(args.rules)
         if not rp.exists():
             return _fail(f"rules file not found: {rp}")
-        texts = _read_rules_file(rp)
-        options["rules"] = texts
-        options["rules_file"] = str(rp.resolve())
-        from .contracts import Rule
-        from .workspace import Workspace
+        from .quality.rules import load_rules_file
 
-        ws0 = Workspace(run_id=run_id, settings=settings)
-        if not ws0.exists("rules"):
-            ws0.write_json("rules", [Rule(id=f"RULE-{i + 1:03d}", text=t, author="human", status="approved", compile_source="template").model_dump() for i, t in enumerate(texts)])
-        ws0.close()
-        _p(f"Loaded {len(texts)} rule(s) from {rp}")
+        texts = load_rules_file(rp)  # the same reader the quality stage uses: prose lines of the file are not rules
+        options["rules"] = texts  # recorded in meta.json
+        options["rules_file"] = str(rp.resolve())  # compiled once, by the quality stage (no drafts written here: they became duplicates)
+        _p(f"Loaded {len(texts)} rule(s) from {rp}; the quality stage compiles them into checks")
+        if stages and "quality" not in stages:
+            _p("  note: the quality stage is not in --stages, so the rules are not compiled in this run")
 
     display = _ProgressDisplay(settings.time_budget_s, quiet=args.quiet)
     _p(f"{BANNER} - run {run_id}")

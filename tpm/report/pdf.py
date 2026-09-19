@@ -1032,6 +1032,24 @@ class _Doc:
         if df.get("routing"):
             out += self.H(t("s8_routing"), 3)
             out.append(self.P(" · ".join(f"{k}: {v}" for k, v in df["routing"]), "small"))
+        cov = df.get("coverage")  # round 6: who wrote the explanations (model or evidence template, and why)
+        if cov:
+            out += self.H(cov.get("heading") or "", 3)
+            out.append(self.P(fit_text(cov.get("sentence"), 900)[0], "body"))
+            out += [self.P(fit_text(d, 400)[0], "small") for d in (cov.get("details") or [])[:6]]
+        gd = df.get("guard_demo")  # round 6: the egress guard shown on this run's own data (python -m tpm guard-demo)
+        if gd:
+            out += self.H(gd.get("title") or "", 3)
+            out.append(self.P(fit_text(gd.get("intro"), 600)[0], "small"))
+            out += [self.P(fit_text(x, 400)[0], "small") for x in (gd.get("safe") or [])[:8]]
+            q = gd.get("question")
+            if q:
+                out.append(self.kv([(q.get("before_label"), fit_text(q.get("before"), 400)[0]), (q.get("after_label"), fit_text(q.get("after"), 400)[0])]))
+            badge = self.badge("demo_blocked" if gd.get("unsafe_ok") else "demo_allowed", "fail" if gd.get("unsafe_ok") else "warn")
+            out += [self.PR((badge + " " if i == 0 else "") + esc(fit_text(x, 400)[0]), "small") for i, x in enumerate((gd.get("unsafe") or [])[:8])]
+            if gd.get("layers"):
+                out.append(self.P(f"{gd.get('layers_label')}: " + "; ".join(str(x) for x in gd["layers"][:10]), "small"))
+            out.append(self.P(f"{gd.get('headers') or ''} {gd.get('ledger') or ''}".strip(), "small"))
         out += self.H(t("s8_ledger_summary"), 2)
         out.append(self.kv([(t("calls_local"), _thousands(summ.get("n_local", 0), lang)), (t("calls_external"), _thousands(summ.get("n_external", 0), lang)), (t("calls_blocked"), _thousands(summ.get("n_blocked", 0), lang)), (t("calls_fallback"), _thousands(summ.get("n_fallback", 0), lang)), (t("bytes_external"), _thousands(summ.get("bytes_external", 0), lang)), (t("model"), ", ".join(summ.get("models") or []))]))
         out += self.H(f"{t('s8_ledger')} ({_thousands(df.get('n_ledger', 0), lang)})", 2)
@@ -1042,7 +1060,7 @@ class _Doc:
             rows = []
             for r in ledger:
                 gr = str(r.get("guard_result") or "")
-                rows.append([r.get("id"), str(r.get("ts") or "").replace("T", " ")[:19], r.get("task"), ("markup", self.badge(r.get("route"), "ext" if r.get("route") == "external" else "primary")), f"{r.get('provider')}/{r.get('model')}", ("markup", self.badge(gr, "fail" if gr == "blocked" else ("warn" if gr == "fallback" else "pass")) + ("<br/>" + self.muted(fit_text(r.get("guard_reason"), 120)[0], 6.5) if r.get("guard_reason") else "")), _thousands(r.get("payload_bytes") or 0, lang), ("markup", esc(fit_text(r.get("purpose"), 140)[0]) + ("<br/>" + self.muted(fit_text(r.get("artifact_types"), 140)[0], 6.5) if r.get("artifact_types") else ""))])
+                rows.append([r.get("id"), str(r.get("ts") or "").replace("T", " ")[:19], r.get("task"), ("markup", self.badge(r.get("route"), "ext" if r.get("route") == "external" else "primary")), f"{r.get('provider')}/{r.get('model')}", ("markup", self.badge(gr, "fail" if gr in ("blocked", "demo_blocked") else ("warn" if gr == "fallback" else ("muted" if gr == "demo_allowed" else "pass"))) + ("<br/>" + self.muted(fit_text(r.get("guard_reason"), 120)[0], 6.5) if r.get("guard_reason") else "")), _thousands(r.get("payload_bytes") or 0, lang), ("markup", esc(fit_text(r.get("purpose"), 140)[0]) + ("<br/>" + self.muted(fit_text(r.get("artifact_types"), 140)[0], 6.5) if r.get("artifact_types") else ""))])
             out.append(self.table([t("id"), t("when"), t("task"), t("route"), t("model"), t("guard_result"), t("bytes"), f"{t('purpose')} / {t('artifact_types')}"], rows, [11, 11, 13, 8, 15, 13, 7, 22]))
         else:
             out.append(self.na("s8_no_ledger"))

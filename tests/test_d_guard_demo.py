@@ -329,3 +329,23 @@ def test_raw_rows_written_as_text_never_leave():
     # rule text keeps its numbers and is not a row
     g3 = guard.check({"rule_text": "S01=100, S02=200, S03=300, S04=400, S05=500 are the limits"}, s, strict=False)
     assert g3.allowed and g3.sanitized_payload["rule_text"].startswith("S01=100")
+
+
+def test_guard_demo_and_coverage_in_pdf_and_pptx(monkeypatch, te_run):
+    """Round 6 follow-up: the PDF and PowerPoint exports carry the data-flow additions of the HTML report too."""
+    pypdf = pytest.importorskip("pypdf")
+    pptx = pytest.importorskip("pptx")
+    from tpm.report.pdf import generate_pdf
+    from tpm.report.pptx_export import generate_pptx
+
+    ws, s, _df = _copy(te_run, "demo_exports", "hybrid")
+    _recorder(monkeypatch, [])
+    guard_demo.run_demo(ws, s, profile="hybrid")
+    title = guard_demo.report_context(ws, "en")["title"]
+    pdf_text = " ".join((p.extract_text() or "") for p in pypdf.PdfReader(str(generate_pdf(ws, s, "en"))).pages)
+    pdf_text = re.sub(r"\s+", " ", pdf_text)
+    assert title in pdf_text and "demo_blocked" in pdf_text
+    assert "Who wrote the explanations" in pdf_text
+    prs = pptx.Presentation(str(generate_pptx(ws, s, "en")))
+    slides = [" ".join(sh.text_frame.text for sh in sl.shapes if sh.has_text_frame) for sl in prs.slides]
+    assert any(title in t for t in slides), "the data-flow slide names the guard demonstration"
