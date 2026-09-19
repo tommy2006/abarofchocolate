@@ -205,7 +205,7 @@ def heuristic_hypotheses(d: SignalDescriptor, relations: dict[str, Any]) -> list
     if role in ("constant", "derived_redundant", "counter", "categorical", "unknown"):
         pass
     elif role == "actuator_like" and manip.get("reasons"):
-        out.append({"kind": "instrument", "value": "manipulated variable: valve position / controller output", "confidence": min(0.5, 0.25 + 0.3 * float(manip.get("score") or 0.0)), "reasoning": "; ".join(manip["reasons"][:3])})
+        out.append({"kind": "instrument", "value": "manipulated variable: valve position / controller output", "confidence": min(0.5, 0.25 + 0.3 * float(manip.get("score") or 0.0)), "reasoning": "valve evidence: " + "; ".join(manip["reasons"][:3])})
     elif role == "actuator_like":
         out.append({"kind": "instrument", "value": "valve / actuator position", "confidence": 0.45 if bounded else 0.35, "reasoning": "step-like signal" + (" bounded to 0-100" if bounded else "")})
     elif role == "held_sampled":

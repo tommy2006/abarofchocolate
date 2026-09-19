@@ -111,3 +111,35 @@
 .diag-list-head h3 { margin: 0; font-size: 14.5px; }
 .diag-strip-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
 /* A2: end */
+
+/* ---- "How the sensors interact" (js/network.js): drag sensors, pan, zoom, click a line to read about it */
+.net-wrap { position: relative; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); overflow: hidden; }
+.net-svg { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+.net-svg.dragging { cursor: grabbing; }
+.net-svg.dragging-node, .net-svg.dragging-node .net-node { cursor: grabbing; }
+.net-svg:focus { outline: none; }
+.net-svg:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.net-tools { position: absolute; top: 6px; right: 6px; display: flex; gap: 4px; }
+.net-btn { min-width: 30px; justify-content: center; background: var(--bg-2); }
+.net-hit { stroke: transparent; stroke-width: 14px; cursor: pointer; }
+.net-line { stroke: var(--ink-3); opacity: 0.65; pointer-events: none; }
+.net-line.neg { stroke: var(--fail); }
+.net-edge { cursor: pointer; outline: none; }
+.net-edge:hover .net-line, .net-edge:focus-visible .net-line { opacity: 1; stroke: var(--ink-2); }
+.net-edge:hover .net-line.neg, .net-edge:focus-visible .net-line.neg { stroke: var(--fail); }
+.net-edge.sel .net-line { opacity: 1; stroke: var(--accent); }
+.net-num-box { fill: var(--bg-2); stroke: var(--ink-3); stroke-width: 1px; }
+.net-lbl { cursor: pointer; }
+.net-lbl:hover .net-num-box, .net-lbl.sel .net-num-box { stroke: var(--accent); stroke-width: 1.5px; }
+.net-num { font-size: 10.5px; font-weight: 600; fill: var(--ink); }
+.net-node { cursor: grab; outline: none; }
+.net-dot { stroke: var(--bg-2); stroke-width: 1.5px; }
+.net-node:hover .net-dot, .net-node:focus-visible .net-dot { stroke: var(--focus); stroke-width: 3px; }
+.net-name { font-size: 10.5px; fill: var(--ink-2); paint-order: stroke; stroke: var(--bg-2); stroke-width: 3px; stroke-linejoin: round; }
+.net-key { display: grid; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--ink-2); max-width: 110ch; }
+.net-key li { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; align-items: center; }
+.net-key svg { display: block; }
+.net-rel { margin-top: 10px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: var(--radius); padding: 10px 14px; background: var(--bg-3); max-width: 110ch; }
+.net-rel h3 { margin: 0 0 6px; font-size: 15px; }
+.net-rel p { margin: 0 0 6px; }
+.net-rel .row { flex-wrap: wrap; gap: 6px; margin-top: 6px; }

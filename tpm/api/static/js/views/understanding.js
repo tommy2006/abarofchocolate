@@ -1,7 +1,8 @@
 /* View 1: what the system understood — signal catalog with evidence, hypotheses, role override,
    correlation heatmap, clusters, dataset assumptions and what remains uncertain. */
 import { state, t, el, clear, runApi, fmt, conf, infStatus, chip, section, table, viewHead, needRun, empty, evidenceButton, fetchEvidence, evidenceList, decisionBar, postDecision, hiddenHint, kv, roleAllows, bus, meter, unavailableNote, navigate } from '../core.js';
-import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praStrip, cappedList, sensorKind, sensorKindColor, SENSOR_KINDS, strongestEdges, drawNetwork, basicMore } from '../charts.js';
+import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praStrip, cappedList, sensorKind, sensorKindColor, SENSOR_KINDS, strongestEdges, basicMore } from '../charts.js';
+import { drawNetwork } from '../network.js';
 import { openChat, signalContext } from '../chat.js';
 import { plainBox } from '../plain.js';
 import { renameBar, loadSignalNames, renameSignalDialog } from '../rename.js';
@@ -56,7 +57,21 @@ function whyWords(text) {
   if (/^high noise level .*relative to its variance/.test(s)) return tt('und.why.noisy');
   if (/^noise level [\d.]+, autocorrelation [\d.-]+$/.test(s)) return tt('und.why.medium');
   if (/^language-model hypothesis/.test(s)) return tt('und.why.llm');
+  if (/^valve evidence: /.test(s)) return tt('und.why.valve', { list: s.replace(/^valve evidence: /, '').split('; ').map(valveWords).join('; ') });
   return s;
+}
+/** One piece of the valve / controller-output evidence (tpm/profile/roles.py manipulated_evidence) in plain words. */
+function valveWords(p) {
+  let m;
+  const side = (x) => tt('und.why.v.' + x);
+  if (/^uses its whole 0-100 % range/.test(p)) return tt('und.why.v.range100');
+  if (/^uses its whole 0-1 range/.test(p)) return tt('und.why.v.range01');
+  if ((m = /^bounded like a \w+ and reaches its (upper|lower) end/.exec(p))) return tt('und.why.v.reaches', { side: side(m[1]) });
+  if ((m = /^sits exactly at its (upper|lower) limit in ([\d.,]+%) of readings/.exec(p))) return tt('und.why.v.pinned', { side: side(m[1]), pct: m[2] });
+  if (/^moves in steps/.test(p)) return tt('und.why.v.steps');
+  if ((m = /^other signals follow its moves \((.*)\)$/.exec(p))) return tt('und.why.v.followers', { list: m[1].split(', ').map((x) => { const q = /^(\S+) (\d+) samples later$/.exec(x); return q ? tt('und.why.v.after', { s: q[1], n: q[2] }) : x; }).join(', ') });
+  if ((m = /^it reacts to other signals the way a controller output does \((.*)\)$/.exec(p))) return tt('und.why.v.drivers', { list: m[1].split(', ').map((x) => { const q = /^(\d+) samples after (\S+)$/.exec(x); return q ? tt('und.why.v.before', { s: q[2], n: q[1] }) : x; }).join(', ') });
+  return p;
 }
 
 const ROLES = ['continuous_measured', 'actuator_like', 'held_sampled', 'constant', 'derived_redundant', 'counter', 'timestamp', 'categorical', 'text', 'identifier', 'unknown'];
@@ -138,16 +153,92 @@ export async function render(main, params = {}) {
   // Basic mode has no technical part: a clicked sensor shows its card at the top of the page instead
   const openSignal = (id) => { if (!byId[id]) return; if (basic) { navigate('understanding', { signal: id }); return; } tech.open = true; showSignal(byId[id]); setTimeout(() => { try { detail.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* ignore */ } }, 80); };
   {
-    const pairs = rel.ok ? rel.data.pairs || [] : [];
+    const RD = rel.ok ? rel.data || {} : {};
+    const pairs = RD.pairs || [];
     const strong = pairs.filter((x) => Math.abs(Number(x.r)) >= 0.5).length;
     const edges = strongestEdges(pairs, { cap: 60, minR: 0.5 });
     const netNode = chartNode('tall');
     const note = el('p', { class: 'small muted viz-note', text: strong > edges.length ? vt('und.net.capped', { n: edges.length, total: strong }) : '' });
-    plainHost.append(vizBox(vt('und.net.title'), vt('und.net.help'), netNode, note));
+    // what the lines, arrows and numbers mean; how to move the chart (under the chart, always visible)
+    const period = Number((U.dataset || {}).sample_period_seconds) || 0;
+    const durWords = (sec) => (!(sec > 0) ? '' : sec < 1 ? `${Math.round(sec * 1000)} ms` : sec < 90 ? `${+sec.toFixed(sec < 10 ? 1 : 0)} s` : sec < 5400 ? `${+(sec / 60).toFixed(sec < 600 ? 1 : 0)} min` : sec < 172800 ? `${+(sec / 3600).toFixed(1)} h` : `${+(sec / 86400).toFixed(1)} d`);
+    const timeTxt = (k) => (period ? t('und.rel.time', { t: durWords(k * period) }) : '');
+    // numbers in the page language (0,93 and 29 200 in Finnish and Swedish)
+    const locale = { fi: 'fi-FI', sv: 'sv-SE' }[state.lang] || 'en-GB';
+    const num = (v, d = 0) => Number(v).toLocaleString(locale, { minimumFractionDigits: d, maximumFractionDigits: d });
+    const fmtR = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? '–' : (Number(v) < 0 ? '−' : '') + num(Math.abs(Number(v)), 2));
+    const nm = (sid) => (byId[sid] ? fullName(byId[sid]) : sid);
+    const glyph = (kind) => {
+      const NSV = 'http://www.w3.org/2000/svg';
+      const g = document.createElementNS(NSV, 'svg'); g.setAttribute('width', '44'); g.setAttribute('height', '16'); g.setAttribute('viewBox', '0 0 44 16'); g.setAttribute('aria-hidden', 'true');
+      const ln = document.createElementNS(NSV, 'line'); ln.setAttribute('x1', '2'); ln.setAttribute('y1', '8'); ln.setAttribute('x2', kind === 'arrow' ? '36' : '42'); ln.setAttribute('y2', '8');
+      ln.setAttribute('style', `stroke:${kind === 'neg' ? 'var(--fail)' : 'var(--ink-3)'};stroke-width:${kind === 'thin' ? 1.2 : 3.5}px`);
+      g.append(ln);
+      if (kind === 'arrow') {
+        const hd = document.createElementNS(NSV, 'path'); hd.setAttribute('d', 'M35,3 L43,8 L35,13 z'); hd.setAttribute('style', 'fill:var(--ink-2)'); g.append(hd);
+        const bx = document.createElementNS(NSV, 'rect'); bx.setAttribute('x', '9'); bx.setAttribute('y', '1'); bx.setAttribute('width', '18'); bx.setAttribute('height', '14'); bx.setAttribute('rx', '7'); bx.setAttribute('style', 'fill:var(--bg-2);stroke:var(--ink-3)');
+        const tx = document.createElementNS(NSV, 'text'); tx.setAttribute('x', '18'); tx.setAttribute('y', '8'); tx.setAttribute('text-anchor', 'middle'); tx.setAttribute('dominant-baseline', 'central'); tx.setAttribute('style', 'font-size:10px;font-weight:600;fill:var(--ink)'); tx.textContent = '+2';
+        g.append(bx, tx);
+      }
+      return g;
+    };
+    const key = edges.length ? el('div', {}, el('h3', { class: 'small', style: { margin: '10px 0 0' }, text: t('und.net.key.title') }),
+      el('ul', { class: 'net-key' },
+        el('li', {}, glyph('thick'), el('span', { text: t('und.net.key.line') })),
+        el('li', {}, glyph('neg'), el('span', { text: t('und.net.key.neg') })),
+        el('li', {}, glyph('arrow'), el('span', { text: t('und.net.key.arrow') + (period ? ' ' + t('und.net.key.period', { p: durWords(period) }) : '') })),
+        el('li', {}, glyph('thin'), el('span', { text: t('und.net.key.same') }))),
+      el('p', { class: 'small muted', style: { margin: '6px 0 0', maxWidth: '110ch' }, text: t('und.net.key.use') })) : null;
+    // the link between two sensors, in plain words: opened by a click on a line or its number
+    const relBox = el('div', { class: 'net-rel', hidden: true, 'aria-live': 'polite' });
+    let net = null;
+    const edgeTip = (e) => {
+      const first = e.lag < 0 ? e.b : e.a, follow = e.lag < 0 ? e.a : e.b;
+      const how = Number(e.r) < 0 ? vt('und.net.opposite') : vt('und.net.together');
+      const lag = e.lag ? t('und.net.tipLag', { follow: nm(follow), first: nm(first), k: Math.abs(e.lag), time: timeTxt(Math.abs(e.lag)) }) : t('und.net.tipSame');
+      return `${nm(e.a)} – ${nm(e.b)}: ${how}, r ${fmtR(e.r)}. ${lag} ${t('und.net.tipClick')}`;
+    };
+    const clusterSize = (c) => ((RD.clusters || {})[c] || []).length || signals.filter((x) => x.cluster_id === c).length;
+    const isValve = (sid) => !!byId[sid] && (byId[sid].structural_role === 'actuator_like' || kindOf(byId[sid]) === 'valve');
+    const explainRelation = (e) => {
+      const first = e.lag < 0 ? e.b : e.a, follow = e.lag < 0 ? e.a : e.b;
+      const r = Number(e.r), ar = Math.abs(r);
+      const vars = { a: nm(e.a), b: nm(e.b), lead: nm(first), follow: nm(follow) };
+      const ps = [t(r < 0 ? 'und.rel.opposite' : 'und.rel.together', vars)];
+      ps.push(`${t('und.rel.strength', { r: fmtR(r), word: t('und.rel.word.' + (ar >= 0.9 ? 'vstrong' : ar >= 0.75 ? 'strong' : 'clear')) })} ${t('und.rel.method.' + (['diff', 'level', 'update_instants'].includes(e.method) ? e.method : 'level'), { n: num(e.n || RD.n_samples || 0) })}`);
+      if (e.lag) {
+        const k = Math.abs(e.lag);
+        ps.push(t(k === 1 ? 'und.rel.lead1' : 'und.rel.lead', { ...vars, k, time: timeTxt(k), r: fmtR(e.r_at_lag ?? e.r) }));
+        ps.push(t(isValve(first) ? 'und.rel.leadActuator' : isValve(follow) ? 'und.rel.followActuator' : 'und.rel.leadMeaning', vars));
+      } else ps.push(t('und.rel.same', vars));
+      const red = (RD.redundancy || []).find((x) => x && x.derived && ((x.signal === e.a && (x.partners || []).includes(e.b)) || (x.signal === e.b && (x.partners || []).includes(e.a))));
+      if (red) ps.push(t('und.rel.derived', { d: nm(red.signal), src: nm(red.signal === e.a ? e.b : e.a) }));
+      const ca = byId[e.a] && byId[e.a].cluster_id, cb = byId[e.b] && byId[e.b].cluster_id;
+      if (ca && ca === cb) ps.push(t('und.rel.sameCluster', { c: ca, n: clusterSize(ca) }));
+      else if (ca && cb) ps.push(t('und.rel.crossCluster', { c1: ca, c2: cb }));
+      ps.push(t('und.rel.caution'));
+      ps.push(t('und.rel.use', vars));
+      const title = e.lag ? `${nm(first)} → ${nm(follow)}` : `${nm(e.a)} ↔ ${nm(e.b)}`;
+      const nums = roleAllows('engineer') ? kv([['r', fmtR(e.r)], ['Spearman', fmtR(e.spearman)], [t('und.rel.num.lag'), e.lag ? `${e.lag > 0 ? '+' : '−'}${Math.abs(e.lag)} (${e.lag > 0 ? e.a : e.b} ${t('und.rel.num.first')})` : '0'], [t('und.rel.num.rAtLag'), fmtR(e.r_at_lag)], [t('und.rel.num.n'), num(e.n || 0)], [t('und.rel.num.method'), ['diff', 'level', 'update_instants'].includes(e.method) ? t('und.rel.m.' + e.method) : (e.method || '–')]]) : null;
+      relBox.hidden = false;
+      relBox.replaceChildren(...[
+        el('div', { class: 'row between' }, el('h3', { text: title }), el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => { relBox.hidden = true; if (net) net.select(null); } }, t('und.rel.close'))),
+        ...ps.map((x) => el('p', { text: x })), nums,
+        el('div', { class: 'row' },
+          el('button', { class: 'btn btn-sm', type: 'button', onClick: () => openSignal(e.a) }, t('und.rel.open', { s: nm(e.a) })),
+          el('button', { class: 'btn btn-sm', type: 'button', onClick: () => openSignal(e.b) }, t('und.rel.open', { s: nm(e.b) })),
+          el('button', { class: 'btn btn-sm ask', type: 'button', onClick: () => openChat({ object_type: 'signal', object_id: e.a, signal_id: e.a, title: `${nm(e.a)} ↔ ${nm(e.b)}`, autoAsk: t('und.rel.askQ', vars) }) }, t('und.rel.ask')),
+          (e.evidence_ids || []).length ? evidenceButton(e.evidence_ids) : null)].filter(Boolean));
+      try { relBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch { /* ignore */ }
+    };
+    plainHost.append(vizBox(vt('und.net.title'), vt('und.net.help'), netNode, key, note, relBox));
     if (!edges.length) netNode.replaceChildren(empty(vt('und.net.none')));
     else {
       const nodes = signals.map((s) => ({ id: s.id, label: fileName(s) ? `${String(fileName(s)).slice(0, 14)}` : s.id, kind: kindOf(s), cluster: s.cluster_id, hover: `<b>${fullName(s)}</b><br>${guessWords(s.instrument_hypothesis, kindOf(s)) || kindLabel(kindOf(s))}${s.cluster_id ? '<br>' + t('und.cluster') + ' ' + s.cluster_id : ''}` }));
-      requestAnimationFrame(() => { drawNetwork(netNode, nodes, edges, { height: signals.length > 30 ? 600 : 460, onClick: openSignal, kindLabel }); (view._charts = view._charts || []).push(netNode); });
+      requestAnimationFrame(() => {
+        net = drawNetwork(netNode, nodes, edges, { height: signals.length > 30 ? 600 : 460, onClick: openSignal, kindLabel, onEdgeClick: explainRelation, edgeTitle: edgeTip, storageKey: `net.${state.run}`,
+          labels: { zoomIn: t('und.net.zoomIn'), zoomOut: t('und.net.zoomOut'), fit: t('und.net.fit'), reset: t('und.net.reset'), chart: vt('und.net.title') } });
+      });
     }
   }
   const guessOf = (s) => (s.instrument_hypothesis && s.instrument_hypothesis !== 'unknown' ? s.instrument_hypothesis : '');
