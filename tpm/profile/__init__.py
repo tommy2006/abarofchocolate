@@ -265,6 +265,12 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     ws.write_json("understanding.json", und)
     summary = {"n_signals": len(descriptors), "n_excluded": sum(1 for d in descriptors if d.excluded), "roles": role_counts, "n_clusters": len(rel.get("clusters", {})), "n_pairs": len(rel.get("pairs", [])), "n_redundant": sum(1 for r in rel.get("redundancy", []) if r.get("derived")), "n_hypotheses": n_hyp, "llm": llm_info, "domain_likelihood": domain_ll, "sampling": sample["description"], "seconds": round(time.time() - t0, 2)}
     summary["message"] = f"{len(descriptors)} signals profiled: " + ", ".join(f"{k}={v}" for k, v in sorted(role_counts.items(), key=lambda kv: -kv[1])) + f"; {summary['n_clusters']} clusters, {summary['n_pairs']} related pairs"
+    try:  # every hypothesis and hypothesis test of this stage gets its own decision-log entry (one transaction)
+        from ..log.stage_log import log_stage_inferences
+
+        summary["n_inferences_logged"] = log_stage_inferences(ws, "profile")
+    except Exception:
+        pass
     ws.log.record(ACTOR, "catalog", "dataset", ws.run_id, {k: v for k, v in summary.items() if k != "message"}, evidence_ids=[e_s.id])
     progress(1.0, summary["message"])
     return summary
