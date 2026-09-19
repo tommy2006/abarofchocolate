@@ -25,10 +25,11 @@ from ..workspace import Workspace
 from .i18n import normalize_lang
 from .prose import whole_sentences
 
-FORMATS = ("pdf", "pptx")
+FORMATS = ("pdf", "pptx", "summary")
 MEDIA_TYPES = {
     "html": "text/html",
     "pdf": "application/pdf",
+    "summary": "application/pdf",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 ELLIPSIS = "…"
@@ -37,11 +38,15 @@ _ID_RE = re.compile(r"\b(?:EV|FLAG|DIAG|CHK|INF|RULE|PATTERN|EGR|REC)-[A-Z0-9]+\
 
 # ----------------------------------------------------------------------------- paths
 def export_path(ws: Workspace, lang: str, fmt: str) -> Path:
+    if fmt == "summary":  # the one-page summary is a PDF of its own
+        return ws.dir / f"summary_{normalize_lang(lang)}.pdf"
     return ws.dir / f"report_{normalize_lang(lang)}.{fmt}"
 
 
 def download_name(run_id: str, lang: str, fmt: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(run_id)).strip("_") or "run"
+    if fmt == "summary":
+        return f"tpm_{safe}_{normalize_lang(lang)}_summary.pdf"
     return f"tpm_{safe}_{normalize_lang(lang)}.{fmt}"
 
 
@@ -121,6 +126,10 @@ def _generator(fmt: str):
         from .pptx_export import generate_pptx
 
         return generate_pptx
+    if fmt == "summary":
+        from .summary_pdf import generate_summary
+
+        return generate_summary
     raise ValueError(f"unknown export format {fmt!r}; expected one of {', '.join(FORMATS)}")
 
 

@@ -368,7 +368,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     langs = [args.lang] if args.lang and args.lang != "all" else settings.report.languages
     fmt = (getattr(args, "format", None) or "html").lower()
-    formats = ["html", "pdf", "pptx"] if fmt == "all" else [fmt]
+    formats = ["html", "pdf", "pptx", "summary"] if fmt == "all" else [fmt]
     single = len(langs) == 1 and len(formats) == 1
     out_dir = Path(args.out) if args.out and not single else None
     if out_dir is not None:
@@ -384,9 +384,14 @@ def cmd_report(args: argparse.Namespace) -> int:
             if "html" in formats:
                 out = generate_report(ws, settings, lang, use_llm=not args.no_llm, out_path=target(lang, "html"))
                 _p(f"Report written: {out}")
-            if "pdf" in formats or "pptx" in formats:
+            if "pdf" in formats or "pptx" in formats or "summary" in formats:
                 t0 = time.time()
-                ctx = export_context(ws, settings, lang)  # collected once per language, shared by both documents
+                ctx = export_context(ws, settings, lang)  # collected once per language, shared by every document
+                if "summary" in formats:
+                    from .report.summary_pdf import generate_summary
+
+                    out = generate_summary(ws, settings, lang, out_path=target(lang, "summary"), context=ctx)
+                    _p(f"One-page summary written: {out}")
                 if "pdf" in formats:
                     from .report.pdf import browser_pdf, generate_pdf
 
@@ -808,7 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     re_ = sub.add_parser("report", help="(re)generate the report: HTML, PDF document, PowerPoint deck")
     re_.add_argument("run_id")
-    re_.add_argument("--format", choices=["html", "pdf", "pptx", "all"], default="html", help="html (default) | pdf | pptx | all")
+    re_.add_argument("--format", choices=["html", "pdf", "pptx", "summary", "all"], default="html", help="html (default) | pdf | pptx | summary (one page) | all")
     re_.add_argument("--lang", help="en | fi | sv | all")
     re_.add_argument("--out", help="output file (one language and one format), otherwise an output directory")
     re_.add_argument("--pdf-engine", choices=["native", "browser"], default="native", help="native = built-in typeset PDF (default); browser = headless Edge/Chrome print of the HTML report when installed")
