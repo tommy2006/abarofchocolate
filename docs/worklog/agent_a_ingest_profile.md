@@ -93,3 +93,25 @@ Decisions / deviations from ARCHITECTURE.md:
   `hypotheses_enabled` (sensor_stream >= 0.5) so the UI can explain why hypotheses are absent on record-like data.
 - Foundation files untouched. `materialize_groups` closes/reopens the shared DuckDB connection only if Windows refuses
   the file replace (private attrs `ws._duck`/`ws._lock`, guarded).
+
+## 2026-09-19T11:09+03:00 — Missing-value tokens and non-finite values are NULL on every ingest path
+Done:
+- Bug: `python -m tpm run samples\extra_uneven_headerless.dat --no-llm` failed in assess with `Out of Range Error: STDDEV_SAMP is out of range!`.
+  Root cause: the whitespace path relied on TRY_CAST to null the NAN_TOKENS, but DuckDB parses 'NaN' / 'nan' / 'inf' / 'Infinity' / '1e999'
+  as IEEE NaN / inf, treats them as ordinary values, and stddev_samp / var_samp raise on them. Same run now: all 7 stages done (35 s),
+  the affected column holds 44 NULLs and 0 NaN.
+- tpm/ingest/readers.py: invariant "a float column of dataset.parquet holds finite values or NULL" (module docstring). `finite_sql()`;
+  whitespace path nulls NAN_TOKENS before the cast in every column (matches nullstr on the delimited path) and an integer column with
+  NaN tokens no longer fails the conversion (was a hard ingest error); `_projection` (delimited / parquet / JSON) and
+  `_keep_double_columns` guard FLOAT/DOUBLE; `_write_chunks_parquet` (transposed, Excel, DataFrame) masks +/-inf (Arrow already nulls NaN).
+- Defensive guard on the mean/std aggregates: tpm/quality/_common.py `finite_sql()` used by global_stats, tpm/assessor/coverage.py
+  unit_fingerprints, tpm/assessor/actions.py assess_new_file; tpm/profile/fingerprints.py (was isnan only, inf still raised); tpm/llm/agent.py tool_stats.
+- Tests: tests/test_a_ingest.py (whitespace float + integer columns, delimited, transposed, DataFrame), tests/test_b_assessor.py
+  (ingest -> profile -> quality -> assess on a headerless whitespace file with NaN tokens; legacy parquet holding NaN/inf; new file with nan/inf).
+  All 5 fail on the old code. Full suite before the rebase onto 58a1506: 227 passed, 2 skipped, 1 xfailed; touched modules after it: 73 passed.
+Pending:
+- assess_new_file / the add_file action read the new file with read_csv_auto, not through tpm/ingest: the appended rows can still carry
+  NaN / inf into dataset_curated.parquet (aggregates are guarded, the parquet invariant is not enforced there).
+- fingerprint `n_inf` is always 0 for freshly ingested runs now (inf is stored as missing and counted in missing_rate).
+How to continue:
+- `.venv\Scripts\python.exe -m pytest tests/test_a_ingest.py tests/test_b_assessor.py -q -k "nan or finite"`
