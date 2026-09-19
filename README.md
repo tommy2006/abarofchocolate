@@ -27,6 +27,7 @@ recorded in a tamper-evident log.
 payload first. Details in [docs/DATAFLOW.md](docs/DATAFLOW.md).
 
 Built by team *abarofchocolate* for the Norrin "Trustworthy process monitor" challenge (September 2026).
+What we changed after an expert reviewed our first output: [What changed after the expert review](#what-changed-after-the-expert-review-round-6).
 
 ---
 
@@ -178,10 +179,12 @@ page: `tpm/api/static/js/views/live.js`.
 | `serve [--host 127.0.0.1] [--port 8000] [--open]` | Starts the web UI (uvicorn). |
 | `demo [--no-llm] [--lang …]` | Generates `samples/` if missing, runs the full pipeline on `samples/demo_process.csv` with `config/rules.example.md` as rules, prints how to open the UI. |
 | `replay <run_id> [--speed S] [--max-batches N]` | Replays a run's dataset as a stream of batches through the batch path (checks → trust → scoring → diagnoses). `--speed` is data-seconds per wall-clock second; 0 = as fast as possible. |
-| `report <run_id> [--format html\|pdf\|pptx\|all] [--lang en\|fi\|sv\|all] [--out FILE\|DIR] [--no-llm] [--pdf-engine native\|browser]` | (Re)generates the report: HTML (default), a typeset PDF, a PowerPoint deck, or all three. `--out` is a file for one language and one format, otherwise a directory. `latest` works as a run id. |
+| `report <run_id> [--format html\|pdf\|pptx\|summary\|all] [--lang en\|fi\|sv\|all] [--out FILE\|DIR] [--no-llm] [--pdf-engine native\|browser]` | (Re)generates the report: HTML (default), a typeset PDF, a PowerPoint deck, a one-page summary PDF, or all of them. `--out` is a file for one language and one format, otherwise a directory. `latest` works as a run id. |
 | `email <run_id> --to a@b.c[,d@e.f] [--lang …] [--subject …] [--pdf] [--pptx]` | E-mails the HTML report, optionally with the PDF / the deck attached; needs `TPM_SMTP_*` in `.env` (clear error otherwise). |
 | `export <run_id> [--out DIR] [--lang …]` | Writes `<run_id>_export.zip`: reports (HTML, PDF, PowerPoint), `decision_log.jsonl`, `egress_ledger.jsonl`, `verify.json`, derived JSON/JSONL artifacts. Never the raw data. |
-| `verify-log <run_id>` | Recomputes the SHA-256 hash chain of the decision log. Exit code 1 if broken. |
+| `verify-log <run_id>` | Recomputes the SHA-256 hash chain of the decision log (exit code 1 if broken) and lists, per kind of object, what has an entry of its own and why anything does not. |
+| `showcase --run <run_id> [--rules FILE] [--no-chat]` | On a finished run: compiles rules into checks and runs them, accepts / questions / overrides three diagnoses and shows the effect on a later event, asks the why-chat one question, regenerates the report. |
+| `guard-demo --run <run_id> [--profile hybrid\|eu-hosted] [--send]` | Shows the egress guard on the run's own data: a real message before and after, and a deliberately unsafe message of raw rows that is blocked. Nothing is sent unless `--send` (then only the safe message, once). |
 | `models` | Which local models are in use and why, everything installed, external availability. `--pull NAME` downloads a model, `--use NAME [--embedding]` chooses one (`auto` = automatic). |
 | `bakeoff` | Runs `scripts/bakeoff.py` (local-model comparison on representative tasks). |
 | `doctor` | Checks Python, packages, free RAM, disk, workspace writability, Ollama, `.env`, implemented stages; prints fixes. |
@@ -322,6 +325,9 @@ and latency.
     PowerPoint objects (editable, with their data), text is fitted to every box (cut at a sentence boundary with "…"
     and a note pointing to the report), and the speaker notes list the evidence ids behind each slide.
   - Neither file contains raw rows: both are drawn from the derived artifacts and bucketed aggregates of the report.
+- **One-page summary.** `python -m tpm report <run_id> --format summary` (or the **One-page summary (PDF)** button on
+  the Report page) writes `summary_<lang>.pdf`: one A4 page to share, with what was found, how sure the findings are
+  and what to do next.
 - `python -m tpm export <run_id>` bundles the reports (HTML, PDF, PowerPoint), the decision log (JSONL), the egress
   ledger, the chain verification result and all derived artifacts into `exports/<run_id>_export.zip`.
 - `python -m tpm email <run_id> --to someone@example.org --lang fi [--pdf] [--pptx]` sends the HTML report (`--pdf` /
@@ -378,6 +384,30 @@ workspace/<run_id>/           every artifact of a run (git-ignored)
 Team decisions and their config keys: [docs/DECISIONS.md](docs/DECISIONS.md). Module boundaries and artifact
 contracts: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Evaluation method: [docs/EVALUATION.md](docs/EVALUATION.md).
 
+## What changed after the expert review (round 6)
+
+An expert reviewed our output on the 6 GB practice file and listed 30 fixes. What the app does differently now,
+measured on the same file:
+
+| Review point | Before | Now |
+|---|---|---|
+| Data problems and saturated valves called "sensor faults" | 139 "sensor fault on S44" | 0 sensor faults. S44 is recognised as a valve (controller output) from its 0-100 % range and how it reacts to other signals, and the same events read "actuator saturation: S44 pinned at its upper limit", a process symptom with what to check upstream. Several signals frozen in the same rows, or duplicated rows, are a data problem and no sensor is blamed |
+| False alarms | 14.9 % of normal runs flagged, because a single reading above the threshold counted | 0 of 1,000 normal runs: an event needs a lasting rise. 65 % of faulty runs detected; precision and recall are printed in the report |
+| A critique that always agrees | supported 3,856 of 3,857 | argues four alternatives from the evidence (data problem, process change, saturated actuator, single broken sensor); weakened 912, every disagreement logged |
+| The same "88 %" everywhere | one number | labelled as a heuristic score, explained, and checked against labels when they exist (calibration table); data-quality checks carry their own certainty |
+| Flat attribution | 9 %, 9 %, 4 % ... as a precise list | "no single signal dominates: about 11 signals of cluster C02", plus one lag reference per event and upstream / downstream wording |
+| Unnamed patterns | "PATTERN-A (unnamed)" | named from the plant's list of known failure types when enough of its sensors lead, e.g. "possibly Fault 6: A feed loss", otherwise "cannot name" with the closest candidate |
+| Data quality | 20 frozen signals = 20 findings; trust verdicts that never failed | one grouped finding for signals frozen together, duplicates and frozen blocks now make a batch untrusted, plausible ranges per signal, and timeliness says "not testable" instead of a fake pass |
+| Rules, human in the loop, why-chat | described | `python -m tpm showcase --run <id>` does them for real: rules compiled into checks with pass / fail on every batch; one diagnosis accepted, one questioned, one overridden, and a later event of the same kind takes the person's label; one question answered by the local model |
+| Privacy guard | promised | shown on the run's own data (Data flow page or `python -m tpm guard-demo --run <id>`): a real message before and after the guard, and a deliberately unsafe message of raw rows that is blocked; original column names never leave, also on narrow tables |
+| Decision log | stage summaries | every flag, check, verdict, diagnosis, critique, inference and model call has an entry of its own; the Log page and `verify-log` show any gap and why |
+| Other domains | argued | business records (`samples/demo_records.csv`) and a web-service log (`samples/demo_log.csv`) run end to end; results in [docs/ADAPTABILITY.md](docs/ADAPTABILITY.md) |
+| Report | the top 100 diagnoses of one kind | a varied sample of diagnoses, a 3-sentence headline with the steps folded, drift trends with the normal band, a correlation heat map with the lead / lag summary, why this baseline, and a **one-page summary PDF** |
+| Sensor understanding | "shared unit operation of cluster C05" | clusters named by the local model with their evidence and what would disprove it ("feed system", "stripper"); valves tested against the signals they drive |
+
+Details: [docs/worklog/round6_D.md](docs/worklog/round6_D.md) (data quality) and
+[docs/worklog/round6_E.md](docs/worklog/round6_E.md) (logging, guard, data flow).
+
 ## Tests
 
 ```
@@ -386,10 +416,22 @@ contracts: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Evaluation method: [doc
 
 ## Validation on a large file
 
-The pipeline was run end-to-end on a 6 GB, 15.3-million-row industrial simulation file (57 columns, 21,000 runs) on a
-16 GB laptop with an 8 GB GPU: ingest 4.4 min, profile 1.8, quality 2.9, detect 9.3, diagnose 2.2, assessor 1.8,
-report 0.2 — about 20 minutes when the machine is otherwise idle. Labels present in that file were auto-detected and
-kept out of detection; used for evaluation only they gave: no false alarms on the normal runs (0 % of their rows flagged),
-95–99 % of post-onset rows flagged for the strong fault classes, AUROC 0.85, and the unnamed fault patterns aligned with the
-hidden fault types (adjusted mutual information 0.60). Every number above comes from `workspace/<run>/evaluation.json`
-and `detect_meta.json`; the detection pipeline itself never reads the labels.
+The pipeline was run end to end on the 6 GB practice file (15.3 million rows, 57 columns, 21,000 runs) on a 16 GB
+laptop with an 8 GB GPU, without the language model: ingest 2.7 min, profile 1.1, quality 2.6, detect 11.5,
+diagnose 0.4, assessor 1.8, report 0.2, about 20 minutes in total. The file's label columns were detected and kept
+out of detection. Used only afterwards, to evaluate, they gave:
+
+| Measure | Result |
+|---|---|
+| Normal runs with a false alarm | 0 of 1,000 |
+| Faulty runs detected | 65 % (13,084 of 20,000) |
+| Precision of the flagged rows | 1.00 |
+| Recall of the labelled-faulty rows | 0.42 |
+| Median delay to the first flag | 167 rows |
+| Ranking quality of the anomaly score (AUROC) | 0.85 |
+| Recurring patterns vs the hidden fault numbers (adjusted mutual information) | 0.66 |
+
+An event needs a lasting rise: the median score of 20 consecutive rows must reach a threshold calibrated on
+held-out normal stretches (0.55 on this file); one or two high readings alone are point findings. Every number comes
+from `workspace/<run>/evaluation.json`; the detection itself never reads the labels.
+
