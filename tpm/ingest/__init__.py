@@ -38,6 +38,14 @@ def _finish(ws, settings, ctx: dict[str, Any], conv: dict[str, Any], fmt: dict[s
     ws.log.record(ACTOR, "converted", "dataset", ws.run_id, {"n_rows": conv["n_rows"], "n_cols": conv["n_cols"], "format": fmt.get("format"), "attempt": conv.get("attempt"), "seconds": conv.get("seconds"), "row_order_verified": conv.get("row_order_verified"), "notes": conv.get("notes", []), "memory": memory_snapshot()})
     progress(0.6, "inferring schema")
     schema = infer_schema(ws, settings, ctx, conv, fmt, progress=lambda f, m: progress(0.6 + 0.35 * f, m))
+    try:  # event logs / free text: how often each kind of entry occurs becomes a numeric signal (third domain)
+        from .events_adapter import derive
+
+        derived = derive(ws, settings, schema)
+        if derived:
+            ws.write_json("derived_signals.json", derived)
+    except Exception as e:
+        ws.log.record(ACTOR, "warning", "dataset", ws.run_id, {"message": f"event adapter skipped: {e}"})
     ws.write_json("schema", schema)
     progress(0.96, "planning batches")
     try:

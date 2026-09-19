@@ -1,0 +1,36 @@
+{
+  "incidents": [
+    {
+      "type": "process",
+      "what": "database incident: 30 % errors, db and api 4x slower",
+      "rows": [
+        8000,
+        8599
+      ]
+    },
+    {
+      "type": "data",
+      "what": "latency logged as 0 (logging bug)",
+      "rows": [
+        13000,
+        13299
+      ]
+    },
+    {
+      "type": "process",
+      "what": "gradual drift: worker latency grows to 3x (memory leak)",
+      "rows": [
+        16000,
+        17499
+      ]
+    },
+    {
+      "type": "data",
+      "what": "100 rows written twice (duplicated export)",
+      "rows": [
+        13200,
+        13299
+      ]
+    }
+  ]
+}

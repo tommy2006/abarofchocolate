@@ -183,6 +183,7 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     progress(0.72, "structural roles")
     descriptors: list[SignalDescriptor] = []
     role_counts: dict[str, int] = {}
+    derived_desc = {x.get("column"): x.get("description") for x in (ws.read_json("derived_signals.json") or []) if isinstance(x, dict)}
     for c, a in zip(signal_cols, aliases):
         fp = fps[c]
         role, conf, reasoning, alts = structural_role(fp, red_by_alias.get(a))
@@ -190,7 +191,9 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
         # actuator. Its value pinned at a limit is then a saturated actuator (a process symptom), not a dead sensor.
         m_score, m_reasons = manipulated_evidence(a, fp, rel)
         fp["manipulated"] = {"score": m_score, "reasons": m_reasons}
-        if role == "continuous_measured" and m_score >= MANIPULATED_MIN_SCORE:
+        if c in derived_desc:  # a rate derived from an event log: a measurement of how often something happens
+            role, conf, reasoning, alts = "continuous_measured", 0.7, f"derived from the event log: {derived_desc[c]}", []
+        elif role == "continuous_measured" and m_score >= MANIPULATED_MIN_SCORE:
             role, conf = "actuator_like", round(min(0.85, 0.35 + 0.5 * m_score), 3)
             reasoning = "behaves like a manipulated variable (valve position / controller output): " + "; ".join(m_reasons)
             alts = ["a measured percentage (for example a level in %)"]
@@ -211,6 +214,8 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
         ws.log.record(ACTOR, "inference", "inference", inf.id, {"subject": a, "claim": inf.claim, "confidence": inf.confidence, "status": status}, evidence_ids=ev_ids)
         excluded = role in ("constant",) or (fp.get("count") or 0) == 0
         d = SignalDescriptor(id=a, source_column=c if schema.had_header else None, column_index=int(col_index.get(c, -1)), dtype=str(ptypes.get(c, "")), structural_role=role, structural_confidence=round(conf, 3), cluster_id=cluster_of.get(a), related_signals=related.get(a, [])[:8], fingerprint=fp, confidence=round(conf, 3), inference_ids=[inf.id], evidence_ids=ev_ids, excluded=excluded, excluded_reason=("constant" if role == "constant" else ("all missing" if (fp.get("count") or 0) == 0 else None)))
+        if c in derived_desc:  # a derived event-log signal reads as what it is: "share of level = ERROR in the last 50 rows"
+            d.display_name = derived_desc[c][:80]
         descriptors.append(d)
         role_counts[role] = role_counts.get(role, 0) + 1
 
