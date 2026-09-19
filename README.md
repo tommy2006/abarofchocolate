@@ -95,7 +95,7 @@ why it is faulty in plain words, then concrete steps to fix it.
 | # | Page | What it shows | Challenge output |
 |---|---|---|---|
 | 0 | **Runs** | drop a file (any size, with a progress screen), watch the stages run, the last analyses | - |
-| 1 | **Understanding** | what each sensor probably measures (pressure, flow, temperature ...), how sure the app is and why, as cards you can accept or correct; a **network diagram of how the sensors move together** (who leads, who follows); rename a sensor ("S44" -> "possibly broken") | 1 |
+| 1 | **Understanding** | what each sensor probably measures (pressure, flow, temperature ...), how sure the app is and why, as cards you can accept or correct; a **network diagram of how the sensors move together** (who leads, who follows): drag sensors apart, pan and zoom, and click a line to read in plain words what the link means; rename a sensor ("S44" -> "possibly broken") | 1 |
 | 2 | **Data quality** | a **map of where the faulty data is** (batches x kinds of check), the worst pieces as Problem -> Reason -> What to do, **which checks ran on each batch** (pass / warn / fail), and what the **% score means in plain words**; operating rules typed in plain language become extra checks | 2 |
 | 3 | **Monitor** | a timeline diagram of unusual behaviour, the sensors involved most often, the strongest events with their explanation and next steps, the list of suspicious single readings ("a glitch or a manipulation; the data alone can't tell") | 3 |
 | 4 | **Diagnoses** | findings by likely cause (diagram), each as Problem -> Reason -> What to do, with confidence, the step-by-step reasoning and the critique that challenged it; accept / question / override on every finding | 4, 5 |

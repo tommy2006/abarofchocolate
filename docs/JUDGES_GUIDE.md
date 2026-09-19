@@ -37,6 +37,10 @@ python -m tpm report latest --format summary       one A4 page to share
   "what is uncertain" list. Click an evidence ID to see the numbers behind it.
 - The dataset panel states the inferred sample period, the grouping strategy that won (several were scored), and
   which columns were auto-detected as labels / identifiers and **excluded from detection**.
+- The network *How the sensors interact*: drag a sensor to untangle the picture (its lines follow), drag the
+  background or scroll with two fingers to pan, pinch to zoom, and click a line or its `+2` to read in plain words
+  what links the two sensors: which moves first and how many readings later the other follows, how closely, whether
+  one looks like a valve acting on the other, and why the link matters.
 - Try: change a role with *override*, add a note. The change is logged (section 5 / 6) and used by later stages.
 
 ## 2. Automated data quality checks — *Data quality* view, report section 2
