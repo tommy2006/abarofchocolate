@@ -3,15 +3,23 @@
    contribution stack, filters, flag detail with evidence + decisions + chat, detector details.
    ?flag=FLAG-000001 selects the flag's group, highlights it and opens its detail; ?group=3 filters;
    ?rows=312632-312999&signals=S09,S01 zooms on those rows and plots the signals there (row links of Data quality). */
-import { state, t, el, clear, runApi, fmt, conf, sev, chip, kindChip, causeChip, section, table, viewHead, needRun, empty, evidenceButton, evidencePanel, decisionBar, hiddenHint, kv, roleAllows, bus, st, infStatus, unavailableNote, meter, linkifyRefs, cleanText, proseList, refLink, refChips, confWords, sevWords, timesThreshold, addPlainBox, flash, navigate, notice } from '../core.js';
-import { plot, purge, tokens, colorFor } from '../charts.js';
+import { state, t, el, clear, runApi, fmt, conf, sev, chip, kindChip, causeChip, section, table, viewHead, needRun, empty, evidenceButton, evidencePanel, decisionBar, hiddenHint, kv, roleAllows, bus, st, infStatus, unavailableNote, meter, linkifyRefs, cleanText, proseList, refLink, refChips, confWords, sevWords, timesThreshold, addPlainBox, flash, navigate, notice, rowsLink } from '../core.js';
+import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praForItem, timeline, binnedTimeline, hbar, kindColors, kindOfSignal, sensorKindColor, sensorKindLegend } from '../charts.js';
 import { openChat, flagContext, setChatContext } from '../chat.js';
-import { summaryCard, techDetails, techNested, itemBrief, itemBriefLocal, bt } from '../brief.js';
+import { summaryCard, techDetails, techNested, itemBrief, itemBriefLocal, bt, openBasicItem } from '../brief.js';
 
 const KINDS = ['anomaly', 'point', 'drift', 'changepoint', 'dq', 'rule', 'cascade'];
 const DIRS = ['up', 'down', 'noisy', 'stuck', 'shifted'];
 const SUS_PAGE = 20;
 const SUS_SOURCES = { detector: 'fail', range_check: 'warn', local_spike: 'info' };
+const MANY = 400;   // more events than this: the timeline counts them per stretch of the data instead of one mark each
+// English fallbacks of this page's own keys (the i18n files are edited by several people at once)
+const FB = {
+  'mon.viz.binnedHelp': 'Each bar counts the events in one stretch of the data: further right = later, taller = more events, colour = kind of event. Click a bar to see those rows.',
+  'mon.topHere': 'What was found in these rows', 'mon.topGroup': 'The strongest events in group {g}',
+  'mon.viz.perSignalHelp': 'How many events each sensor was involved in; colour = what the sensor probably measures. Click a bar to see what the system knows about that sensor.',
+};
+const tm = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [a, b] of Object.entries(vars || {})) v = v.replaceAll(`{${a}}`, String(b)); } return v; };
 function dirWord(d) { return d && DIRS.includes(d) ? t('plain.dir.' + d) : (d || ''); }
 function parseRows(s) { const m = /^\s*(\d+)(?:\s*-\s*(\d+))?\s*$/.exec(String(s || '')); if (!m) return null; const a = Number(m[1]); const b = m[2] === undefined ? a : Number(m[2]); return { a: Math.min(a, b), b: Math.max(a, b) }; }
 /** The cause chip of a single odd reading says what it can be; "unknown" would undersell what is known. */
@@ -54,6 +62,8 @@ export async function render(main, params = {}) {
   if (!state.run) { page.append(needRun()); return page; }
   const tech = techDetails('monitor');
   page.append(summaryCard('monitor'), tech);
+  // round 5: diagrams and the strongest events (problem -> reason -> answer) sit ABOVE the technical part
+  const plainHost = el('div', { class: 'viz-host' }); page.insertBefore(plainHost, tech);
   const view = tech.body;
   await addPlainBox(view, 'monitor');
   const k = tokens();
@@ -64,10 +74,75 @@ export async function render(main, params = {}) {
   const sigIndex = Object.fromEntries(signals.map((s, i) => [s.id, i]));
   const sigName = (id) => { const s = signals.find((x) => x.id === id); const n = s && (s.display_name || s.source_column); return n && n !== id ? `${n} (${id})` : id; };
   const groups = fl.ok ? fl.data.groups || [] : [];
+
+  // ---- round 5: where and when (timeline), which sensors (bar), and the strongest events as problem -> reason -> answer
+  const kindWord = (kd) => (t('mon.kind.' + kd) === 'mon.kind.' + kd ? kd : t('mon.kind.' + kd));
+  const STATUS5 = { accept: 'accepted', question: 'questioned', override: 'overridden', dismiss: 'dismissed' };
+  const flagDecisions = (f) => decisionBar('flag', f.id, { current: f.human_status, note: f.human_note, overrideFields: [{ key: 'likely_cause_class', label: t('mon.cause'), type: 'select', options: ['process', 'sensor', 'data', 'mixed', 'unknown'], value: f.likely_cause_class }], askContext: flagContext(f), onDone: (action) => { f.human_status = STATUS5[action]; } });
+  const basic = !roleAllows('operator');
+  // Basic mode keeps the technical part hidden: a clicked event opens as problem -> reason -> answer in a popup
+  const openFlag = (id) => { const f = allFlags.find((x) => x.id === id); if (!f) return; if (basic) { openBasicItem(f.id, flagContext(f)); return; } tech.open = true; selectFlag(f, true); };
+  const placed = allFlags.filter((f) => f.row_start !== null && f.row_start !== undefined);
   let selected = null;
   const wanted = params.flag ? allFlags.find((x) => x.id === params.flag) : null;
   const focus = wanted ? null : parseRows(params.rows);
   const focusPad = focus ? Math.max(200, (focus.b - focus.a + 1) * 2) : 0;
+  const near = focus ? allFlags.filter((f) => f.row_end >= focus.a && f.row_start <= focus.b) : [];
+  /** The sensors to draw around the rows in focus: the ones the link named, else those of the events there. */
+  const focusSignals = () => {
+    let sigs = String(params.signals || '').split(',').map((s) => s.trim()).filter((s) => sigIndex[s] !== undefined).slice(0, 4);
+    if (!sigs.length) sigs = [...new Set(near.flatMap((f) => (f.signals_ranked || []).slice(0, 2).map((s) => s.signal)))].slice(0, 4);
+    if (!sigs.length) sigs = signals.filter((s) => !s.excluded).slice(0, 3).map((s) => s.id);
+    return sigs;
+  };
+  const askRows = (sigs) => openChat({ object_type: 'rows', object_id: `rows ${focus.a}-${focus.b}`, row: focus.a, row_end: focus.b, signals: sigs, flag_id: near[0] ? near[0].id : undefined, title: t('mon.focusTitle', { a: focus.a, b: focus.b }), autoAsk: t('chat.quick.why') });
+  // Basic mode: the rows somebody asked to see ("Show these rows") are drawn first, as the page's one diagram
+  if (focus && basic) {
+    const sigs = focusSignals();
+    const node = chartNode('short');
+    plainHost.append(vizBox(focus.a === focus.b ? t('mon.focusTitleOne', { a: fmt.int(focus.a) }) : t('mon.focusTitle', { a: fmt.int(focus.a), b: fmt.int(focus.b) }), t('mon.focusHelp'), node,
+      el('div', { class: 'row', style: { marginTop: '8px', flexWrap: 'wrap', gap: '8px' } }, el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => askRows(sigs) }, t('sus.askWhy')), el('button', { class: 'btn btn-sm', type: 'button', onClick: () => navigate('monitor') }, t('mon.focusClear')))));
+    requestAnimationFrame(() => { plotSignalsAround(node, sigs, focus.a, focus.b, { sigIndex }); view._charts.push(node); });
+  }
+  if (placed.length) {
+    const kc = kindColors();
+    const byGroup = groups.length > 1 && groups.length <= 24;
+    const many = placed.length > MANY;
+    const legend = Object.fromEntries(KINDS.map((kd) => [kd, kindWord(kd)]));
+    if (!(focus && basic)) {
+      const tlNode = chartNode('');
+      plainHost.append(vizBox(vt('mon.viz.timeline'), many ? tm('mon.viz.binnedHelp') : vt('mon.viz.timelineHelp'), tlNode));
+      if (many) requestAnimationFrame(() => { binnedTimeline(tlNode, placed.map((f) => ({ x: f.row_start, series: f.kind })), { order: KINDS, colors: kc, legend, xtitle: vt('diag.viz.row'), ytitle: vt('mon.viz.events'), onClick: (a, b) => navigate('monitor', { rows: `${a}-${b}` }) }); view._charts.push(tlNode); });
+      else {
+        const items = placed.map((f) => ({ id: f.id, x: f.row_start, y: byGroup ? String(f.group_id ?? '–') : Math.round((f.severity || 0) * 100), series: f.kind, color: kc[f.kind] || k.ink2, size: 7 + 13 * Math.max(0, Math.min(1, f.severity || 0)),
+          text: `<b>${f.id}</b> · ${kindWord(f.kind)}<br>${t('mon.rows')} ${fmt.int(f.row_start)}–${fmt.int(f.row_end)}${f.group_id !== null && f.group_id !== undefined ? ' · ' + vt('mon.viz.group') + ' ' + f.group_id : ''}<br>${sevWords(f.severity)}${(f.signals_ranked || []).length ? '<br>' + f.signals_ranked.slice(0, 2).map((x) => sigName(x.signal)).join(', ') : ''}` }));
+        requestAnimationFrame(() => { timeline(tlNode, items, { height: byGroup ? Math.max(280, 90 + 22 * groups.length) : 300, xtitle: vt('diag.viz.row'), ytitle: byGroup ? vt('mon.viz.group') : vt('diag.viz.serious'), yCategories: byGroup ? groups : undefined, legend, onClick: openFlag }); view._charts.push(tlNode); });
+      }
+    }
+    if (roleAllows('operator')) {
+      const cnt = new Map();
+      for (const f of placed) for (const x of (f.signals_ranked || []).slice(0, 2)) if (x && x.signal) cnt.set(x.signal, (cnt.get(x.signal) || 0) + 1);
+      const topSig = [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+      if (topSig.length > 1) {
+        const barNode = chartNode('short');
+        plainHost.append(vizBox(vt('mon.viz.perSignal'), tm('mon.viz.perSignalHelp'), barNode));
+        const sigById = Object.fromEntries(signals.map((s) => [s.id, s]));
+        const kinds = topSig.map(([id]) => kindOfSignal(sigById[id]));   // each bar in the colour of what the sensor probably measures
+        requestAnimationFrame(() => { hbar(barNode, topSig.map(([id]) => sigName(id)), topSig.map(([, n]) => n), { colors: kinds.map(sensorKindColor), xtitle: vt('mon.viz.events'), onClick: (_l, i) => navigate('understanding', { signal: topSig[i][0] }) }); sensorKindLegend(barNode, kinds); view._charts.push(barNode); });
+      }
+    }
+    // the three strongest events, one per place (overlapping alarms of the same stretch are one problem); with rows in
+    // focus the events found there, with a group asked for (a group link) the events of that group
+    const inFocus = focus ? near.filter((f) => f.row_start !== null && f.row_start !== undefined) : [];
+    const inGroup = !focus && params.group ? placed.filter((f) => String(f.group_id) === String(params.group)) : [];
+    const pool = inFocus.length ? inFocus : inGroup.length ? inGroup : placed;
+    const ranked = pool.slice().sort((a, b) => (b.severity || 0) - (a.severity || 0) || (b.confidence || 0) - (a.confidence || 0));
+    const top = [];
+    for (const f of ranked) { if (top.length >= 3) break; if (!top.some((g) => String(g.group_id) === String(f.group_id) && f.row_start <= g.row_end && f.row_end >= g.row_start)) top.push(f); }
+    const topTitle = inFocus.length ? tm('mon.topHere') : inGroup.length ? tm('mon.topGroup', { g: params.group }) : vt('mon.top');
+    plainHost.append(el('h2', { class: 'viz-title pra-title', text: topTitle }), el('p', { class: 'viz-help', text: vt('adv.topHelp') }),
+      ...top.map((f) => praForItem(f.id, { label: [refLink('flag', f.id), ' · ', kindWord(f.kind)], where: el('div', {}, rowsLink(f.row_start, f.row_end, { signals: (f.signals_ranked || []).slice(0, 4).map((x) => x.signal), label: vt('adv.showRows') })), extra: flagDecisions(f), fallback: { problem: cleanText(f.statement || f.id) } })));
+  }
   // the suspicious-rows list is optional: an older server (404) or a run without it ({available:false}) hides the section
   const susData = sus.ok && sus.data && sus.data.available ? sus.data : null;
   const pointDominated = !!(susData && susData.regime && susData.regime.point_dominated);
@@ -75,17 +150,14 @@ export async function render(main, params = {}) {
   if (pointDominated) view.append(el('div', { class: 'notice warn mon-lead', role: 'note' }, el('b', { text: t('sus.pointLead') }), ' ', t('sus.pointLeadHelp', { points: fmt.int(susData.regime.n_point_stretches), sustained: fmt.int(susData.regime.n_sustained_stretches) })));
   view.append(focusHost, susTop);
 
-  // ---- rows in focus (a row link from Data quality or from a statement)
-  if (focus) {
+  // ---- rows in focus (a row link from Data quality or from a statement); Basic mode drew them above already
+  if (focus && !basic) {
     const fs = section(focus.a === focus.b ? t('mon.focusTitleOne', { a: fmt.int(focus.a) }) : t('mon.focusTitle', { a: fmt.int(focus.a), b: fmt.int(focus.b) }), { right: el('button', { class: 'btn btn-sm', type: 'button', onClick: () => navigate('monitor') }, t('mon.focusClear')) });
     focusHost.append(fs.root);
-    let sigs = String(params.signals || '').split(',').map((s) => s.trim()).filter((s) => sigIndex[s] !== undefined).slice(0, 4);
-    const near = allFlags.filter((f) => f.row_end >= focus.a && f.row_start <= focus.b);
-    if (!sigs.length) sigs = [...new Set(near.flatMap((f) => (f.signals_ranked || []).slice(0, 2).map((s) => s.signal)))].slice(0, 4);
-    if (!sigs.length) sigs = signals.filter((s) => !s.excluded).slice(0, 3).map((s) => s.id);
+    const sigs = focusSignals();
     const node = el('div', { class: 'chart short' });
     fs.body.append(el('p', { class: 'small muted' }, t('mon.focusHelp'), ' ', sigs.length ? refChips('signal', sigs) : null), node,
-      el('div', { class: 'row', style: { marginTop: '8px' } }, el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => openChat({ object_type: 'rows', object_id: `rows ${focus.a}-${focus.b}`, row: focus.a, row_end: focus.b, signals: sigs, flag_id: near[0] ? near[0].id : undefined, title: t('mon.focusTitle', { a: focus.a, b: focus.b }), autoAsk: t('chat.quick.why') }) }, t('sus.askWhy')), near.length ? el('span', { class: 'small muted' }, t('mon.focusFlags', { n: near.length }), ' ', refChips('flag', near.map((f) => f.id), { max: 6 })) : el('span', { class: 'small muted', text: t('mon.focusNoFlags') })));
+      el('div', { class: 'row', style: { marginTop: '8px' } }, el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => askRows(sigs) }, t('sus.askWhy')), near.length ? el('span', { class: 'small muted' }, t('mon.focusFlags', { n: near.length }), ' ', refChips('flag', near.map((f) => f.id), { max: 6 })) : el('span', { class: 'small muted', text: t('mon.focusNoFlags') })));
     view._charts.push(node);
     if (sigs.length) plotSignalsAround(node, sigs, focus.a, focus.b, { sigIndex }); else node.replaceChildren(el('div', { class: 'dim small', text: t('common.notYet') }));
     if (params.rows) setTimeout(() => flash(fs.root), 50);
@@ -120,6 +192,7 @@ export async function render(main, params = {}) {
       detail.append(el('div', { class: 'row between' }, el('h3', {}, end !== r.row ? t('mon.focusTitle', { a: fmt.int(r.row), b: fmt.int(end) }) : t('mon.focusTitleOne', { a: fmt.int(r.row) }), r.time ? el('span', { class: 'dim small', text: ' ' + fmt.ts(r.time) }) : null),
         el('div', { class: 'row' }, (r.sources || []).map((s) => chip(t('sus.src.' + s) === 'sus.src.' + s ? s : t('sus.src.' + s), SUS_SOURCES[s] || '')), el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => openChat({ ...ctx, autoAsk: t('chat.quick.why') }) }, t('sus.askWhy')))),
         // plain first: what it is (the team's wording), which sensors, what to do; the statement, plot and ids are one click away
+        (r.flag_ids || [])[0] || (r.check_ids || [])[0] ? praForItem((r.flag_ids || [])[0] || r.check_ids[0], { fallback: { problem: cleanText(r.statement || '') } }) : null,
         itemBriefLocal({ verdict: 'attention', headline: bt(end !== r.row ? 'brief.sus.headlineRows' : 'brief.sus.headline'),
           points: (r.signals || []).slice(0, 3).map((s) => (s.deviation !== null && s.deviation !== undefined ? bt('brief.sus.signal', { name: sigName(s.signal), dir: dirWord(s.direction), x: times(s.deviation) }) : bt('brief.sus.signalNoX', { name: sigName(s.signal), dir: dirWord(s.direction) }))),
           actions: [{ text: t('sus.askWhy'), onClick: () => openChat({ ...ctx, autoAsk: t('chat.quick.why') }) }, (r.flag_ids || []).length ? { text: bt('brief.sus.decide'), view: 'monitor', ref: r.flag_ids[0] } : null].filter(Boolean) }),
@@ -249,7 +322,7 @@ export async function render(main, params = {}) {
     detail.append(el('div', { class: 'row between' }, el('h3', {}, t('mon.flagDetail'), ' ', el('span', { class: 'dim', text: f.id })), el('div', { class: 'row' }, kindChip(f.kind), flagCause(f), el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => openChat(flagContext(f)) }, t('common.ask')))));
     // what happened, where, the likely cause, what to check on site - and the decision - before any technical content
     const STATUS_OF = { accept: 'accepted', question: 'questioned', override: 'overridden', dismiss: 'dismissed' };
-    detail.append(itemBrief(f.id, { ctx: flagContext(f), decisionsShown: true }), el('div', { class: 'brief-decide' }, decisionBar('flag', f.id, { current: f.human_status, note: f.human_note, overrideFields: [{ key: 'likely_cause_class', label: t('mon.cause'), type: 'select', options: ['process', 'sensor', 'data', 'mixed', 'unknown'], value: f.likely_cause_class }], askContext: flagContext(f), onDone: (action) => { f.human_status = STATUS_OF[action]; renderList(); } })));
+    detail.append(praForItem(f.id, { where: el('div', {}, rowsLink(f.row_start, f.row_end, { signals: (f.signals_ranked || []).slice(0, 4).map((x) => x.signal), label: vt('adv.showRows') })), fallback: { problem: cleanText(f.statement || f.id) } }), el('div', { class: 'pra-after' }, itemBrief(f.id, { ctx: flagContext(f), decisionsShown: true })), el('div', { class: 'brief-decide' }, decisionBar('flag', f.id, { current: f.human_status, note: f.human_note, overrideFields: [{ key: 'likely_cause_class', label: t('mon.cause'), type: 'select', options: ['process', 'sensor', 'data', 'mixed', 'unknown'], value: f.likely_cause_class }], askContext: flagContext(f), onDone: (action) => { f.human_status = STATUS_OF[action]; renderList(); } })));
     const nested = techNested();
     detail.append(nested);
     const T = nested.body;

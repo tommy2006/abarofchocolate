@@ -1,10 +1,10 @@
 /* View 1: what the system understood — signal catalog with evidence, hypotheses, role override,
    correlation heatmap, clusters, dataset assumptions and what remains uncertain. */
-import { state, t, el, clear, runApi, fmt, conf, infStatus, chip, section, table, viewHead, needRun, empty, evidenceButton, fetchEvidence, evidenceList, decisionBar, postDecision, hiddenHint, kv, roleAllows, bus, meter, unavailableNote } from '../core.js';
-import { plot, purge, tokens, colorFor } from '../charts.js';
+import { state, t, el, clear, runApi, fmt, conf, infStatus, chip, section, table, viewHead, needRun, empty, evidenceButton, fetchEvidence, evidenceList, decisionBar, postDecision, hiddenHint, kv, roleAllows, bus, meter, unavailableNote, navigate } from '../core.js';
+import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praStrip, cappedList, sensorKind, sensorKindColor, SENSOR_KINDS, strongestEdges, drawNetwork } from '../charts.js';
 import { openChat, signalContext } from '../chat.js';
 import { plainBox } from '../plain.js';
-import { renameBar, loadSignalNames } from '../rename.js';
+import { renameBar, loadSignalNames, renameSignalDialog } from '../rename.js';
 import { summaryCard, techDetails, techNested } from '../brief.js';
 
 const FB = {
@@ -32,12 +32,14 @@ export async function render(main, params = {}) {
   const tech = techDetails('understanding');
   page.append(summaryCard('understanding'), tech);
   const view = tech.body;
-  try { const pb = await plainBox('understanding'); if (pb) view.append(pb); } catch (e) { /* plain box is optional */ }
+  if (roleAllows('operator')) { try { const pb = await plainBox('understanding'); if (pb) view.append(pb); } catch (e) { /* plain box is optional */ } }
   const [und, sig, rel, dom, sch] = await Promise.all([runApi('/understanding'), runApi('/signals'), runApi('/relations'), runApi('/domain'), runApi('/schema')]);
   const signals = sig.ok ? sig.data.signals || [] : [];
   const byId = Object.fromEntries(signals.map((s) => [s.id, s]));
   // renaming a signal is an everyday action ("call S44 'possibly broken'"): it sits above the technical part
   const rb = renameBar(signals.map((s) => s.id)); if (rb) page.insertBefore(rb, tech);
+  // round 5: the diagrams and the sensor-type guesses sit ABOVE the technical part
+  const plainHost = el('div', { class: 'viz-host' }); page.insertBefore(plainHost, tech);
   const U = und.data || {};
 
   // ---- summary + assumptions + uncertain + domain
@@ -88,7 +90,73 @@ export async function render(main, params = {}) {
   });
   grid.append(tbl, detail);
   const SP = U.signal_plain || {};
-  if (params && params.signal && byId[params.signal]) { showSignal(byId[params.signal]); setTimeout(() => detail.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); }
+
+  // ---- round 5: how the sensors interact (network) and what each sensor probably measures (cards), above the expander
+  const fileName = (s) => s.display_name || (s.source_column && s.source_column !== s.id ? s.source_column : '');
+  const fullName = (s) => (fileName(s) ? `${fileName(s)} (${s.id})` : s.id);
+  const kindOf = (s) => { const byName = s.display_name ? sensorKind(s.display_name) : 'other'; return byName !== 'other' && byName !== 'unknown' ? byName : sensorKind(s.instrument_hypothesis); };
+  const kindLabel = (kd) => vt('und.kind.' + kd);
+  const basic = !roleAllows('operator');
+  // Basic mode has no technical part: a clicked sensor shows its card at the top of the page instead
+  const openSignal = (id) => { if (!byId[id]) return; if (basic) { navigate('understanding', { signal: id }); return; } tech.open = true; showSignal(byId[id]); setTimeout(() => { try { detail.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* ignore */ } }, 80); };
+  {
+    const pairs = rel.ok ? rel.data.pairs || [] : [];
+    const strong = pairs.filter((x) => Math.abs(Number(x.r)) >= 0.5).length;
+    const edges = strongestEdges(pairs, { cap: 60, minR: 0.5 });
+    const netNode = chartNode('tall');
+    const note = el('p', { class: 'small muted viz-note', text: strong > edges.length ? vt('und.net.capped', { n: edges.length, total: strong }) : '' });
+    plainHost.append(vizBox(vt('und.net.title'), vt('und.net.help'), netNode, note));
+    if (!edges.length) netNode.replaceChildren(empty(vt('und.net.none')));
+    else {
+      const nodes = signals.map((s) => ({ id: s.id, label: fileName(s) ? `${String(fileName(s)).slice(0, 14)}` : s.id, kind: kindOf(s), cluster: s.cluster_id, hover: `<b>${fullName(s)}</b><br>${kindLabel(kindOf(s))}${s.instrument_hypothesis ? ' — ' + s.instrument_hypothesis : ''}${s.cluster_id ? '<br>' + t('und.cluster') + ' ' + s.cluster_id : ''}` }));
+      requestAnimationFrame(() => { drawNetwork(netNode, nodes, edges, { height: signals.length > 30 ? 600 : 460, onClick: openSignal, kindLabel }); (view._charts = view._charts || []).push(netNode); });
+    }
+  }
+  const guessOf = (s) => (s.instrument_hypothesis && s.instrument_hypothesis !== 'unknown' ? s.instrument_hypothesis : '');
+  // the instrument guess of each sensor, as an inference a person can accept, question or correct
+  const allInf = signals.length ? await runApi('/inferences') : { ok: false };
+  const infBySubject = {};
+  for (const inf of allInf.ok ? allInf.data.items || [] : []) if (/^instrument/i.test(inf.claim || '')) { const cur = infBySubject[inf.subject]; if (!cur || (inf.confidence ?? 0) >= (cur.confidence ?? 0)) infBySubject[inf.subject] = inf; }
+  const guessDecision = (inf) => decisionBar('inference', inf.id, { current: inf.human_status, note: inf.human_note, overrideFields: [{ key: 'claim', label: t('decision.override.newValue'), type: 'text', value: inf.claim }], askContext: { object_type: 'inference', object_id: inf.id, title: inf.claim } });
+  const nameButton = (s) => el('button', { class: 'btn btn-sm', type: 'button', onClick: () => renameSignalDialog(s.id) }, vt('und.unsure.name'));
+  /** One sensor: what it probably measures, how sure, why, part of the plant; accept / question / correct the guess. */
+  const card = (s) => {
+    const kd = kindOf(s); const inf = infBySubject[s.id]; const c = Math.max(0, Math.min(1, Number(s.instrument_confidence ?? (inf && inf.confidence) ?? 0)));
+    const why = inf && inf.reasoning ? inf.reasoning : (SP[s.id] || '');
+    return el('div', { class: 'sensor-card' + (s.excluded ? ' excluded' : ''), style: { borderTopColor: sensorKindColor(kd) }, dataset: { signal: s.id } },
+      el('div', { class: 'sensor-card-head' }, el('span', { class: 'sensor-dot', style: { background: sensorKindColor(kd) }, 'aria-hidden': 'true' }), el('b', { text: fullName(s) }), el('span', { class: 'chip solid', text: kindLabel(kd) })),
+      el('div', { class: 'sensor-guess', text: guessOf(s) || vt('und.types.noGuess') }),
+      el('div', { class: 'sensor-conf', title: vt('und.types.confidence') }, el('span', { class: 'small muted', text: vt('und.types.confidence') }), el('span', { class: 'bar' }, el('i', { style: { width: c * 100 + '%', background: c < 0.4 ? 'var(--fail)' : c < 0.65 ? 'var(--warn)' : 'var(--ok)' } })), el('span', { class: 'small', text: fmt.pct(c) })),
+      s.unit_operation_hypothesis ? el('div', { class: 'small' }, el('span', { class: 'muted', text: vt('und.types.unitop') + ': ' }), s.unit_operation_hypothesis, s.unit_operation_confidence !== null && s.unit_operation_confidence !== undefined ? el('span', { class: 'dim', text: ` (${fmt.pct(s.unit_operation_confidence)})` }) : null) : null,
+      why ? el('div', { class: 'small sensor-why' }, el('span', { class: 'muted', text: vt('und.types.why') + ': ' }), why) : null,
+      el('div', { class: 'sensor-actions' }, inf ? guessDecision(inf) : null, basic ? nameButton(s) : el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => openSignal(s.id) }, vt('und.types.details'))));
+  };
+  // Basic mode: a sensor somebody asked about (a sensor link, "Tell the system what your sensors measure") comes first
+  if (basic && params && params.signal && byId[params.signal]) plainHost.prepend(el('div', { class: 'sensor-cards sensor-focus' }, card(byId[params.signal])));
+  if (!roleAllows('operator')) {
+    // basic mode: the three sensors the system is least sure about, as problem -> reason -> answer, with the two
+    // things a person can do right there: name the sensor, or accept / question / correct the guess
+    const unsure = signals.filter((s) => !s.excluded && !s.display_name && guessOf(s) && s.id !== params.signal).sort((a, b) => (a.instrument_confidence ?? 0) - (b.instrument_confidence ?? 0)).slice(0, 3);
+    for (const s of unsure) plainHost.append(praStrip({ verdict: 'attention', problem: vt('und.unsure.problem', { name: fullName(s) }), reason: vt('und.unsure.reason', { guess: guessOf(s) || vt('und.types.noGuess'), pct: fmt.pct(s.instrument_confidence ?? 0) }), fix: [vt('und.unsure.fix1'), vt('und.unsure.fix2')],
+      extra: [el('div', { class: 'pra-btns' }, nameButton(s)), infBySubject[s.id] ? el('div', { class: 'brief-decide' }, guessDecision(infBySubject[s.id])) : null] }));
+  } else if (signals.length) {
+    // operator / engineer: one card per sensor, filter by kind, capped with "show more"
+    const cardsHost = el('div');
+    let filter = '';
+    const counts = {}; for (const s of signals) counts[kindOf(s)] = (counts[kindOf(s)] || 0) + 1;
+    const chipBar = el('div', { class: 'kind-chips', role: 'group' });
+    const paintCards = () => {
+      clear(cardsHost);
+      const list = signals.filter((s) => !filter || kindOf(s) === filter).sort((a, b) => Number(!!a.excluded) - Number(!!b.excluded) || (b.instrument_confidence ?? 0) - (a.instrument_confidence ?? 0));
+      cardsHost.append(cappedList(list.length, 12, (i) => card(list[i]), { cls: 'sensor-cards' }));
+      chipBar.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.kind || '') === filter)));
+    };
+    const mkChip = (kd, label, n) => el('button', { class: 'kind-chip', type: 'button', dataset: { kind: kd }, 'aria-pressed': 'false', onClick: () => { filter = kd; paintCards(); } }, kd ? el('span', { class: 'sensor-dot', style: { background: sensorKindColor(kd) } }) : null, `${label} · ${n}`);
+    chipBar.append(mkChip('', vt('und.types.all'), signals.length), ...SENSOR_KINDS.filter((kd) => counts[kd]).map((kd) => mkChip(kd, kindLabel(kd), counts[kd])));
+    plainHost.append(vizBox(vt('und.types.title'), vt('und.types.help'), chipBar, cardsHost));
+    paintCards();
+  }
+  if (!basic && params && params.signal && byId[params.signal]) { showSignal(byId[params.signal]); setTimeout(() => detail.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); }
 
   async function showSignal(s) {
     clear(detail);
@@ -161,7 +229,7 @@ export async function render(main, params = {}) {
     const k = tokens();
     const labels = rel.data.signals || [];
     requestAnimationFrame(() => plot(node, [{ type: 'heatmap', z: rel.data.correlation, x: labels, y: labels, zmin: -1, zmax: 1, colorscale: [[0, k.fail], [0.5, k.bg], [1, k.info]], hovertemplate: '%{y} × %{x}: r=%{z:.2f}<extra></extra>', showscale: true, colorbar: { thickness: 10, len: 0.8, tickfont: { size: 10 } } }], { height: 420, margin: { l: 50, r: 10, t: 10, b: 50 }, xaxis: { tickangle: -45 }, yaxis: { autorange: 'reversed' } }));
-    view._charts = [node];
+    (view._charts = view._charts || []).push(node);
   }
   const clusters = (rel.ok && rel.data.clusters) || (U.clusters ? Object.entries(U.clusters).map(([id, ss]) => ({ id, signals: ss })) : []);
   if (clusters.length) {

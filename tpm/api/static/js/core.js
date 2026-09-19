@@ -253,8 +253,13 @@ export function confirmDialog(text, { okLabel, danger = false } = {}) {
 }
 
 // ---------------------------------------------------------------- roles
-export const ROLE_LEVEL = { operator: 0, engineer: 1, reviewer: 2 };
-export function roleAllows(level) { const r = state.user ? state.user.role : 'operator'; return (ROLE_LEVEL[r] || 0) >= (ROLE_LEVEL[level] || 0); }
+// Modes: basic shows by far the least, operator is the everyday view, engineer sees everything (incl. what the
+// former reviewer role saw). 'reviewer' stays as an alias so stored sessions and old links keep working.
+export const ROLE_LEVEL = { basic: 0, operator: 1, engineer: 2, reviewer: 2 };
+export const MODES = ['basic', 'operator', 'engineer'];
+export function normalizeRole(r) { return r === 'reviewer' ? 'engineer' : (MODES.includes(r) ? r : 'operator'); }
+export function isBasic() { return (state.user ? normalizeRole(state.user.role) : 'operator') === 'basic'; }
+export function roleAllows(level) { const r = state.user ? normalizeRole(state.user.role) : 'operator'; return ROLE_LEVEL[r] >= (ROLE_LEVEL[level] === undefined ? 1 : ROLE_LEVEL[level]); }
 export function actorName() { return state.user ? state.user.name : 'anonymous'; }
 export function actorRole() { return state.user ? state.user.role : 'operator'; }
 
@@ -334,7 +339,9 @@ export function proseList(items, { ordered = false, cls, lead } = {}) {
 
 // ---------------------------------------------------------------- reference links
 const OBJ_TYPE = { FLAG: 'flag', DIAG: 'diagnosis', EV: 'evidence', CHK: 'check', INF: 'inference', EGR: 'egress' };
-const REF_RE = /\b(?<obj>(?:FLAG|DIAG|EV|CHK|INF|EGR)-\d{3,7})\b|\b(?<rule>RULE-\d{2,})\b|\b(?<pattern>PATTERN-[A-Z]{1,2})\b|\b(?<grpword>[Gg]roups?\s+)(?<grp>G?\d{1,6})\b|\b(?<gid>G\d{5,6})\b|\b(?<batch>B\d{4,6})\b|\b(?<sig>S\d{2,3})\b|\b[Rr]ows?\s+(?<rowa>\d{1,10})(?:\s*(?:-|–|to)\s*(?<rowb>\d{1,10}))?\b/g;
+// Row numbers come written the way people read them: "rows 5,760–5,784" (en), "rivit 5 760–5 784" (fi), "rader 5 760" (sv).
+// The whole number is part of the link (a link on "rows 5" alone would open the wrong place).
+const REF_RE = /\b(?<obj>(?:FLAG|DIAG|EV|CHK|INF|EGR)-\d{3,7})\b|\b(?<rule>RULE-\d{2,})\b|\b(?<pattern>PATTERN-[A-Z]{1,2})\b|\b(?<grpword>[Gg]roups?\s+)(?<grp>G?\d{1,6})\b|\b(?<gid>G\d{5,6})\b|\b(?<batch>B\d{4,6})\b|\b(?<sig>S\d{2,3})\b|\b(?:[Rr]ows?|[Rr]iv[a-zäö]*|[Rr]ad(?:er|erna|en)?)\s+(?<rowa>\d{1,3}(?:[,   ]\d{3})+(?!\d)|\d{1,10})(?:\s*(?:-|–|to)\s*(?<rowb>\d{1,3}(?:[,   ]\d{3})+(?!\d)|\d{1,10}))?\b/g;
 const ROUTE_OF = {
   batch: (id) => hashFor('quality', { batch: id }),
   flag: (id) => hashFor('monitor', { flag: id }),
@@ -392,7 +399,7 @@ export function linkifyRefs(text) {
     else if (g.gid) { type = 'group'; id = g.gid; }
     else if (g.batch) { type = 'batch'; id = g.batch; }
     else if (g.sig) { type = 'signal'; id = g.sig; }
-    else if (g.rowa) { type = 'rows'; id = g.rowa + (g.rowb && g.rowb !== g.rowa ? '-' + g.rowb : '') + (sigBefore && s.slice(sigEnd, m.index).trim() === '' ? ':' + sigBefore : ''); }
+    else if (g.rowa) { type = 'rows'; const ra = g.rowa.replace(/\D/g, ''); const rb = g.rowb ? g.rowb.replace(/\D/g, '') : ''; id = ra + (rb && rb !== ra ? '-' + rb : '') + (sigBefore && s.slice(sigEnd, m.index).trim() === '' ? ':' + sigBefore : ''); }
     else continue;
     if (type === 'signal') { sigBefore = id; sigEnd = m.index + m[0].length; }
     if (m.index > last) f.append(document.createTextNode(s.slice(last, m.index)));
@@ -410,6 +417,12 @@ export function refChips(type, ids, { max = 12 } = {}) {
 }
 export async function openRef(type, id) {
   if (!state.run && ROUTE_OF[type]) { toast(t('runs.noRunHint'), 'warn'); return; }
+  // Basic mode hides the technical part of the pages: a batch, an alarm or a finding opens as problem -> reason ->
+  // answer in a popup instead of a page that would not show it
+  if (!roleAllows('operator') && (type === 'batch' || type === 'flag' || type === 'diagnosis')) {
+    closeAllModals();
+    try { const { basicItemModal } = await import('./charts.js'); basicItemModal(id); return; } catch (e) { console.error(e); }
+  }
   switch (type) {
     case 'batch': closeAllModals(); navigate('quality', { batch: id }); return;
     case 'flag': closeAllModals(); navigate('monitor', { flag: id }); return;
@@ -506,6 +519,7 @@ export function unavailableNote(r) { return notice(errText(r), 'warn'); }
 export function spinner() { return el('span', { class: 'dim spinner', text: t('common.loading') + '…' }); }
 /** Adds the plain-language box of the lead's plain.js under a view head; silent when the module is missing. */
 export async function addPlainBox(view, name) {
+  if (!roleAllows('operator')) return;   // Basic mode hides the technical part it would go into (and a model call with it)
   try { const { plainBox } = await import('./plain.js'); const b = await plainBox(name); if (b) view.append(b); } catch (e) { console.debug('plain box unavailable', name, e && e.message); }
 }
 

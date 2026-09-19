@@ -58,6 +58,11 @@ nothing needs to be labelled.
 - Sensor vs. process: one signal breaking its correlation structure is reported as a sensor / data problem, several
   correlated signals moving together as a process fault.
 
+**How to move through the app.** The left bar is the order of an analysis: 0 Runs, 1 Understanding, 2 Data quality,
+3 Monitor, 4 Diagnoses, 5 Assessor, 6 Report, 7 Live monitor; Settings holds the rest. Pick **Basic** mode (your name
+in the top bar) to see the app as a busy operator would - only the essentials - and **Engineer** to see everything.
+Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes the text size.
+
 ## 4. Root-cause diagnosis — *Diagnoses* view, report section 4
 
 - Fault type (pattern name or "unnamed pattern"), cause class (process / sensor / data / mixed / unknown), ranked
@@ -71,11 +76,11 @@ nothing needs to be labelled.
 
 ## 5. Human-in-the-loop — every card, report section 5
 
-Accept / question / override / dismiss on any inference, flag, diagnosis, rule or pattern, with a name, a role
-(operator / engineer / reviewer) and a note. The report lists each decision with the state **before and after**.
+Accept / question / override / dismiss on any inference, flag, diagnosis, rule or pattern, with a name, a mode
+(Basic / Operator / Engineer) and a note. The report lists each decision with the state **before and after**.
 Overrides feed back (e.g. a corrected role changes the next batch's checks).
 
-## 6. Decision log — *Decision log* view, report section 6 and appendix
+## 6. Decision log — *Settings > Decision log* (Engineer mode), report section 6 and appendix
 
 Every inference, check, flag, diagnosis, egress event and human decision is an entry in a SQLite log whose entries
 are SHA-256 hash-chained. *Verify chain* (UI) or `python -m tpm verify-log <run_id>` recomputes every hash. Export
@@ -88,7 +93,7 @@ goes through the same stages: run `python -m tpm run samples/demo_records.csv` a
 document explains which stages are generic, which adapters change, and walks a "drifting sensor" and a "corrupted
 record batch" through the identical pipeline.
 
-## 8. Data-flow record — *Data flow* view, report section 8, [DATAFLOW.md](DATAFLOW.md)
+## 8. Data-flow record — *Settings > Data flow & privacy*, report section 8, [DATAFLOW.md](DATAFLOW.md)
 
 - The default profile is **no-egress**: nothing leaves the machine and no network model is called. The report
   states this explicitly and the egress ledger shows only local calls.

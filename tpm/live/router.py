@@ -61,6 +61,21 @@ def create_router(get_monitor: Callable[[], LiveMonitor]) -> APIRouter:
         get_monitor().stop_source(actor(body))
         return {"ok": True}
 
+    @router.get("/signatures")
+    def signatures(reload: bool = Query(False)) -> dict[str, Any]:
+        """The known failure types the monitor watches for (local data; never sent to a model). ``reload=1`` reads the
+        catalogue and the monitor's signature folder again, so a judge can drop in a YAML file without restarting."""
+        m = get_monitor()
+        if reload:
+            m.reload_signatures()
+        return {"items": m.sigs, "sources": m.sig_sources, "dir": str(m.sig_dir), "n": len(m.sigs)}
+
+    @router.post("/signatures/reload")
+    def reload_signatures() -> dict[str, Any]:
+        m = get_monitor()
+        m.reload_signatures()
+        return {"ok": True, "n": len(m.sigs), "sources": m.sig_sources}
+
     @router.post("/upload")
     async def upload(request: Request, name: str = Query("upload.csv")) -> dict[str, Any]:
         """A file dropped on the page, streamed to disk in pieces (it can be many gigabytes)."""

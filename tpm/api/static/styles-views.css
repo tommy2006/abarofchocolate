@@ -1,0 +1,110 @@
+/* A1: shared round-5 pieces of js/charts.js (viz boxes, problem -> reason -> answer strips) + understanding + monitor */
+.viz-host { min-width: 0; margin: 0 0 16px; }
+.viz-host:empty { display: none; }
+.viz-box { margin: 0 0 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); min-width: 0; max-width: 100%; overflow: hidden; }
+.viz-title { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.viz-help { margin: 0 0 10px; max-width: 96ch; color: var(--ink-2); font-size: 13.5px; }
+.viz-note { margin: 6px 0 0; }
+.viz-note:empty { display: none; }
+.viz-chart { min-height: 220px; }
+.viz-chart.short { min-height: 180px; }
+.viz-chart.tall { min-height: 420px; }
+.viz-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 14px; min-width: 0; }
+.viz-grid > * { min-width: 0; }
+.pra-title { margin-top: 6px; }
+.pra-host { min-width: 0; margin: 0 0 10px; }
+.pra { --pv: var(--warn); --pv-soft: var(--warn-soft); border: 1px solid var(--line); border-left: 5px solid var(--pv); border-radius: var(--radius); background: var(--bg-2); padding: 10px 12px 12px; min-width: 0; overflow-wrap: anywhere; margin: 0 0 10px; }
+.pra[data-verdict="problem"] { --pv: var(--fail); --pv-soft: var(--fail-soft); }
+.pra[data-verdict="ok"] { --pv: var(--ok); --pv-soft: var(--ok-soft); }
+.pra[data-verdict="pending"] { --pv: var(--ink-3); --pv-soft: var(--bg-3); }
+.pra-label { margin: 0 0 6px; }
+.pra-cols { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.15fr) auto minmax(0, 1.35fr); gap: 8px; align-items: stretch; }
+.pra-col { min-width: 0; padding: 8px 10px; border-radius: var(--radius); background: var(--bg-3); }
+.pra-col.pra-problem { background: var(--pv-soft); }
+.pra-col.pra-answer { background: var(--ok-soft); }
+.pra-head { display: flex; align-items: center; gap: 7px; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-2); }
+.pra-num { display: inline-grid; place-items: center; width: 19px; height: 19px; border-radius: 50%; background: var(--ink-2); color: var(--bg-2); font-size: 11.5px; }
+.pra-problem .pra-num { background: var(--pv); }
+.pra-answer .pra-num { background: var(--ok); }
+.pra-arrow { align-self: center; color: var(--ink-3); font-size: 20px; line-height: 1; }
+.pra-main { margin: 0; font-size: 15px; font-weight: 600; }
+.pra-text { margin: 0; font-size: 14px; }
+.pra-where, .pra-more { margin-top: 6px; }
+.pra-fix { margin: 0; padding-left: 1.25em; font-size: 14px; }
+.pra-fix li { margin: 0 0 4px; }
+.pra-use { margin-top: 8px; }
+.pra-extra { margin-top: 8px; min-width: 0; }
+.pra-after .brief-head, .pra-after .brief-points, .pra-after .brief-fix { display: none; }
+.pra-after .brief-item { background: transparent; border-left: 0; padding: 0; margin: 4px 0; }
+.pra-after .brief-item .brief-actions { margin-left: 0; }
+.pra-list { min-width: 0; }
+.kind-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.kind-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--bg-2); color: var(--ink-2); font-size: 12.5px; cursor: pointer; }
+.kind-chip[aria-pressed="true"] { background: var(--bg-4); color: var(--ink); font-weight: 600; border-color: var(--ink-3); }
+.sensor-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.sensor-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 10px; min-width: 0; }
+.sensor-cards > .btn { grid-column: 1 / -1; justify-self: start; }
+.sensor-card { display: grid; gap: 6px; align-content: start; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-top: 4px solid var(--ink-3); border-radius: var(--radius); background: var(--bg-2); overflow-wrap: anywhere; }
+.sensor-card.excluded { opacity: 0.6; }
+.sensor-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.sensor-guess { font-size: 14.5px; font-weight: 500; }
+.sensor-conf { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
+.sensor-conf .bar { height: 8px; border-radius: 4px; background: var(--bg-4); overflow: hidden; }
+.sensor-conf .bar i { display: block; height: 100%; }
+.sensor-why { color: var(--ink-2); }
+.sensor-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 2px; }
+.sensor-cards.sensor-focus { grid-template-columns: minmax(0, 1fr); margin: 0 0 16px; }
+.report-actions { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); min-width: 0; }
+.report-actions .row { flex-wrap: wrap; }
+/* HTML legend of a ring chart (charts.js donut): wraps on narrow boxes */
+.viz-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 16px; margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; }
+.viz-legend li { display: inline-flex; flex-wrap: wrap; align-items: center; max-width: 100%; overflow-wrap: anywhere; }
+.viz-legend b { margin-left: 3px; font-weight: 600; }
+.viz-sw.round { border-radius: 50%; }
+/* a long row link ("rows 362,520–362,999") may break inside a narrow strip column */
+.pra a.ref-rows, .brief-item a.ref-rows { white-space: normal; }
+/* very narrow boxes (a phone at large text): let labels, confidence words and chips wrap instead of spilling */
+.pra-label .conf { white-space: normal; grid-template-columns: 40px minmax(0, auto); }
+.sensor-card-head .chip { white-space: normal; }
+@container page (max-width: 480px) { .runrow { grid-template-columns: minmax(0, 1fr); } .runrow > .row { flex-wrap: wrap; } }
+.ass-recs { margin-bottom: 18px; }
+.sensor-focus .sensor-card { border-width: 2px; border-top-width: 5px; }
+/* a strip stacks its three steps when IT is narrow (a detail box, a phone, large text), not only on a narrow screen */
+.pra { container-type: inline-size; }
+@container (max-width: 680px) {
+  .pra-cols { grid-template-columns: minmax(0, 1fr); }
+  .pra-arrow { justify-self: center; transform: rotate(90deg); }
+}
+.pra-use .chip { white-space: normal; }
+/* A1: end */
+
+/* A2: data quality + diagnoses (page-specific classes; the shared .viz-* / .pra-* classes are A1's above) */
+.viz-caption { margin-top: 6px; font-size: 12.5px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; }
+.viz-sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+.viz-sw.ok { background: var(--ok); } .viz-sw.warn { background: var(--warn); } .viz-sw.fail { background: var(--fail); } .viz-sw.none { background: var(--line); }
+.r5-h2 { margin: 18px 0 4px; font-size: 16px; }
+.pra-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.pra-btns .btn.ask { border-style: dashed; }
+.pra-label { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+.pra-where a.ref, .dq-piece-where a.ref { font-weight: 600; }
+.dq-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; min-width: 0; }
+.dq-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line-2); font-size: 12px; color: var(--ink-2); white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
+.dq-chip b { font-weight: 600; }
+.dq-chip.fail { border-color: var(--fail); color: var(--fail); } .dq-chip.warn { border-color: var(--warn); color: var(--warn); } .dq-chip.ok { border-color: var(--ok); color: var(--ok); }
+.dq-batchchecks { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: baseline; font-size: 13px; margin-top: 8px; }
+.dq-scorewords { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; flex-basis: 100%; max-width: 100ch; }
+.dq-legend { display: grid; gap: 3px; font-size: 13px; margin: 6px 0 0; padding: 0; list-style: none; }
+.dq-legend li { display: flex; gap: 6px; align-items: baseline; }
+.dq-how { margin: 8px 0 0; font-size: 13px; color: var(--ink-2); max-width: 100ch; }
+.dq-example { margin: 8px 0 0; font-size: 13.5px; }
+.dq-kinds { margin-top: 8px; display: grid; gap: 4px; font-size: 13px; }
+.dq-kinds > div { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.dq-kinds .q { color: var(--ink-2); min-width: 14ch; }
+.batchrow-checks { margin-top: 6px; }
+.diag-table .tbl td.wrap { min-width: 160px; }
+.diag-filter { margin: 0 0 8px; }
+.diag-filter:empty { display: none; }
+.diag-list-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin: 0 0 6px; }
+.diag-list-head h3 { margin: 0; font-size: 14.5px; }
+.diag-strip-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+/* A2: end */

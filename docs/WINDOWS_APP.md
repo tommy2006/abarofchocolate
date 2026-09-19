@@ -6,7 +6,8 @@ rights. Everything still runs on the computer itself.
 
 ## For the person installing
 
-1. Run `NorrinTPM-Setup.exe` (Windows may show "Windows protected your PC" because the file is not code-signed:
+1. Get `dist/NorrinTPM-Setup.exe` from the repository (about 190 MB; it is stored with git LFS: use GitHub's
+   Download button on the file, or `git lfs pull` after cloning). Run it (Windows may show "Windows protected your PC" because the file is not code-signed:
    choose *More info > Run anyway*).
 2. Keep the defaults and press **Install**. The app starts when setup finishes; later start it from the Start menu:
    *Norrin Trustworthy Process Monitor*.
@@ -43,7 +44,8 @@ needs the project environment (`.venv` with `requirements.txt`); the script inst
 Steps: icon + plotly.min.js, freeze the app (`packaging/windows/norrin_tpm.spec`, one folder, two executables),
 smoke test of the frozen app (doctor + a full analysis of a bundled sample), zip the payload, build the setup
 program (`packaging/windows/installer.py`, a small wizard that carries the payload). Output:
-`dist\NorrinTPM-Setup.exe` (about 150 MB; too large for a git repository: attach it to a GitHub release).
+`dist\NorrinTPM-Setup.exe` (about 190 MB, committed through git LFS - `.gitattributes` tracks it - so the team repo
+always carries the current installer; GitHub's 100 MB limit for ordinary files does not apply to LFS objects).
 
 How it fits together:
 

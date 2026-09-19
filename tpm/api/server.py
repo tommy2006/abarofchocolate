@@ -1111,7 +1111,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             decision = HumanDecision(**body)
         except Exception as e:
             raise HTTPException(422, f"invalid decision: {e}")
-        if decision.role not in ("operator", "engineer", "reviewer"):
+        if decision.role not in ("basic", "operator", "engineer", "reviewer"):
             raise HTTPException(422, "role must be operator | engineer | reviewer")
         try:
             return {"ok": True, **_apply(ws, decision), "decision": _jsonable(decision)}
@@ -1295,15 +1295,22 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         actor = body.get("actor") or "operator"
         role = body.get("role") or "operator"
         language = body.get("language") or "en"
+        # one drawer conversation = one chat_id; the client names the turn in advance so POST /chat/stop can flag it
+        chat_id = fallback.clean_chat_id(body.get("chat_id"))
+        client_turn_id = fallback.clean_turn_id(body.get("client_turn_id"))
         answer: dict[str, Any]
         fn = _lazy("tpm.llm.agent:chat")
         persisted_by_agent = False
         if fn is not None:
             try:
                 task = "assessor_chat" if context.get("object_type") == "assessor" else "why_chat"
-                res = fn(ws, state.settings, message, context, history, f"human:{actor}({role})", task=task, language=language)
+                res = fn(ws, state.settings, message, context, history, f"human:{actor}({role})", task=task, language=language, chat_id=chat_id, client_turn_id=client_turn_id)
                 persisted_by_agent = True  # tpm.llm.agent.chat writes both turns to chat.jsonl and the decision log
                 answer = fallback.normalize_chat_result(res)
+                if answer.get("stopped"):
+                    entry = {"ts": now_iso(), "turn_id": answer.get("turn_id") or client_turn_id, "chat_id": chat_id, "role": "assistant", "actor": "stopped", "message": "", "source": "stopped", "route": answer.get("route", "none"), "model": "", "evidence_ids": [], "context": context, "status": "stopped", "stopped": True, "followups": [], "tool_trace": answer.get("tool_trace") or []}
+                    state.emit(run_id, "chat", {"role": "assistant", "source": "stopped", "chat_id": chat_id})
+                    return {"ok": True, "answer": entry, "stopped": True}
                 if not answer.get("text"):
                     answer = fallback.template_chat_answer(ws, state.settings, message, context, language)
                     answer["note"] = "model returned no text; template answer shown"
@@ -1312,21 +1319,38 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
                 answer["note"] = f"model call failed ({e}); template answer shown"
         else:
             answer = fallback.template_chat_answer(ws, state.settings, message, context, language)
-        entry = {"ts": now_iso(), "role": "assistant", "actor": answer.get("source", "template"), "message": answer.get("text", ""), "source": answer.get("source", "template"), "route": answer.get("route", "none"), "model": answer.get("model", ""), "evidence_ids": answer.get("evidence_ids", []), "context": context, "note": answer.get("note"), "followups": answer.get("followups") or [], "confidence": answer.get("confidence"), "tool_trace": answer.get("tool_trace") or []}
+        turn_id = answer.get("turn_id") or client_turn_id or ("CHAT-" + now_iso().replace(":", "").replace("-", "")[:15])
+        entry = {"ts": now_iso(), "turn_id": turn_id, "chat_id": chat_id, "role": "assistant", "actor": answer.get("source", "template"), "message": answer.get("text", ""), "source": answer.get("source", "template"), "route": answer.get("route", "none"), "model": answer.get("model", ""), "evidence_ids": answer.get("evidence_ids", []), "context": context, "note": answer.get("note"), "followups": answer.get("followups") or [], "confidence": answer.get("confidence"), "tool_trace": answer.get("tool_trace") or [], "series": answer.get("series")}
         if not persisted_by_agent:
-            ws.append_jsonl("chat", {"ts": now_iso(), "role": "user", "actor": f"{actor}({role})", "message": message, "context": context})
-            ws.append_jsonl("chat", entry)
+            ws.append_jsonl("chat", {"ts": now_iso(), "turn_id": turn_id, "chat_id": chat_id, "role": "user", "actor": f"{actor}({role})", "message": message, "context": context})
+            ws.append_jsonl("chat", {k: v for k, v in entry.items() if k != "series"})
             try:
-                ws.log.record(f"human:{actor}({role})", "chat", context.get("object_type") or "chat", context.get("object_id") or context.get("flag_id") or context.get("diagnosis_id") or "run", {"message": message[:500], "answer_source": entry["source"]}, entry["evidence_ids"])
+                ws.log.record(f"human:{actor}({role})", "chat", context.get("object_type") or "chat", context.get("object_id") or context.get("flag_id") or context.get("diagnosis_id") or "run", {"message": message[:500], "answer_source": entry["source"], "chat_id": chat_id}, entry["evidence_ids"])
             except Exception:
                 pass
-        state.emit(run_id, "chat", {"role": "assistant", "source": entry["source"]})
+        if fallback.is_stopped(turn_id):  # the person pressed Stop while the template answer was being composed
+            entry.update(message="", source="stopped", actor="stopped", status="stopped", stopped=True, followups=[])
+            return {"ok": True, "answer": entry, "stopped": True}
+        state.emit(run_id, "chat", {"role": "assistant", "source": entry["source"], "chat_id": chat_id})
         return {"ok": True, "answer": entry}
 
     @app.get("/api/runs/{run_id}/chat")
-    def get_chat(run_id: str, limit: int = Query(200, ge=1, le=5000)) -> dict[str, Any]:
+    def get_chat(run_id: str, limit: int = Query(200, ge=1, le=5000), chat_id: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Persisted turns, of one chat when ``chat_id`` is given (turns written before chats existed are "default").
+        ``chats`` lists every chat id in the file with its turn count, so the drawer can rebuild its list."""
         ws = state.ws(run_id)
         items = ws.read_jsonl("chat") if ws.exists("chat") else []
+        chats: dict[str, dict[str, Any]] = {}
+        for m in items:
+            cid = fallback.turn_chat_id(m)
+            c = chats.setdefault(cid, {"chat_id": cid, "n": 0, "first_question": "", "context": None, "last_ts": None})
+            c["n"] += 1
+            c["last_ts"] = m.get("ts") or c["last_ts"]
+            if m.get("role") == "user" and not c["first_question"]:
+                c["first_question"] = str(m.get("message") or m.get("content") or "")[:120]
+                c["context"] = m.get("context")
+        if chat_id:
+            items = [m for m in items if fallback.turn_chat_id(m) == chat_id]
         out = []
         for m in items[-limit:]:  # accept both the API's shape (message/evidence_ids) and tpm.llm.agent's (content/citations)
             m = dict(m)
@@ -1334,8 +1358,54 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
                 m["message"] = m.get("content", "")
             if "evidence_ids" not in m:
                 m["evidence_ids"] = m.get("citations", [])
+            m["chat_id"] = fallback.turn_chat_id(m)
             out.append(m)
-        return {"available": True, "items": out, "n": len(items)}
+        return {"available": True, "items": out, "n": len(items), "chats": list(chats.values())}
+
+    @app.post("/api/runs/{run_id}/chat/stop")
+    async def stop_chat(run_id: str, request: Request) -> dict[str, Any]:
+        """The drawer's Stop button: flag the running turn (by the client's turn id) or every running turn of a chat.
+        tpm.llm.agent.run_agent checks the flag before each model call and after each tool call."""
+        ws = state.ws(run_id)
+        body = await request.json()
+        turn_id = fallback.clean_turn_id(body.get("turn_id") or body.get("client_turn_id"))
+        chat_id = fallback.clean_chat_id(body.get("chat_id")) if body.get("chat_id") else None
+        if not turn_id and not chat_id:
+            raise HTTPException(400, "turn_id or chat_id is required")
+        # a named turn stops only that turn: flagging the whole chat too could stop the next question when the person
+        # asks it right after Stop (both requests race); every running turn of a chat stops only when no turn is named
+        flagged = fallback.request_stop(turn_id, None if turn_id else chat_id)
+        actor = body.get("actor") or "operator"
+        role = body.get("role") or "operator"
+        try:
+            ws.log.record(f"human:{actor}({role})", "chat_stop", "chat", turn_id or chat_id or "chat", {"chat_id": chat_id, "turn_ids": flagged})
+        except Exception:
+            pass
+        return {"ok": True, "stopped": flagged}
+
+    def _clear_chat(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Remove the persisted turns of one chat ("Clear history" keeps the chat, "Delete chat" removes it in the UI;
+        the server side is the same). Logged as a human decision."""
+        ws = state.ws(run_id)
+        chat_id = fallback.clean_chat_id(body.get("chat_id"))
+        actor = body.get("actor") or "operator"
+        role = body.get("role") or "operator"
+        fallback.request_stop(None, chat_id)  # a turn still running for this chat stops too
+        removed = fallback.clear_chat(ws, chat_id)
+        try:
+            ws.log.record(f"human:{actor}({role})", "chat_deleted" if body.get("delete") else "chat_cleared", "chat", chat_id, {"chat_id": chat_id, "turns_removed": removed})
+        except Exception:
+            pass
+        state.emit(run_id, "chat", {"role": "system", "source": "cleared", "chat_id": chat_id})
+        return {"ok": True, "removed": removed, "chat_id": chat_id}
+
+    @app.post("/api/runs/{run_id}/chat/clear")
+    async def clear_chat(run_id: str, request: Request) -> dict[str, Any]:
+        return _clear_chat(run_id, await request.json())
+
+    @app.delete("/api/runs/{run_id}/chat")
+    def delete_chat(run_id: str, chat_id: str = Query(...), actor: str = Query("operator"), role: str = Query("operator"), delete: bool = Query(False)) -> dict[str, Any]:
+        return _clear_chat(run_id, {"chat_id": chat_id, "actor": actor, "role": role, "delete": delete})
 
     # ---------- assessor ----------
     @app.post("/api/runs/{run_id}/assessor/ask")
@@ -1823,6 +1893,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     from .names_api import register as _register_names
 
     _register_names(app, state)
+    from .advice_api import register as _register_advice; _register_advice(app, state)  # why / what-to-do library (round 5)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:

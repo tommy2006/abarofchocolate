@@ -1,14 +1,52 @@
-# Trustworthy Process Monitor (TPM)
+<p align="center"><img src="graphics/norrin-favicon-512.png" alt="Norrin Trustworthy Process Monitor" width="96"></p>
 
-An autonomous data-reliability pipeline for **undocumented, high-volume tabular data**: it ingests a file or a
-stream of batches, infers what every column is (from the data, not from headers), checks whether the data itself
-can be trusted, detects drift and anomalies with per-signal attribution, diagnoses the root cause, and keeps a
-human able to accept, question or override every conclusion. Raw rows never leave the machine; every inference,
-flag, diagnosis and human decision is written to a hash-chained decision log.
+# Norrin Trustworthy Process Monitor (TPM)
 
-Built for the Norrin "Trustworthy process monitor" challenge (September 2026). The primary testbed is an
-undocumented industrial sensor dataset; the pipeline is schema-agnostic and runs unchanged on other messy tables
-(see [docs/ADAPTABILITY.md](docs/ADAPTABILITY.md)).
+**What it does.** You give it a table of sensor readings from a plant - any CSV, TSV, Excel, Parquet or `.dat`
+file, with or without column names, gigabytes if needed - and it tells you, in plain language:
+
+1. **What the columns are** - which ones are sensors, what each sensor probably measures (pressure, flow,
+   temperature, ...), and how the sensors move together. All of this is inferred from the data itself.
+2. **Whether the data can be trusted** - frozen sensors, missing values, unit slips, duplicated or out-of-order
+   rows, single odd readings. Bad data is set aside so it is not mistaken for a real fault.
+3. **When the process behaved unusually** - drift, sudden changes, single glitches, with the sensors responsible.
+4. **Why** - a ranked, evidence-backed diagnosis for every event (a real process change, a sensor problem, a data
+   problem, or unclear), challenged by a built-in critique step, and **what to do about it**.
+5. **Whether more data would help** - the assessor tells you where the model is weak.
+6. **A report** (HTML, PDF, PowerPoint, e-mail) and a **live monitor** that watches a running feed and warns when
+   readings drift towards a known failure type.
+
+Every page starts with a short plain summary and the next steps; the charts, tables and evidence sit behind
+"Show technical analyses". Three modes - **Basic** (only the essentials), **Operator**, **Engineer** (everything,
+including the decision log) - each with its own colour. A person can accept, question or override every
+conclusion, rename a sensor, type operating rules in plain language, and ask "why?" in a chat; every decision is
+recorded in a tamper-evident log.
+
+**Data sovereignty.** Raw readings never leave the computer. The AI helper is a local model (Ollama); the optional
+*hybrid* profile sends only aggregated, rounded and anonymised results to Claude, through a guard that checks every
+payload first. Details in [docs/DATAFLOW.md](docs/DATAFLOW.md).
+
+Built by team *abarofchocolate* for the Norrin "Trustworthy process monitor" challenge (September 2026).
+
+---
+
+## Install on Windows (no Python needed)
+
+1. Download **`dist/NorrinTPM-Setup.exe`** from this repository (about 190 MB; stored with git LFS - use the
+   "Download" button on GitHub or `git lfs pull` after cloning).
+2. Run it. Windows may show "Windows protected your PC" because the file is not code-signed: choose
+   *More info > Run anyway*. Keep the defaults and press **Install** (per user, no administrator rights).
+3. The app starts by itself and appears in the Start menu and on the desktop as
+   **Norrin Trustworthy Process Monitor**. A small control window shows it is running and opens the app in its
+   own window; closing the control window stops the app.
+4. First analysis: on page **0 Runs**, drop your file (or press "Create a demo run" to try synthetic data), then
+   follow pages 1 to 6 in order. Page **7 Live monitor** watches a live feed.
+5. Optional local AI: click **Local model** in the top bar. The panel installs Ollama, downloads a model and
+   lets you pick any installed one. Without it the app still works; explanations then come from templates.
+
+Your analyses and settings are kept in `%LOCALAPPDATA%\NorrinTPM`; the program is in
+`%LOCALAPPDATA%\Programs\NorrinTPM`. Uninstall from *Settings > Apps > Installed apps*. More in
+[docs/WINDOWS_APP.md](docs/WINDOWS_APP.md) (also how to rebuild the setup file).
 
 ---
 
@@ -47,23 +85,36 @@ JSON / JSONL. Files are processed out-of-core (DuckDB + chunked Parquet), so mul
 
 ## What you will see
 
-The UI (FastAPI + hand-built frontend, no build step) has one view per expected output. Pick a **role**
-(operator / engineer / reviewer) in the header to change what is emphasised; the language switch (EN / FI / SV)
-applies to the UI and to the report.
+The left bar is the path through an analysis, in order, **0 to 7**; everything that is not a step lives under
+**Settings** (the gear at the bottom). Every page opens with a short plain summary and what to do next; the charts,
+tables and evidence follow, and in Operator mode the full detail sits behind **Show technical analyses**.
+Wherever something is wrong, the page shows it as **Problem -> Reason -> What to do**: the faulty data first, then
+why it is faulty in plain words, then concrete steps to fix it.
 
-| View | What it shows | Expected output |
-|---|---|---|
-| **Runs** | upload / replay / watch-folder / HTTP push; stage progress; time budget | — |
-| **Understanding** | the signal catalog: alias `S01..Snn`, structural role, instrument / unit-operation hypotheses with confidence, the evidence statements (EV-…) behind each inference, what is uncertain, dataset assumptions (sample period, grouping, excluded label / meta columns) | 1 |
-| **Data quality** | baseline checks (completeness, validity, consistency, timeliness) per batch, the trust verdict and "data cannot be trusted" banner, plain-language rules and their compiled checks with pass / warn / fail and rule traceability | 2 |
-| **Monitor** | out-of-fold anomaly score timeline per group with threshold, flags with the responsible signals, change points, fault patterns | 3 |
-| **Diagnoses** | fault type, ranked signals with plain-language reasons, propagation chain, step-by-step explanation, confidence, uncertainty, the critique that challenged the diagnosis; click "why" on any flag to open a chat grounded in the evidence | 4 |
-| every card | accept / question / override / dismiss with a note; overrides feed back into later stages | 5 |
-| **Decision log** | every system and human decision with evidence IDs, hash-chain verification, JSONL export | 6 |
-| **Data flow** | active profile, what may leave the machine and what never does, the egress ledger of every model call | 8 |
-| **Report** | the self-contained HTML report (EN / FI / SV), e-mail it, export the run as a zip | 7 (adaptability section), all |
-| **Assessor** | how fit the data is for unsupervised monitoring, learning curve, recommended actions (applied only with approval) | bonus |
-| **Live monitor** | a page of its own (needs no run): follows a CSV that keeps growing and re-checks every sensor each analysis cycle (15 min by default); see [Live monitor](#live-monitor) | bonus |
+| # | Page | What it shows | Challenge output |
+|---|---|---|---|
+| 0 | **Runs** | drop a file (any size, with a progress screen), watch the stages run, the last analyses | - |
+| 1 | **Understanding** | what each sensor probably measures (pressure, flow, temperature ...), how sure the app is and why, as cards you can accept or correct; a **network diagram of how the sensors move together** (who leads, who follows); rename a sensor ("S44" -> "possibly broken") | 1 |
+| 2 | **Data quality** | a **map of where the faulty data is** (batches x kinds of check), the worst pieces as Problem -> Reason -> What to do, **which checks ran on each batch** (pass / warn / fail), and what the **% score means in plain words**; operating rules typed in plain language become extra checks | 2 |
+| 3 | **Monitor** | a timeline diagram of unusual behaviour, the sensors involved most often, the strongest events with their explanation and next steps, the list of suspicious single readings ("a glitch or a manipulation; the data alone can't tell") | 3 |
+| 4 | **Diagnoses** | findings by likely cause (diagram), each as Problem -> Reason -> What to do, with confidence, the step-by-step reasoning and the critique that challenged it; accept / question / override on every finding | 4, 5 |
+| 5 | **Assessor** | ask in plain words whether more or less data would help; learning curve and recommended actions | bonus |
+| 6 | **Report** | HTML, PDF and PowerPoint in English, Finnish or Swedish; send by e-mail; export the run | all |
+| 7 | **Live monitor** | watches a file that keeps growing; warns when sensors drift **towards a known failure type** (imminent or occurring) and shows **Alarm -> Problem -> Cause -> Suggestion**; see [Live monitor](#live-monitor) | bonus |
+| - | **Settings** | person and mode; display (colours, text size, language); AI models (choose, download, install Ollama); **Data flow & privacy** (what may leave the machine, the egress ledger); **Decision log** (Engineer mode: every decision, hash-chain verification, export) | 6, 8 |
+
+**Three modes**, each with its own colour scheme across the whole app (pick it with your name in the top bar):
+
+- **Basic** (blue): by far the least on screen - the summary, the next steps, one diagram and the top problems.
+  No lists, no tables.
+- **Operator** (green): the everyday view, with the diagrams, and all detail behind "Show technical analyses".
+- **Engineer** (violet): everything, including the decision log, hash-chain verification, the egress ledger and the
+  overrides audit.
+
+**Text size**: the **A-** and **A+** buttons in the top bar make everything smaller or larger; boxes and charts
+rearrange themselves. **Chat** (the *Ask* button, or *Ask why* on any item): several chats per analysis, each with
+its own context; picking something new to ask about replaces the old context; clear the context, clear a chat's
+history, start a new chat, and **Stop** an answer that is still being written.
 
 The HTML report (`workspace/<run_id>/report_<lang>.html`) contains all eight expected outputs in one printable
 page: sensor understanding, data-quality checks, drift monitoring with score sparklines, root-cause diagnoses with
@@ -77,7 +128,7 @@ A five-minute judging walkthrough is in [docs/JUDGES_GUIDE.md](docs/JUDGES_GUIDE
 
 ## Live monitor
 
-The rail's last page, **9 Live monitor**, watches a data file that keeps getting new lines (a plant writing about one row per
+The rail's last page, **7 Live monitor**, watches a data file that keeps getting new lines (a plant writing about one row per
 second) and re-analyses it every cycle. It is independent of the run pipeline: no run is needed and it never touches one.
 It has two tabs.
 
@@ -96,6 +147,20 @@ separate from a process drift, and a stream that stops or has gaps is reported a
    the file on the page or type its full path (no copy is made then). A built-in demo plant needs no file.
 3. **Live data**: paste a link (http / https) to a CSV that grows, or the path of a CSV another program keeps writing. Only
    the new lines are read.
+
+**Known failure types.** Besides generic drift, the monitor compares how the sensors move with a catalogue of
+known failure types (`config/failure_signatures.yaml`, built from the Tennessee Eastman fault list in `message.txt`:
+which sensors are affected and how - mean shift, larger swings, fast collapse, slow drift, a sticking valve, a bump
+that fades). Every cycle it scores each type from the sensors' behaviour and says whether a failure is **imminent**
+(moving towards it and getting closer) or **occurring**. Types the list calls "essentially invisible" are shown as such
+and never alarmed; types whose sensors are not in your file are "not applicable". When an alarm goes off, one card at
+the top reads left to right: **Alarm** (what tripped, since when) -> **Problem** (which sensors behave how, with small
+charts) -> **Cause** (the matching failure type and how sure, or "no known type matches: generic drift") ->
+**Suggestion** (what to check or do). Add your own failure types by dropping a YAML file of the same shape into
+`workspace/_live/signatures/`. The failure list never goes to a language model.
+
+To see it: on page 7 press **Demo: a known failure type** (sensors named like the Tennessee Eastman plant; after the
+learning cycles they drift like Fault 1) or replay any file with **Inject a known failure type** in Simulate.
 
 Any CSV works: every numeric column that is not a time, id or label column is a sensor. The learned baseline needs the first
 cycles to be normal operation. Data control: raw rows stay in `workspace/_live`; the model (local only, through the egress

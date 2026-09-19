@@ -6,7 +6,7 @@
    (`&embed=1`: no auto-reload); a cache-busting `v=` makes sure a regenerated report is what is shown.
    "Download PDF" / "Download PowerPoint" fetch `/report.pdf` / `/report.pptx` (generated on demand, cached per
    language on the server), show a generating state while the server works and the error text when it fails. */
-import { state, t, el, clear, runApi, fmt, section, viewHead, needRun, toast, errText, notice } from '../core.js';
+import { state, t, el, clear, runApi, fmt, section, viewHead, needRun, toast, errText, notice, roleAllows } from '../core.js';
 import { summaryCard, techDetails } from '../brief.js';
 
 const IFRAME_FIX = `
@@ -19,7 +19,7 @@ export async function render(main) {
   // page = title, plain summary, then ONE expander with everything this view rendered before (buttons, e-mail, preview)
   const page = el('div', { class: 'view' });
   main.append(page);
-  page.append(viewHead('8', t('nav.report')));
+  page.append(viewHead('6', t('nav.report')));
   if (!state.run) { page.append(needRun()); return page; }
   const tech = techDetails('report');
   page.append(summaryCard('report'), tech);
@@ -135,8 +135,10 @@ export async function render(main) {
   }
   sel.addEventListener('change', () => refresh());
   regen.addEventListener('click', () => refresh({ force: true }));
-  view.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), openA, dlA, pdfBtn, pptxBtn, regen));
-  view.append(exportStatus);
+  // the report itself is what this page is for: open / download sit above the technical part in every mode (in Basic
+  // mode they are also where "Open the report" of the summary leads)
+  const basic = !roleAllows('operator');
+  page.insertBefore(el('div', { class: 'report-actions', dataset: basic ? { briefSection: 'preview' } : undefined }, el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), openA, dlA, pdfBtn, pptxBtn, basic ? null : regen), exportStatus), tech);
   const em = section(t('rep.email'));
   em.root.dataset.briefSection = 'email';
   view.append(em.root);

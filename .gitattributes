@@ -4,3 +4,4 @@
 *.parquet binary
 *.png binary
 *.pdf binary
+dist/NorrinTPM-Setup.exe filter=lfs diff=lfs merge=lfs -text

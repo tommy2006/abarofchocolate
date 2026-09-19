@@ -10,7 +10,7 @@
    - techNested(...children): the nested expander of an item, same label.
    - answerBlock(text, extra): a long answer shows its first two sentences; the rest goes into the expander.
    - revealInTech(node) / focusSection(root, name): open every closed <details> above a node before scrolling to it. */
-import { state, t as t0, el, clear, runApi, navigate, bus, linkifyRefs, closeAllModals, revealAncestors } from './core.js';
+import { state, t as t0, el, clear, runApi, navigate, bus, linkifyRefs, closeAllModals, revealAncestors, roleAllows } from './core.js';
 
 // English fallbacks: the i18n files are edited by several people at once, the page must never show a raw key
 const FALLBACK = {
@@ -42,6 +42,9 @@ const FALLBACK = {
   'brief.batch.local': "Problems in some rows ({kinds}): {list}.",
   'brief.check.pass': "nothing wrong found",
   'brief.toolTrace': "How the answer was put together ({n} look-ups in this run's results)",
+  'brief.fixTitle': "What to do about it",
+  'brief.basicNote': "Basic mode shows only the essentials.",
+  'brief.basicSwitch': "Show more (Operator mode)",
 };
 export const bt = (k, vars) => { let v = t0(k, vars); if (!v || v === k) { v = FALLBACK[k] || k; for (const [a, b] of Object.entries(vars || {})) v = v.replaceAll(`{${a}}`, String(b)); } return v; };
 
@@ -76,6 +79,7 @@ function wireToggle(det, body, onPaint) {
 
 // ---------------------------------------------------------------- the page-level expander
 export function techDetails(view, ...children) {
+  if (!roleAllows('operator')) return basicStub(view, children);  // basic mode: essentials only, no technical part
   const body = el('div', { class: 'tech-body' }, children);
   const label = el('span', { class: 'tech-label' });
   const summary = el('summary', { class: 'tech-summary' }, el('span', { class: 'tech-caret', 'aria-hidden': 'true' }), label, el('span', { class: 'tech-hint', text: bt('brief.techHint') }));
@@ -89,8 +93,20 @@ export function techDetails(view, ...children) {
   det.body = body;
   return det;
 }
+/** Basic mode: the page keeps only its summary and the essentials. The technical body still exists (hidden), so the
+    view code that appends into `det.body` keeps working; the person is told how to see more. */
+function basicStub(view, children) {
+  const body = el('div', { class: 'tech-body' }, children);
+  const det = el('details', { class: 'tech-details basic-hidden', dataset: { view }, hidden: true }, el('summary', {}), body);
+  det.body = body;
+  const note = el('div', { class: 'basic-note' }, el('span', { text: bt('brief.basicNote') }), ' ', el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => bus.emit('role.pick') }, bt('brief.basicSwitch')));
+  const wrap = el('div', { class: 'basic-wrap' }, note, det);
+  wrap.body = body;
+  return wrap;
+}
 /** Nested expander of one item (a diagnosis card, a flag, a check, an answer): same label, not remembered. */
 export function techNested(...children) {
+  if (!roleAllows('operator')) { const body = el('div', { class: 'tech-body' }, children); const d = el('details', { class: 'tech-details nested basic-hidden', hidden: true }, el('summary', {}), body); d.body = body; return d; }
   const body = el('div', { class: 'tech-body' }, children);
   const label = el('span', { class: 'tech-label' });
   const det = el('details', { class: 'tech-details nested' }, el('summary', { class: 'tech-summary' }, el('span', { class: 'tech-caret', 'aria-hidden': 'true' }), label), body);
@@ -128,11 +144,30 @@ export function actionTarget(a) {
   const key = /^DIAG-/.test(ref) ? 'diag' : /^FLAG-/.test(ref) ? 'flag' : /^CHK-/.test(ref) ? 'check' : /^RULE-/.test(ref) ? 'rule' : /^PATTERN-/.test(ref) ? 'pattern' : /^EGR-/.test(ref) ? 'egress' : /^B\d{4,6}$/.test(ref) ? 'batch' : /^S\d{2,3}$/.test(ref) ? 'signal' : 'id';
   return { view, params: { [key]: ref } };
 }
-function runAction(a, ctx) {
+// Basic mode keeps the technical part of every page hidden. A next step that only leads into it (a table, a list, a
+// chart of the technical part) is left out; these sections stay visible in Basic mode and may be pointed at:
+const BASIC_SECTIONS = { report: ['preview'], assessor: ['recommendations'], dataflow: ['profile'], settings: ['profile'] };
+/** Does this action lead into a part of a page that Basic mode does not show? */
+export function hiddenInBasic(a) {
+  if (roleAllows('operator') || !a) return false;
+  const ref = String(a.ref || '');
+  return ref.startsWith('section:') && !(BASIC_SECTIONS[a.view] || []).includes(ref.slice(8));
+}
+/** Basic mode: a finding, an alarm, a check or a batch opens as problem -> reason -> answer in a popup (with accept /
+    question / override where the object takes a decision) instead of a page whose details are hidden. */
+export async function openBasicItem(id, ctx) {
+  try { const { basicItemModal } = await import('./charts.js'); basicItemModal(id, { ctx }); } catch (e) { console.error(e); }
+}
+/** Carry out one next step: open the chat with its question, or go to the view / object it names. */
+export function runAction(a, ctx) {
   if (a.ask && !a.view) { bus.emit('chat.open', { ...(ctx || {}), seed: a.ask }); return; }
   const { view, params } = actionTarget(a);
   if (!view) return;
   closeAllModals();
+  if (!roleAllows('operator')) {
+    const id = params.diag || params.flag || params.check || params.batch;
+    if (id) { openBasicItem(id, ctx); return; }
+  }
   if (view === state.view && !Object.keys(params).length) {
     const det = document.querySelector('#main details.tech-details:not(.nested)');
     if (det) { det.open = true; setTimeout(() => { try { det.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch { /* ignore */ } }, 40); }
@@ -157,7 +192,9 @@ function paintBrief(root, d, { compact = false, ctx, extra } = {}) {
     el('span', { class: 'brief-icon', role: 'img', 'aria-label': bt('brief.verdict.' + v), title: bt('brief.verdict.' + v), text: ICON[v] }),
     el('div', { class: 'brief-headtext' }, compact ? null : el('div', { class: 'brief-kicker' }, bt('brief.kicker'), ' · ', el('span', { class: 'brief-verdict', text: bt('brief.verdict.' + v) })), el('p', { class: 'brief-headline', text: d.headline || '' }))));
   if ((d.points || []).length) root.append(el('ul', { class: 'brief-points' }, d.points.map((p) => el('li', { text: p }))));
-  const acts = (d.actions || []).filter((a) => a && a.text);
+  // an object's summary also says what to do about it (the suggestion library of the server: tpm/api/advice.py)
+  if (compact && (d.fix || []).length) root.append(el('div', { class: 'brief-fix' }, el('h3', { class: 'brief-todo', text: bt('brief.fixTitle') }), el('ol', { class: 'brief-fix-list' }, d.fix.map((s) => el('li', { text: s })))));
+  const acts = (d.actions || []).filter((a) => a && a.text && !hiddenInBasic(a));
   if (acts.length || extra) root.append(el('div', { class: 'brief-actions' }, el('h3', { class: 'brief-todo', text: bt('brief.todo') }), el('div', { class: 'brief-btns' }, acts.map((a, i) => actionButton(a, i, ctx)), extra || null)));
   return root;
 }

@@ -67,6 +67,9 @@ MSG = {
     "verdict.wait": "Waiting for the first analysis cycle to finish.",
     "verdict.nosource": "No data source yet. Choose one on the Settings tab.",
     "verdict.stopped": "The data source was stopped. Choose another one on the Settings tab.",
+    "sig.imminent": "Drifting towards a known failure type: {name} (match {score}%) on {sensors}.",
+    "sig.occurring": "A known failure type is occurring: {name} (match {score}%) on {sensors}.",
+    "sig.cleared": "{name}: no longer matching (match {score}%).",
 }
 CHECKS = ("level", "trend", "noise", "range")
 CHECK_LABEL_EN = {"level": "Level", "trend": "Trend", "noise": "Noise", "range": "Range"}
@@ -190,6 +193,24 @@ def describe(s: pd.Series, cr: float, sigma: float, mu: float) -> tuple[dict[str
     return msg(kind), [msg("prof.values", n=nu), msg("prof.changes", p=f"{cr * 100:.0f}"), msg(smooth), level, msg("prof.unit")]
 
 
+def step_threshold(b: dict[str, Any]) -> float:
+    """A reading-to-reading change bigger than this is a "jump" for that sensor (used by the jumpy / valve-sticking check)."""
+    return float(max(4 * b["noise_ref"], 0.5 * b["sigma"]))
+
+
+def _step_frac(s: pd.Series, thr: float) -> float:
+    d = s.diff().iloc[1:].abs()
+    return float((d > thr).mean()) if len(d) else 0.0
+
+
+def typical_moves(v: pd.DataFrame) -> pd.Series:
+    """Per sensor: the typical (median) size of a reading-to-reading change, counting only readings that changed, so
+    an analyzer that repeats its value between updates is judged on its updates. More jitter makes every move bigger;
+    a valve that sticks and then jumps keeps its typical move and only adds a few big jumps."""
+    d = v.diff().iloc[1:].abs()
+    return d.where(d > 0).median().fillna(0.0)
+
+
 def learn(frames: list[pd.DataFrame], sensors: list[str]) -> dict[str, dict[str, Any]]:
     """What normal looks like for every sensor. Raw rows are not kept, only these statistics."""
     vs = [f[sensors].apply(pd.to_numeric, errors="coerce") for f in frames]
@@ -197,6 +218,7 @@ def learn(frames: list[pd.DataFrame], sensors: list[str]) -> dict[str, dict[str,
     mu, sd = v.mean(), v.std(ddof=0)
     cr = (v.diff().iloc[1:].abs() > 0).sum() / max(len(v) - 1, 1)
     stats = [frame_stats(x) for x in vs]
+    moves = [typical_moves(x) for x in vs]
     drift_ref = pd.concat([s[0] for s in stats], axis=1).abs().mean(axis=1)      # how much it wanders inside a normal cycle
     noise_ref = pd.concat([s[1] for s in stats], axis=1).mean(axis=1)            # normal jitter after removing the trend
     out: dict[str, dict[str, Any]] = {}
@@ -207,6 +229,8 @@ def learn(frames: list[pd.DataFrame], sensors: list[str]) -> dict[str, dict[str,
         out[c] = dict(mu=float(mu[c]), sigma=sigma, change_rate=float(cr[c]), lo=lo, hi=hi, kind=kind, profile=profile,
                       basis=float(abs(mu[c]) if abs(mu[c]) >= 2 * sigma else max(hi - lo, sigma)),
                       drift_ref=float(max(drift_ref[c], sigma * 0.05)), noise_ref=float(max(noise_ref[c], sigma * 1e-3, 1e-9)))
+        out[c]["step_ref"] = float(np.mean([_step_frac(x[c], step_threshold(out[c])) for x in vs]))   # normal share of jumps
+        out[c]["move_ref"] = float(max(np.mean([float(m[c]) for m in moves]), sigma * 1e-3, 1e-12))   # normal typical move
     return out
 
 
@@ -214,8 +238,43 @@ def cycle_stats(df: pd.DataFrame, sensors: list[str], base: dict[str, dict[str, 
     v = df[sensors].apply(pd.to_numeric, errors="coerce")
     change, noise = frame_stats(v)
     outside = pd.Series({c: float(((v[c] < base[c]["lo"]) | (v[c] > base[c]["hi"])).mean() * 100) for c in sensors})
+    steps = pd.Series({c: _step_frac(v[c], step_threshold(base[c])) for c in sensors})
     return dict(n=len(v), mean=v.mean(), changes=(v.diff().iloc[1:].abs() > 0).sum(), miss=v.isna().mean() * 100,
-                lo=v.min(), hi=v.max(), change=change, noise=noise, outside=outside)
+                lo=v.min(), hi=v.max(), change=change, noise=noise, outside=outside, steps=steps, std=v.std(ddof=0),
+                moves=typical_moves(v))
+
+
+def features(st: dict[str, Any], base: dict[str, dict[str, Any]], past: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """How each sensor behaves this cycle against its learned normal, in units the known-failure signatures use
+    (``tpm.live.signatures``): z = how many normal spreads the cycle average is from normal (signed), var_ratio = jitter
+    versus normal, slope = fitted change within the cycle in spreads, jump_ratio = share of big reading-to-reading
+    jumps versus normal, move_ratio = typical reading-to-reading move versus normal, z_hist = z of the previous cycles
+    (oldest first), mono = how steadily the last cycles moved in one direction (0..1). Statistics only; no readings."""
+    out: dict[str, dict[str, Any]] = {}
+    for c, b in base.items():
+        if c not in st["mean"].index:
+            continue
+        sigma = b["sigma"] if b["sigma"] > 0 else 1e-9
+        mean = float(st["mean"][c]) if pd.notna(st["mean"][c]) else b["mu"]
+        z = (mean - b["mu"]) / sigma
+        noise = float(st["noise"][c]) if pd.notna(st["noise"][c]) else b["noise_ref"]
+        var_ratio = noise / b["noise_ref"] if b["noise_ref"] > 0 else 1.0
+        slope = (float(st["change"][c]) if pd.notna(st["change"][c]) else 0.0) / sigma
+        steps = float(st.get("steps", {}).get(c, 0.0)) if "steps" in st else 0.0
+        jump_ratio = (steps + 0.002) / (float(b.get("step_ref", 0.0)) + 0.002)
+        moves = st.get("moves")
+        move = float(moves[c]) if moves is not None and c in moves.index and pd.notna(moves[c]) else None
+        move_ratio = move / b["move_ref"] if move is not None and b.get("move_ref") else 1.0
+        z_hist = [(float(h["mean"][c]) - b["mu"]) / sigma for h in past[-6:] if c in h.get("mean", {}) and h["mean"][c] is not None]
+        seq = z_hist + [z]
+        diffs = [seq[i + 1] - seq[i] for i in range(len(seq) - 1)]
+        sig = [d for d in diffs if abs(d) >= 0.15][-4:]
+        mono = max(sum(d > 0 for d in sig), sum(d < 0 for d in sig)) / 4.0 if sig else 0.0
+        out[c] = dict(z=float(z), var_ratio=float(var_ratio), slope=float(slope), jump_ratio=float(jump_ratio), move_ratio=float(move_ratio),
+                      steps=steps, step_ref=float(b.get("step_ref", 0.0)),
+                      z_hist=[float(x) for x in z_hist], prev_z=float(z_hist[-1]) if z_hist else None, mono=float(mono),
+                      mean=mean, missing=float(st["miss"][c]) if pd.notna(st["miss"][c]) else 0.0)
+    return out
 
 
 def grade(val: float, warn: float, alarm: float) -> int:

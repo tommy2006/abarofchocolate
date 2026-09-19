@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..config import Settings, get_settings
 from ..contracts import now_iso
@@ -730,6 +731,74 @@ def suggest_followups(loaded: dict[str, Any], language: str = "en") -> list[str]
 
 _PLACEHOLDER_RE = re.compile(r"^\s*(<[^>]*>|answer(\s+for)?\s+the\s+(question|operator)|your\s+answer\s*(here)?|final\s+answer|answer|n/?a|todo|\.\.\.)\s*[.!]?\s*$", re.I)
 
+# ----------------------------------------------------------------------------------------------
+# stop flags: the UI's "Stop" button ends a turn between agent steps so the local model is not kept busy
+# ----------------------------------------------------------------------------------------------
+_STOP_LOCK = threading.Lock()
+_STOP: dict[str, threading.Event] = {}          # turn_id -> set when a stop was requested
+_ACTIVE: dict[str, str] = {}                    # turn_id -> chat_id of the turns running right now
+_TURN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+DEFAULT_CHAT_ID = "default"
+
+
+def stop_event(turn_id: str) -> threading.Event:
+    """The stop flag of a turn (created on first use, so a stop that arrives before the turn started still counts)."""
+    with _STOP_LOCK:
+        ev = _STOP.get(turn_id)
+        if ev is None:
+            if len(_STOP) > 500:                                      # forgotten flags of turns that never ran
+                for k in list(_STOP)[:250]:
+                    if k not in _ACTIVE:
+                        _STOP.pop(k, None)
+            ev = _STOP[turn_id] = threading.Event()
+        return ev
+
+
+def request_stop(turn_id: Optional[str] = None, chat_id: Optional[str] = None) -> list[str]:
+    """Ask a running turn (by id) or every running turn of a chat to stop. Returns the ids that were flagged."""
+    flagged: list[str] = []
+    if turn_id:
+        stop_event(str(turn_id)).set()
+        flagged.append(str(turn_id))
+    if chat_id:
+        with _STOP_LOCK:
+            ids = [t for t, c in _ACTIVE.items() if c == chat_id]
+        for t in ids:
+            stop_event(t).set()
+            if t not in flagged:
+                flagged.append(t)
+    return flagged
+
+
+def is_stopped(turn_id: Optional[str]) -> bool:
+    if not turn_id:
+        return False
+    with _STOP_LOCK:
+        ev = _STOP.get(turn_id)
+    return bool(ev and ev.is_set())
+
+
+def _turn_begin(turn_id: str, chat_id: str) -> None:
+    with _STOP_LOCK:
+        _ACTIVE[turn_id] = chat_id
+
+
+def _turn_end(turn_id: str) -> None:
+    with _STOP_LOCK:
+        _ACTIVE.pop(turn_id, None)
+        _STOP.pop(turn_id, None)
+
+
+def clean_turn_id(turn_id: Any) -> Optional[str]:
+    """A client-chosen turn id is used as a dictionary key and persisted: letters, digits, '_', '-', '.', ':' only."""
+    s = str(turn_id or "").strip()
+    return s if s and _TURN_ID_RE.match(s) else None
+
+
+def clean_chat_id(chat_id: Any) -> str:
+    s = str(chat_id or "").strip()
+    return s if s and _TURN_ID_RE.match(s) else DEFAULT_CHAT_ID
+
 
 def _is_placeholder_answer(answer: str) -> bool:
     """True for schema echoes like 'answer the question' or '<answer>' and for answers too short to be useful."""
@@ -737,12 +806,14 @@ def _is_placeholder_answer(answer: str) -> bool:
     return len(a) < 8 or bool(_PLACEHOLDER_RE.match(a))
 
 
-def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any], tb: Toolbox, *, task: str = "why_chat", purpose: str = "operator chat", language: str = "en", history: Optional[list[dict[str, str]]] = None, max_steps: Optional[int] = None) -> Optional[dict[str, Any]]:
+def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any], tb: Toolbox, *, task: str = "why_chat", purpose: str = "operator chat", language: str = "en", history: Optional[list[dict[str, str]]] = None, max_steps: Optional[int] = None, stop: Optional[Callable[[], bool]] = None) -> Optional[dict[str, Any]]:
     """Returns {"answer","citations","confidence","suggested_followups","tool_trace","model","external_calls"} or None if
     the local model is unavailable / never produced a final answer. The mode comes from the toolbox: with tb.external the
     turn runs on the external model; a turn that model could not finish comes back with "incomplete" and
-    "external_error", and chat() restarts it on the local toolbox."""
+    "external_error", and chat() restarts it on the local toolbox. ``stop()`` is asked before every model call and
+    after every tool call; when it says True the turn ends at once with "stopped" (the UI's Stop button)."""
     external = bool(tb.external)
+    stopped = lambda: bool(stop and stop())
     max_steps = int(max_steps if max_steps is not None else settings.local_llm.max_tool_steps)
     common = dict(language=(language or "en").lower(), language_name=prompts_mod.language_name(language), has_schema=False, schema_json="null", task=task)
     parts: list[dict[str, Any]] = []  # external mode: the sanitised objects the messages are built from (agent_chat checks them again)
@@ -781,7 +852,11 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
         """External calls of this turn: the agent's own plus the ones a tool made through the router (assessor)."""
         return max(ext_calls, _external_sent(ws) - sent_before) if external else 0
 
+    was_stopped = False
     for step in range(max_steps + 3):
+        if stopped():                                                   # before each model call
+            was_stopped = True
+            break
         if external:
             # agent_chat answers a call it may not send on the local model, with these external-mode messages: ask first,
             # and treat anything that was not sent as the end of the external turn
@@ -806,6 +881,9 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
                 break
         model = res.model or model
         data = res.data
+        if stopped():                                                   # the model answered after the person gave up
+            was_stopped = True
+            break
         action = str(data.get("action") or "final").strip()
         if action == "final" or not action:
             answer = str(data.get("answer") or data.get("thought") or "").strip()
@@ -848,6 +926,10 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
         messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
         messages.append({"role": "user", "content": f"Tool result for {action}: {result_text[:TOOL_RESULT_CHARS]}\n({left} tool calls left.) " + ("Respond now with action \"final\" and your best answer with citations." if external and left <= 0 else "Continue with another tool call or finish with action \"final\".")})
     out = {"answer": "", "citations": [], "confidence": None, "suggested_followups": [], "tool_trace": trace, "model": model, "incomplete": True, "external": external, "external_calls": ext_used()}
+    if was_stopped:
+        out["stopped"] = True
+        trace.append({"step": len(trace), "tool": None, "ok": False, "error": "stopped by the operator", **mark})
+        return out
     if external:
         out["external_error"] = ext_error or "the external model did not reach a final answer"
         trace.append({"step": len(trace), "tool": None, "ok": False, "error": out["external_error"], **mark})
@@ -859,26 +941,39 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
 # ----------------------------------------------------------------------------------------------
 
 
-def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", context: Optional[dict[str, Any]] = None, history: Optional[list[dict[str, str]]] = None, actor: str = "human", *, task: str = "why_chat", language: str = "en", max_steps: Optional[int] = None, use_model: bool = True) -> dict[str, Any]:
-    """Operator chat entry point (why chat and assessor chat). Always returns an answer."""
+def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", context: Optional[dict[str, Any]] = None, history: Optional[list[dict[str, str]]] = None, actor: str = "human", *, task: str = "why_chat", language: str = "en", max_steps: Optional[int] = None, use_model: bool = True, chat_id: Optional[str] = None, client_turn_id: Optional[str] = None) -> dict[str, Any]:
+    """Operator chat entry point (why chat and assessor chat). Always returns an answer.
+
+    ``chat_id`` tags both persisted turns (one conversation of the drawer; old turns count as "default").
+    ``client_turn_id`` lets the UI name the turn before it starts, so its Stop button can flag it through
+    ``request_stop`` while the model is still working; a stopped turn is persisted with status "stopped"."""
     settings = settings or get_settings()
     t_start = time.time()
-    turn_id = "CHAT-" + uuid.uuid4().hex[:10]
+    turn_id = clean_turn_id(client_turn_id) or ("CHAT-" + uuid.uuid4().hex[:10])
+    chat_id = clean_chat_id(chat_id)
     actor_str = actor if ":" in (actor or "") else f"human:{actor or 'operator'}(operator)"
     tb = Toolbox(ws, settings)
     loaded = load_context(ws, settings, context, message, tb)
-    _persist(ws, {"turn_id": turn_id, "ts": now_iso(), "role": "user", "actor": actor_str, "content": message, "context": loaded.get("context"), "task": task})
+    _persist(ws, {"turn_id": turn_id, "chat_id": chat_id, "ts": now_iso(), "role": "user", "actor": actor_str, "content": message, "context": loaded.get("context"), "task": task})
+    _turn_begin(turn_id, chat_id)
+    try:
+        return _chat_turn(ws, settings, message, history, actor_str, task, language, max_steps, use_model, chat_id, turn_id, t_start, tb, loaded)
+    finally:
+        _turn_end(turn_id)
 
+
+def _chat_turn(ws: Any, settings: Settings, message: str, history: Optional[list[dict[str, str]]], actor_str: str, task: str, language: str, max_steps: Optional[int], use_model: bool, chat_id: str, turn_id: str, t_start: float, tb: Toolbox, loaded: dict[str, Any]) -> dict[str, Any]:
     result: Optional[dict[str, Any]] = None
     source = "template"
     route = "none"
     external_calls = 0
     ext_trace: list[dict[str, Any]] = []
     etb: Optional[Toolbox] = None
+    stop = lambda: is_stopped(turn_id)
 
     def attempt(toolbox: Toolbox) -> Optional[dict[str, Any]]:
         try:
-            return run_agent(ws, settings, message, loaded, toolbox, task=task, purpose=f"{task}: {message[:80]}", language=language, history=history, max_steps=max_steps)
+            return run_agent(ws, settings, message, loaded, toolbox, task=task, purpose=f"{task}: {message[:80]}", language=language, history=history, max_steps=max_steps, stop=stop)
         except Exception as e:
             return {"answer": "", "citations": [], "tool_trace": [{"error": str(e)}], "model": "", "incomplete": True}
 
@@ -889,12 +984,24 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
             etb = tb.external_view()
             result = attempt(etb)
             external_calls = int((result or {}).get("external_calls") or 0)
-            if not (result and result.get("answer") and not result.get("incomplete")):
+            if not (result and result.get("answer") and not result.get("incomplete")) and not (result or {}).get("stopped"):
                 ext_trace = list((result or {}).get("tool_trace", []))
                 result = attempt(tb)
         else:
             result = attempt(tb)
     trace = ext_trace + list((result or {}).get("tool_trace", []))
+    if (result and result.get("stopped")) or stop():
+        # the person pressed Stop: no answer is composed, the turn is recorded as stopped
+        out = {"turn_id": turn_id, "chat_id": chat_id, "answer": "", "citations": [], "confidence": None, "tool_trace": trace, "source": "stopped", "route": route,
+               "external_calls": external_calls, "suggested_followups": [], "series": None, "context": loaded.get("context"), "stopped": True, "status": "stopped",
+               "latency_ms": int((time.time() - t_start) * 1000)}
+        _persist(ws, {"turn_id": turn_id, "chat_id": chat_id, "ts": now_iso(), "role": "assistant", "actor": "stopped", "content": "", "citations": [], "source": "stopped", "route": route, "status": "stopped", "stopped": True, "external_calls": external_calls, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
+        try:
+            if ws is not None:
+                ws.log.record(actor_str, "chat_stopped", "chat", turn_id, {"task": task, "chat_id": chat_id, "question": message[:500], "n_tools": len(trace)})
+        except Exception:
+            pass
+        return out
     if result and result.get("answer") and not result.get("incomplete"):
         if result.get("external"):
             route, source = "external", f"llm-external:{result.get('model') or settings.external_model_for(task)}"
@@ -929,6 +1036,7 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
                 series = None
     out = {
         "turn_id": turn_id,
+        "chat_id": chat_id,
         "answer": answer,
         "citations": citations,
         "confidence": confidence,
@@ -941,10 +1049,10 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
         "context": loaded.get("context"),
         "latency_ms": int((time.time() - t_start) * 1000),
     }
-    _persist(ws, {"turn_id": turn_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "route": route, "external_calls": external_calls, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
+    _persist(ws, {"turn_id": turn_id, "chat_id": chat_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "route": route, "external_calls": external_calls, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
     try:
         if ws is not None:
-            ws.log.record(actor_str, "chat", "chat", turn_id, {"task": task, "question": message[:500], "source": source, "route": route, "external_calls": external_calls, "n_tools": len(trace), "context": loaded.get("context")}, evidence_ids=[c for c in citations if c.startswith("EV-")])
+            ws.log.record(actor_str, "chat", "chat", turn_id, {"task": task, "chat_id": chat_id, "question": message[:500], "source": source, "route": route, "external_calls": external_calls, "n_tools": len(trace), "context": loaded.get("context")}, evidence_ids=[c for c in citations if c.startswith("EV-")])
     except Exception:
         pass
     return out
@@ -981,15 +1089,36 @@ def _persist(ws: Any, turn: dict[str, Any]) -> None:
     if ws is None:
         return
     try:
+        turn.setdefault("chat_id", DEFAULT_CHAT_ID)
         ws.append_jsonl("chat", turn)
     except Exception:
         pass
 
 
-def chat_history(ws: Any, limit: int = 50) -> list[dict[str, Any]]:
+def turn_chat_id(turn: dict[str, Any]) -> str:
+    """The conversation a persisted turn belongs to; turns written before chats existed count as "default"."""
+    return str(turn.get("chat_id") or DEFAULT_CHAT_ID)
+
+
+def chat_history(ws: Any, limit: int = 50, chat_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """The last ``limit`` persisted turns, of one chat when ``chat_id`` is given."""
     if ws is None:
         return []
     try:
-        return ws.read_jsonl("chat")[-limit:]
+        turns = ws.read_jsonl("chat")
+        if chat_id:
+            turns = [t for t in turns if turn_chat_id(t) == chat_id]
+        return turns[-limit:]
     except Exception:
         return []
+
+
+def clear_chat(ws: Any, chat_id: str) -> int:
+    """Remove the persisted turns of one chat (the UI's "Clear history" / "Delete chat"). Returns how many were removed."""
+    if ws is None or not ws.exists("chat"):
+        return 0
+    turns = ws.read_jsonl("chat")
+    keep = [t for t in turns if turn_chat_id(t) != chat_id]
+    if len(keep) != len(turns):
+        ws.rewrite_jsonl("chat", keep)
+    return len(turns) - len(keep)

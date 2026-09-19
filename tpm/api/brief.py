@@ -90,8 +90,8 @@ T: dict[str, dict[str, str]] = {
         "und.p.excluded": "{k} of {n} sensors are left out of the fault search because they never change or only repeat another sensor.",
         "und.p.excluded.1": "One of {n} sensors is left out of the fault search because it never changes or only repeats another sensor.",
         "und.p.names": "The system does not know what each sensor measures. It only looks at how the values behave.",
-        "und.p.unsure": "The system had to guess {k} things about the file. They are listed in the technical part.",
-        "und.p.unsure.1": "The system had to guess one thing about the file. It is listed in the technical part.",
+        "und.p.unsure": "The system had to guess {k} things about the file. Ask it below what it assumed.",
+        "und.p.unsure.1": "The system had to guess one thing about the file. Ask it below what it assumed.",
         "und.a.check": "Check that the columns were read the way you expect",
         "und.a.name": "Tell the system what your sensors measure",
         "und.ask": "What did you assume about my data, and what are you unsure about?",
@@ -318,8 +318,8 @@ T: dict[str, dict[str, str]] = {
         "und.p.excluded": "{k} anturia {n}:stä jätetään pois vianetsinnästä, koska ne eivät muutu tai vain toistavat toista anturia.",
         "und.p.excluded.1": "Yksi anturi {n}:stä jätetään pois vianetsinnästä, koska se ei muutu tai vain toistaa toista anturia.",
         "und.p.names": "Järjestelmä ei tiedä, mitä kukin anturi mittaa. Se katsoo vain, miten arvot käyttäytyvät.",
-        "und.p.unsure": "Järjestelmä joutui arvaamaan {k} asiaa tiedostosta. Ne on lueteltu teknisessä osassa.",
-        "und.p.unsure.1": "Järjestelmä joutui arvaamaan yhden asian tiedostosta. Se on kerrottu teknisessä osassa.",
+        "und.p.unsure": "Järjestelmä joutui arvaamaan {k} asiaa tiedostosta. Kysy alta, mitä se oletti.",
+        "und.p.unsure.1": "Järjestelmä joutui arvaamaan yhden asian tiedostosta. Kysy alta, mitä se oletti.",
         "und.a.check": "Tarkista, että sarakkeet luettiin odottamallasi tavalla",
         "und.a.name": "Kerro järjestelmälle, mitä anturisi mittaavat",
         "und.ask": "Mitä oletit datastani ja mistä olet epävarma?",
@@ -532,8 +532,8 @@ T: dict[str, dict[str, str]] = {
         "und.p.excluded": "{k} av {n} givare lämnas utanför felsökningen eftersom de aldrig ändras eller bara upprepar en annan givare.",
         "und.p.excluded.1": "En av {n} givare lämnas utanför felsökningen eftersom den aldrig ändras eller bara upprepar en annan givare.",
         "und.p.names": "Systemet vet inte vad varje givare mäter. Det ser bara på hur värdena beter sig.",
-        "und.p.unsure": "Systemet fick gissa {k} saker om filen. De står i den tekniska delen.",
-        "und.p.unsure.1": "Systemet fick gissa en sak om filen. Den står i den tekniska delen.",
+        "und.p.unsure": "Systemet fick gissa {k} saker om filen. Fråga nedan vad det antog.",
+        "und.p.unsure.1": "Systemet fick gissa en sak om filen. Fråga nedan vad det antog.",
         "und.a.check": "Kontrollera att kolumnerna lästes som du väntar dig",
         "und.a.name": "Berätta för systemet vad dina givare mäter",
         "und.ask": "Vad antog du om mina data, och vad är du osäker på?",
@@ -1504,7 +1504,8 @@ def _item_diagnosis(ws: Any, d: dict[str, Any], lang: str) -> dict[str, Any]:
             head = _pick([tr(lang, "it.dg.h.data.sig", sensor=sensor), tr(lang, "it.dg.h.data")], MAX_HEADLINE_WORDS)
         else:
             head = tr(lang, "it.dg.h." + cause)
-        head = head[0].upper() + head[1:]
+        if not (sensor and head.startswith(sensor)):   # a sensor's own name keeps its spelling ("xmv_3 (S44) is ...")
+            head = head[0].upper() + head[1:]
         where_pt = _where_point({**place, "group_id": d.get("group_id", place.get("group_id"))}, lang, multi) if place else ""
         if cause in ("sensor", "mixed"):
             site = tr(lang, "it.a.site." + cause, sensor=sensor) if sensor else tr(lang, "it.a.site.sensor.nosig")
@@ -1684,22 +1685,35 @@ def brief_item(ws: Any, settings: Any, object_id: str, lang: str = "en") -> Opti
     cid = _canonical(object_id)
     prefix = cid.split("-", 1)[0] if "-" in cid else ("B" if re.fullmatch(r"B\d{4,6}", cid) else "")
     body: Optional[dict[str, Any]] = None
+    obj: Optional[dict[str, Any]] = None
     if prefix == "DIAG":
-        d = next((x for x in (_read(ws, "diagnoses.jsonl", []) or []) if isinstance(x, dict) and x.get("id") == cid), None)
-        body = _item_diagnosis(ws, d, lang) if d else None
+        obj = next((x for x in (_read(ws, "diagnoses.jsonl", []) or []) if isinstance(x, dict) and x.get("id") == cid), None)
+        body = _item_diagnosis(ws, obj, lang) if obj else None
     elif prefix == "FLAG":
-        f = next((x for x in (_read(ws, "flags.jsonl", []) or []) if isinstance(x, dict) and x.get("id") == cid), None)
-        body = _item_flag(ws, f, lang) if f else None
+        obj = next((x for x in (_read(ws, "flags.jsonl", []) or []) if isinstance(x, dict) and x.get("id") == cid), None)
+        body = _item_flag(ws, obj, lang) if obj else None
     elif prefix == "CHK":
-        c = next((x for x in (_read(ws, "checks.jsonl", []) or []) if isinstance(x, dict) and x.get("check_id") == cid), None)
-        body = _item_check(ws, c, lang) if c else None
+        obj = next((x for x in (_read(ws, "checks.jsonl", []) or []) if isinstance(x, dict) and x.get("check_id") == cid), None)
+        body = _item_check(ws, obj, lang) if obj else None
     elif prefix == "B":
-        tv = next((x for x in (_read(ws, "trust.jsonl", []) or []) if isinstance(x, dict) and x.get("batch_id") == cid), None)
-        body = _item_batch(ws, tv, lang) if tv else None
+        obj = next((x for x in (_read(ws, "trust.jsonl", []) or []) if isinstance(x, dict) and x.get("batch_id") == cid), None)
+        body = _item_batch(ws, obj, lang) if obj else None
     else:
         item = resolve_ref(ws, object_id, lang=lang)
         body = _item_generic(ws, item, lang) if item else None
     if body is None:
         return None
     out = _finish(body)
-    return {"id": cid, "kind": body.get("kind"), "language": lang, "verdict": out["verdict"], "headline": out["headline"], "points": out["points"], "actions": out["actions"], "source": "template"}
+    res = {"id": cid, "kind": body.get("kind"), "language": lang, "verdict": out["verdict"], "headline": out["headline"], "points": out["points"], "actions": out["actions"], "source": "template"}
+    # the answer to "why is this a problem and what do I do" (round 5): from the suggestion library, so every item
+    # summary in the UI carries it; a passed check needs none
+    if obj is not None and body.get("kind") in ("diagnosis", "flag", "check", "batch"):
+        try:
+            from .advice import advice_for_object
+
+            if not (body.get("kind") == "check" and out["verdict"] == "ok"):
+                adv = advice_for_object(ws, body["kind"], obj, lang)
+                res.update({"why": adv["why"], "fix": adv["fix"], "can_use_rows": adv["can_use_rows"]})
+        except Exception:
+            pass
+    return res

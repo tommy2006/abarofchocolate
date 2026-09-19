@@ -1,0 +1,312 @@
+# Known failure types the live monitor watches for ("signatures"), as data. Source: the Tennessee Eastman lookup
+# in message.txt (fault -> most affected columns -> what to look for). Judges can add their own failure types by
+# dropping another *.yaml with the same layout into the live monitor's data folder (workspace/_live/signatures/);
+# an entry with the same id replaces this one. This file is local data: it is never sent to any model or API.
+#
+# Fields per signature
+#   id           short unique id (letters, digits, - _)
+#   fault        the fault number in the source document (informational)
+#   name         plain words: what it is and how it shows (name_fi / name_sv optional translations)
+#   columns      the sensors it shows on, as named in the data file (matched by exact name, case-insensitive name,
+#                positional alias S01.. or an operator display name); [] = generic, matched on any sensors
+#   pattern      mean_shift | variance_increase | collapse | slow_drift | jumpy | brief_bump | fading_shift | none
+#   confidence   documented (the source states it) | hypothesis (the source is less sure)
+#   visible      false = the source says this fault is not reliably visible in the sensors; kept, shown as such, never alarmed
+#   suggestion   what an operator should do when this failure is approaching (suggestion_fi / suggestion_sv optional)
+#   note         free text shown in the details
+version: 1
+signatures:
+  - id: F01
+    fault: 1
+    name: "Fault 1: A/C feed ratio step (B composition constant) - mean shift"
+    name_fi: "Vika 1: A/C-syöttösuhteen askelmuutos - tason siirtymä"
+    name_sv: "Fel 1: stegändring i A/C-matningsförhållandet - nivåförskjutning"
+    columns: [xmeas_1, xmeas_4, xmv_3]
+    pattern: mean_shift
+    confidence: documented
+    visible: true
+    suggestion: "Check the A feed (stream 1) and the A and C feed (stream 4): the A feed valve (xmv_3) is compensating for a changed feed ratio. Verify the feed composition upstream and inform the shift engineer; hold set-points until the feed is confirmed."
+    suggestion_fi: "Tarkista A-syöttö (virta 1) ja A+C-syöttö (virta 4): A-syötön venttiili (xmv_3) kompensoi muuttunutta syöttösuhdetta. Varmista syötön koostumus ylävirrassa ja ilmoita vuoroinsinöörille; pidä asetusarvot ennallaan kunnes syöttö on varmistettu."
+    suggestion_sv: "Kontrollera A-matningen (ström 1) och A+C-matningen (ström 4): A-matningsventilen (xmv_3) kompenserar för ett ändrat matningsförhållande. Verifiera matningens sammansättning uppströms och informera skiftingenjören; håll börvärdena tills matningen är bekräftad."
+  - id: F02
+    fault: 2
+    name: "Fault 2: B composition step in the feed - mean shift"
+    name_fi: "Vika 2: B-koostumuksen askelmuutos syötössä - tason siirtymä"
+    name_sv: "Fel 2: stegändring i B-halten i matningen - nivåförskjutning"
+    columns: [xmeas_10, xmeas_30]
+    pattern: mean_shift
+    confidence: documented
+    visible: true
+    suggestion: "The purge rate (xmeas_10) and the B content of the purge gas (xmeas_30) have shifted: an inert (B) is building up. Check the feed composition of stream 4 and the purge valve; let the purge controller work and inform the shift engineer."
+    suggestion_fi: "Huuhtelun virtaus (xmeas_10) ja huuhtelukaasun B-pitoisuus (xmeas_30) ovat siirtyneet: inertti aine (B) kertyy. Tarkista virran 4 syötön koostumus ja huuhteluventtiili; anna huuhtelusäädön toimia ja ilmoita vuoroinsinöörille."
+    suggestion_sv: "Avblåsningsflödet (xmeas_10) och B-halten i avblåsningsgasen (xmeas_30) har förskjutits: en inert komponent (B) ackumuleras. Kontrollera matningens sammansättning i ström 4 och avblåsningsventilen; låt avblåsningsregulatorn arbeta och informera skiftingenjören."
+  - id: F03
+    fault: 3
+    name: "Fault 3: D feed temperature step - essentially invisible"
+    name_fi: "Vika 3: D-syötön lämpötilan askelmuutos - käytännössä näkymätön"
+    name_sv: "Fel 3: stegändring i D-matningens temperatur - i praktiken osynlig"
+    columns: []
+    pattern: none
+    confidence: documented
+    visible: false
+    suggestion: "Not reliably visible in the sensors; the control loops absorb it. No sensor-based warning is possible."
+    suggestion_fi: "Ei luotettavasti näkyvissä antureissa; säätöpiirit vaimentavat sen. Anturipohjainen varoitus ei ole mahdollinen."
+    suggestion_sv: "Syns inte tillförlitligt i sensorerna; reglerkretsarna absorberar det. Ingen sensorbaserad varning är möjlig."
+  - id: F04
+    fault: 4
+    name: "Fault 4: reactor cooling water inlet temperature step - brief reactor temperature bump, the valve compensates"
+    name_fi: "Vika 4: reaktorin jäähdytysveden tulolämpötilan askelmuutos - lyhyt lämpötilapiikki, venttiili kompensoi"
+    name_sv: "Fel 4: stegändring i reaktorkylvattnets inloppstemperatur - kort temperaturtopp, ventilen kompenserar"
+    columns: [xmeas_21, xmeas_9, xmv_10]
+    pattern: brief_bump
+    confidence: documented
+    visible: true
+    suggestion: "The reactor cooling water outlet temperature (xmeas_21) jumped and the cooling water valve (xmv_10) opened to hold the reactor temperature (xmeas_9). Check the cooling water supply temperature; the process is under control while the valve has room to move."
+    suggestion_fi: "Reaktorin jäähdytysveden lähtölämpötila (xmeas_21) hyppäsi ja jäähdytysveden venttiili (xmv_10) avautui pitääkseen reaktorin lämpötilan (xmeas_9). Tarkista jäähdytysveden tulolämpötila; prosessi on hallinnassa niin kauan kuin venttiilillä on säätövaraa."
+    suggestion_sv: "Reaktorkylvattnets utloppstemperatur (xmeas_21) hoppade och kylvattenventilen (xmv_10) öppnade för att hålla reaktortemperaturen (xmeas_9). Kontrollera kylvattnets tilloppstemperatur; processen är under kontroll så länge ventilen har reglerutrymme."
+  - id: F05
+    fault: 5
+    name: "Fault 5: condenser cooling water inlet temperature step - shift that partly fades as control compensates"
+    name_fi: "Vika 5: lauhduttimen jäähdytysveden tulolämpötilan askelmuutos - siirtymä, joka osin häviää säädön kompensoidessa"
+    name_sv: "Fel 5: stegändring i kondensorkylvattnets inloppstemperatur - förskjutning som delvis avtar när regleringen kompenserar"
+    columns: [xmeas_22, xmeas_11]
+    pattern: fading_shift
+    confidence: documented
+    visible: true
+    suggestion: "The separator cooling water outlet temperature (xmeas_22) and the separator temperature (xmeas_11) shifted. Check the condenser cooling water supply; the controllers will pull the separator back, so watch that the condenser valve (xmv_11) does not run out of range."
+    suggestion_fi: "Erottimen jäähdytysveden lähtölämpötila (xmeas_22) ja erottimen lämpötila (xmeas_11) siirtyivät. Tarkista lauhduttimen jäähdytysveden syöttö; säätimet palauttavat erottimen, joten seuraa ettei lauhduttimen venttiili (xmv_11) ajaudu ääriasentoon."
+    suggestion_sv: "Separatorkylvattnets utloppstemperatur (xmeas_22) och separatortemperaturen (xmeas_11) förskjöts. Kontrollera kondensorns kylvattentillförsel; regulatorerna drar tillbaka separatorn, så se till att kondensorventilen (xmv_11) inte når sitt ändläge."
+  - id: F06
+    fault: 6
+    name: "Fault 6: A feed loss - large, fast collapse"
+    name_fi: "Vika 6: A-syötön menetys - suuri, nopea romahdus"
+    name_sv: "Fel 6: förlust av A-matningen - stor, snabb kollaps"
+    columns: [xmeas_1, xmv_3, xmeas_4]
+    pattern: collapse
+    confidence: documented
+    visible: true
+    suggestion: "The A feed (xmeas_1) is collapsing while its valve (xmv_3) opens fully: the A supply is lost. Check the A feed line, its upstream supply and the valve at once; be ready to hold or shut down the process, because the reactor pressure will rise. Inform the shift engineer immediately."
+    suggestion_fi: "A-syöttö (xmeas_1) romahtaa samalla kun sen venttiili (xmv_3) avautuu täysin: A:n syöttö on menetetty. Tarkista A-syöttölinja, sen ylävirran syöttö ja venttiili heti; varaudu pysäyttämään prosessi, koska reaktorin paine nousee. Ilmoita vuoroinsinöörille välittömästi."
+    suggestion_sv: "A-matningen (xmeas_1) kollapsar medan dess ventil (xmv_3) öppnar helt: A-tillförseln är förlorad. Kontrollera A-matningsledningen, tillförseln uppströms och ventilen genast; var beredd att hålla eller stoppa processen eftersom reaktortrycket kommer att stiga. Informera skiftingenjören omedelbart."
+  - id: F07
+    fault: 7
+    name: "Fault 7: C header pressure loss - mean shift"
+    name_fi: "Vika 7: C-jakotukin paineen menetys - tason siirtymä"
+    name_sv: "Fel 7: tryckförlust i C-samlingsledningen - nivåförskjutning"
+    columns: [xmeas_4, xmv_4]
+    pattern: mean_shift
+    confidence: documented
+    visible: true
+    suggestion: "The A and C feed (xmeas_4) dropped and its valve (xmv_4) opened to compensate: the C header pressure is low. Check the C supply header and its pressure; hold set-points until the header pressure is back."
+    suggestion_fi: "A+C-syöttö (xmeas_4) laski ja sen venttiili (xmv_4) avautui kompensoidakseen: C-jakotukin paine on matala. Tarkista C-syötön jakotukki ja sen paine; pidä asetusarvot ennallaan kunnes paine on palautunut."
+    suggestion_sv: "A+C-matningen (xmeas_4) sjönk och dess ventil (xmv_4) öppnade för att kompensera: trycket i C-samlingsledningen är lågt. Kontrollera C-samlingsledningen och dess tryck; håll börvärdena tills trycket är tillbaka."
+  - id: F08
+    fault: 8
+    name: "Fault 8: A, B, C feed composition varying at random - variance increase"
+    name_fi: "Vika 8: A-, B- ja C-syötön koostumus vaihtelee satunnaisesti - vaihtelun kasvu"
+    name_sv: "Fel 8: A-, B- och C-matningens sammansättning varierar slumpmässigt - ökad varians"
+    columns: [xmeas_23, xmeas_24, xmeas_25, xmeas_4]
+    pattern: variance_increase
+    confidence: hypothesis
+    visible: true
+    suggestion: "The reactor feed analysis (xmeas_23 to xmeas_25) and the A and C feed (xmeas_4) are more unsteady than normal: the feed composition is fluctuating. Check the feed supply upstream of stream 4 and the analyzer; inform the shift engineer."
+    suggestion_fi: "Reaktorin syötön analyysi (xmeas_23-xmeas_25) ja A+C-syöttö (xmeas_4) heilahtelevat normaalia enemmän: syötön koostumus vaihtelee. Tarkista syöttö virran 4 ylävirrassa ja analysaattori; ilmoita vuoroinsinöörille."
+    suggestion_sv: "Reaktormatningens analys (xmeas_23 till xmeas_25) och A+C-matningen (xmeas_4) är ostadigare än normalt: matningens sammansättning fluktuerar. Kontrollera matningen uppströms ström 4 och analysatorn; informera skiftingenjören."
+    note: "The column list is the source's best reading of the literature; treat it as a hypothesis."
+  - id: F09
+    fault: 9
+    name: "Fault 9: D feed temperature varying at random - essentially invisible"
+    name_fi: "Vika 9: D-syötön lämpötila vaihtelee satunnaisesti - käytännössä näkymätön"
+    name_sv: "Fel 9: D-matningens temperatur varierar slumpmässigt - i praktiken osynlig"
+    columns: []
+    pattern: none
+    confidence: documented
+    visible: false
+    suggestion: "Not reliably visible in the sensors. No sensor-based warning is possible."
+    suggestion_fi: "Ei luotettavasti näkyvissä antureissa. Anturipohjainen varoitus ei ole mahdollinen."
+    suggestion_sv: "Syns inte tillförlitligt i sensorerna. Ingen sensorbaserad varning är möjlig."
+  - id: F10
+    fault: 10
+    name: "Fault 10: C feed temperature varying at random - variance increase"
+    name_fi: "Vika 10: C-syötön lämpötila vaihtelee satunnaisesti - vaihtelun kasvu"
+    name_sv: "Fel 10: C-matningens temperatur varierar slumpmässigt - ökad varians"
+    columns: [xmeas_18, xmeas_9, xmeas_13]
+    pattern: variance_increase
+    confidence: hypothesis
+    visible: true
+    suggestion: "The stripper temperature (xmeas_18), the reactor temperature (xmeas_9) and the separator pressure (xmeas_13) are more unsteady than normal. Check the C feed temperature and its heat exchanger; inform the shift engineer."
+    suggestion_fi: "Stripperin lämpötila (xmeas_18), reaktorin lämpötila (xmeas_9) ja erottimen paine (xmeas_13) heilahtelevat normaalia enemmän. Tarkista C-syötön lämpötila ja sen lämmönvaihdin; ilmoita vuoroinsinöörille."
+    suggestion_sv: "Strippertemperaturen (xmeas_18), reaktortemperaturen (xmeas_9) och separatortrycket (xmeas_13) är ostadigare än normalt. Kontrollera C-matningens temperatur och dess värmeväxlare; informera skiftingenjören."
+    note: "The column list is the source's best reading of the literature; treat it as a hypothesis."
+  - id: F11
+    fault: 11
+    name: "Fault 11: reactor cooling water inlet temperature varying at random - variance increase"
+    name_fi: "Vika 11: reaktorin jäähdytysveden tulolämpötila vaihtelee satunnaisesti - vaihtelun kasvu"
+    name_sv: "Fel 11: reaktorkylvattnets inloppstemperatur varierar slumpmässigt - ökad varians"
+    columns: [xmeas_9, xmeas_21, xmv_10]
+    pattern: variance_increase
+    confidence: documented
+    visible: true
+    suggestion: "The reactor temperature (xmeas_9), its cooling water outlet temperature (xmeas_21) and the cooling water valve (xmv_10) are more unsteady than normal. Check the reactor cooling water supply; if the valve keeps swinging, inform the shift engineer."
+    suggestion_fi: "Reaktorin lämpötila (xmeas_9), sen jäähdytysveden lähtölämpötila (xmeas_21) ja jäähdytysveden venttiili (xmv_10) heilahtelevat normaalia enemmän. Tarkista reaktorin jäähdytysveden syöttö; jos venttiili heiluu jatkuvasti, ilmoita vuoroinsinöörille."
+    suggestion_sv: "Reaktortemperaturen (xmeas_9), dess kylvattenutloppstemperatur (xmeas_21) och kylvattenventilen (xmv_10) är ostadigare än normalt. Kontrollera reaktorns kylvattentillförsel; om ventilen fortsätter svänga, informera skiftingenjören."
+  - id: F12
+    fault: 12
+    name: "Fault 12: condenser cooling water inlet temperature varying at random - variance increase"
+    name_fi: "Vika 12: lauhduttimen jäähdytysveden tulolämpötila vaihtelee satunnaisesti - vaihtelun kasvu"
+    name_sv: "Fel 12: kondensorkylvattnets inloppstemperatur varierar slumpmässigt - ökad varians"
+    columns: [xmeas_22, xmeas_11]
+    pattern: variance_increase
+    confidence: documented
+    visible: true
+    suggestion: "The separator cooling water outlet temperature (xmeas_22) and the separator temperature (xmeas_11) are more unsteady than normal. Check the condenser cooling water supply; inform the shift engineer."
+    suggestion_fi: "Erottimen jäähdytysveden lähtölämpötila (xmeas_22) ja erottimen lämpötila (xmeas_11) heilahtelevat normaalia enemmän. Tarkista lauhduttimen jäähdytysveden syöttö; ilmoita vuoroinsinöörille."
+    suggestion_sv: "Separatorkylvattnets utloppstemperatur (xmeas_22) och separatortemperaturen (xmeas_11) är ostadigare än normalt. Kontrollera kondensorns kylvattentillförsel; informera skiftingenjören."
+  - id: F13
+    fault: 13
+    name: "Fault 13: reaction kinetics drifting - slow drift over hours in pressures, levels and compositions"
+    name_fi: "Vika 13: reaktiokinetiikan ryömintä - hidas tuntien ryömintä paineissa, pinnoissa ja koostumuksissa"
+    name_sv: "Fel 13: reaktionskinetiken driver - långsam drift under timmar i tryck, nivåer och sammansättningar"
+    columns: [xmeas_7, xmeas_13, xmeas_16, xmeas_8, xmeas_12, xmeas_15, xmeas_23, xmeas_29, xmeas_37]
+    pattern: slow_drift
+    confidence: hypothesis
+    visible: true
+    suggestion: "Pressures (reactor xmeas_7, separator xmeas_13, stripper xmeas_16), levels (xmeas_8, xmeas_12, xmeas_15) and compositions are drifting slowly together: the reaction itself is changing. Nothing to fix at a valve; inform the shift engineer and plan a set-point review before the drift reaches the limits."
+    suggestion_fi: "Paineet (reaktori xmeas_7, erotin xmeas_13, stripperi xmeas_16), pinnat (xmeas_8, xmeas_12, xmeas_15) ja koostumukset ryömivät hitaasti yhdessä: itse reaktio muuttuu. Mitään ei korjata venttiilistä; ilmoita vuoroinsinöörille ja suunnittele asetusarvojen tarkistus ennen kuin ryömintä saavuttaa rajat."
+    suggestion_sv: "Tryck (reaktor xmeas_7, separator xmeas_13, stripper xmeas_16), nivåer (xmeas_8, xmeas_12, xmeas_15) och sammansättningar driver långsamt tillsammans: själva reaktionen förändras. Inget att åtgärda vid en ventil; informera skiftingenjören och planera en översyn av börvärdena innan driften når gränserna."
+    note: "The source says 'broad: pressure, levels, compositions'; this column list is a hypothesis."
+  - id: F14
+    fault: 14
+    name: "Fault 14: reactor cooling water valve sticking - jumpy pattern"
+    name_fi: "Vika 14: reaktorin jäähdytysveden venttiili takertelee - hyppelehtivä kuvio"
+    name_sv: "Fel 14: reaktorns kylvattenventil kärvar - hoppigt mönster"
+    columns: [xmv_10, xmeas_9, xmeas_21]
+    pattern: jumpy
+    confidence: documented
+    visible: true
+    suggestion: "The reactor cooling water valve (xmv_10) moves in jumps and the reactor temperature (xmeas_9) and cooling water outlet temperature (xmeas_21) follow. The valve is sticking: have maintenance check the valve and its positioner; hold the reactor temperature set-point meanwhile."
+    suggestion_fi: "Reaktorin jäähdytysveden venttiili (xmv_10) liikkuu hyppäyksittäin ja reaktorin lämpötila (xmeas_9) sekä jäähdytysveden lähtölämpötila (xmeas_21) seuraavat. Venttiili takertelee: pyydä kunnossapitoa tarkistamaan venttiili ja asennoitin; pidä reaktorin lämpötilan asetusarvo ennallaan sillä välin."
+    suggestion_sv: "Reaktorns kylvattenventil (xmv_10) rör sig i hopp och reaktortemperaturen (xmeas_9) samt kylvattnets utloppstemperatur (xmeas_21) följer med. Ventilen kärvar: låt underhållet kontrollera ventilen och dess ställdon; håll reaktortemperaturens börvärde under tiden."
+  - id: F15
+    fault: 15
+    name: "Fault 15: condenser cooling water valve sticking - little to none visible"
+    name_fi: "Vika 15: lauhduttimen jäähdytysveden venttiili takertelee - tuskin näkyvissä"
+    name_sv: "Fel 15: kondensorns kylvattenventil kärvar - knappt synligt"
+    columns: [xmv_11]
+    pattern: none
+    confidence: documented
+    visible: false
+    suggestion: "The effect would be expected on the condenser cooling water valve (xmv_11), but the source does not claim it is detectable. No sensor-based warning is possible."
+    suggestion_fi: "Vaikutuksen odottaisi näkyvän lauhduttimen jäähdytysveden venttiilissä (xmv_11), mutta lähde ei väitä sen olevan havaittavissa. Anturipohjainen varoitus ei ole mahdollinen."
+    suggestion_sv: "Effekten skulle väntas på kondensorns kylvattenventil (xmv_11), men källan hävdar inte att den är detekterbar. Ingen sensorbaserad varning är möjlig."
+  - id: F16
+    fault: 16
+    name: "Fault 16: undocumented - discover from the data"
+    name_fi: "Vika 16: dokumentoimaton - selvitettävä datasta"
+    name_sv: "Fel 16: odokumenterat - upptäcks ur data"
+    columns: []
+    pattern: none
+    confidence: hypothesis
+    visible: false
+    suggestion: "No documented sensor pattern. Watch the generic drift alarm."
+    suggestion_fi: "Ei dokumentoitua anturikuviota. Seuraa yleistä ryömintähälytystä."
+    suggestion_sv: "Inget dokumenterat sensormönster. Följ det generella driftlarmet."
+  - id: F17
+    fault: 17
+    name: "Fault 17: undocumented - discover from the data"
+    name_fi: "Vika 17: dokumentoimaton - selvitettävä datasta"
+    name_sv: "Fel 17: odokumenterat - upptäcks ur data"
+    columns: []
+    pattern: none
+    confidence: hypothesis
+    visible: false
+    suggestion: "No documented sensor pattern. Watch the generic drift alarm."
+    suggestion_fi: "Ei dokumentoitua anturikuviota. Seuraa yleistä ryömintähälytystä."
+    suggestion_sv: "Inget dokumenterat sensormönster. Följ det generella driftlarmet."
+  - id: F18
+    fault: 18
+    name: "Fault 18: undocumented - discover from the data"
+    name_fi: "Vika 18: dokumentoimaton - selvitettävä datasta"
+    name_sv: "Fel 18: odokumenterat - upptäcks ur data"
+    columns: []
+    pattern: none
+    confidence: hypothesis
+    visible: false
+    suggestion: "No documented sensor pattern. Watch the generic drift alarm."
+    suggestion_fi: "Ei dokumentoitua anturikuviota. Seuraa yleistä ryömintähälytystä."
+    suggestion_sv: "Inget dokumenterat sensormönster. Följ det generella driftlarmet."
+  - id: F19
+    fault: 19
+    name: "Fault 19: undocumented - discover from the data"
+    name_fi: "Vika 19: dokumentoimaton - selvitettävä datasta"
+    name_sv: "Fel 19: odokumenterat - upptäcks ur data"
+    columns: []
+    pattern: none
+    confidence: hypothesis
+    visible: false
+    suggestion: "No documented sensor pattern. Watch the generic drift alarm."
+    suggestion_fi: "Ei dokumentoitua anturikuviota. Seuraa yleistä ryömintähälytystä."
+    suggestion_sv: "Inget dokumenterat sensormönster. Följ det generella driftlarmet."
+  - id: F20
+    fault: 20
+    name: "Fault 20: undocumented - discover from the data"
+    name_fi: "Vika 20: dokumentoimaton - selvitettävä datasta"
+    name_sv: "Fel 20: odokumenterat - upptäcks ur data"
+    columns: []
+    pattern: none
+    confidence: hypothesis
+    visible: false
+    suggestion: "No documented sensor pattern. Watch the generic drift alarm."
+    suggestion_fi: "Ei dokumentoitua anturikuviota. Seuraa yleistä ryömintähälytystä."
+    suggestion_sv: "Inget dokumenterat sensormönster. Följ det generella driftlarmet."
+
+  # Generic signatures: no fixed sensors. They match on whichever sensors show the pattern most, so a file with any
+  # column names still gets a cause in plain words ("a mean shift on temperature and flow").
+  - id: G-shift
+    name: "Generic: mean shift on some sensors"
+    name_fi: "Yleinen: tason siirtymä joillakin antureilla"
+    name_sv: "Generellt: nivåförskjutning på några sensorer"
+    columns: []
+    generic: true
+    pattern: mean_shift
+    confidence: hypothesis
+    visible: true
+    suggestion: "The listed sensors have settled at a new level. Check what changed upstream of them (feed, set-point, utility) before touching the instruments; if nothing changed in the process, check the sensors themselves. Inform the shift engineer."
+    suggestion_fi: "Luetellut anturit ovat asettuneet uudelle tasolle. Tarkista, mikä muuttui niiden ylävirrassa (syöttö, asetusarvo, käyttöhyödyke) ennen kuin kosket instrumentteihin; jos prosessissa ei muuttunut mitään, tarkista anturit itse. Ilmoita vuoroinsinöörille."
+    suggestion_sv: "De listade sensorerna har lagt sig på en ny nivå. Kontrollera vad som ändrades uppströms dem (matning, börvärde, hjälpsystem) innan instrumenten rörs; om inget ändrades i processen, kontrollera sensorerna själva. Informera skiftingenjören."
+  - id: G-variance
+    name: "Generic: readings much more unsteady than normal on some sensors"
+    name_fi: "Yleinen: lukemat huomattavasti epävakaampia kuin normaalisti joillakin antureilla"
+    name_sv: "Generellt: mätvärden betydligt ostadigare än normalt på några sensorer"
+    columns: []
+    generic: true
+    pattern: variance_increase
+    confidence: hypothesis
+    visible: true
+    suggestion: "The listed sensors swing far more than normal. Check the control loop behind them (a valve hunting, a supply fluctuating) and the sensor wiring; inform the shift engineer."
+    suggestion_fi: "Luetellut anturit heilahtelevat paljon normaalia enemmän. Tarkista niiden takana oleva säätöpiiri (huojuva venttiili, vaihteleva syöttö) ja anturien johdotus; ilmoita vuoroinsinöörille."
+    suggestion_sv: "De listade sensorerna svänger mycket mer än normalt. Kontrollera reglerkretsen bakom dem (en pendlande ventil, en fluktuerande tillförsel) och sensorernas kablage; informera skiftingenjören."
+  - id: G-jumpy
+    name: "Generic: readings hold still and then jump on some sensors"
+    name_fi: "Yleinen: lukemat pysyvät paikallaan ja hyppäävät sitten joillakin antureilla"
+    name_sv: "Generellt: mätvärdena står still och hoppar sedan på några sensorer"
+    columns: []
+    generic: true
+    pattern: jumpy
+    confidence: hypothesis
+    visible: true
+    suggestion: "The listed sensors hold still and then jump. That is typical of a sticking valve or positioner in the loop behind them, or of a loose connection. Have maintenance check the valve and its positioner and the sensor wiring; inform the shift engineer."
+    suggestion_fi: "Luetellut anturit pysyvät paikallaan ja hyppäävät sitten. Se on tyypillistä niiden takana olevan säätöpiirin takertelevalle venttiilille tai asennoittimelle tai löysälle liitännälle. Pyydä kunnossapitoa tarkistamaan venttiili, asennoitin ja anturien johdotus; ilmoita vuoroinsinöörille."
+    suggestion_sv: "De listade sensorerna står still och hoppar sedan. Det är typiskt för en kärvande ventil eller ett kärvande ställdon i kretsen bakom dem, eller för en glapp anslutning. Låt underhållet kontrollera ventilen, ställdonet och sensorernas kablage; informera skiftingenjören."
+  - id: G-collapse
+    name: "Generic: large, fast collapse on some sensors"
+    name_fi: "Yleinen: suuri, nopea romahdus joillakin antureilla"
+    name_sv: "Generellt: stor, snabb kollaps på några sensorer"
+    columns: []
+    generic: true
+    pattern: collapse
+    confidence: hypothesis
+    visible: true
+    suggestion: "The listed sensors fell fast and far. Check the supply or the unit feeding them at once and be ready to hold the process; inform the shift engineer immediately."
+    suggestion_fi: "Luetellut anturit putosivat nopeasti ja paljon. Tarkista heti niitä syöttävä linja tai yksikkö ja varaudu pysäyttämään prosessi; ilmoita vuoroinsinöörille välittömästi."
+    suggestion_sv: "De listade sensorerna föll snabbt och långt. Kontrollera genast tillförseln eller enheten som matar dem och var beredd att hålla processen; informera skiftingenjören omedelbart."

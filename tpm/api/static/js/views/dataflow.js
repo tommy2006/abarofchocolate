@@ -69,7 +69,7 @@ export async function render(main) {
   await renderStatement();
 
   // ---- ledger
-  const ls = section(t('flow.ledger'), { level: 'reviewer', right: E.summary ? el('span', { class: 'row small muted' }, chip(`${E.summary.local || 0} ${t('flow.summary.local')}`, 'ok'), chip(`${E.summary.external_allowed || 0} ${t('flow.summary.sent')}`, E.summary.external_allowed ? 'warn' : ''), chip(`${E.summary.external_blocked || 0} ${t('flow.summary.blocked')}`)) : null });
+  const ls = section(t('flow.ledger'), { level: 'engineer', right: E.summary ? el('span', { class: 'row small muted' }, chip(`${E.summary.local || 0} ${t('flow.summary.local')}`, 'ok'), chip(`${E.summary.external_allowed || 0} ${t('flow.summary.sent')}`, E.summary.external_allowed ? 'warn' : ''), chip(`${E.summary.external_blocked || 0} ${t('flow.summary.blocked')}`)) : null });
   // "See the list of what was sent where": the ledger for reviewers, the plain statement for everybody else
   (ls.root.hidden ? ss.root : ls.root).dataset.briefSection = 'ledger';
   view.append(ls.root);

@@ -58,13 +58,69 @@ def normalize_chat_result(res: Any) -> dict[str, Any]:
     source = d.get("source") or "llm"
     route = d.get("route") or ("none" if source == "template" else "external" if source.startswith("llm-external") else "local")
     model = d.get("model") or (source.split(":", 1)[1] if ":" in source else "")
+    series = d.get("series") if isinstance(d.get("series"), dict) else None
     return {"text": text, "source": source, "route": route, "model": model, "evidence_ids": list(ev), "ledger_id": d.get("ledger_id"), "data": data or None, "followups": list(d.get("suggested_followups") or []), "confidence": d.get("confidence"),
             # which workspace objects the answer looked at (shown under "Show technical analyses"); names and ids only, no contents
-            "tool_trace": [{k: st.get(k) for k in ("step", "tool", "args", "ok", "ms", "thought") if st.get(k) is not None} for st in (d.get("tool_trace") or []) if isinstance(st, dict)][:24]}
+            "tool_trace": [{k: st.get(k) for k in ("step", "tool", "args", "ok", "ms", "thought") if st.get(k) is not None} for st in (d.get("tool_trace") or []) if isinstance(st, dict)][:24],
+            # the turn the agent persisted (the UI names it in advance so its Stop button can flag it) and its chat
+            "turn_id": d.get("turn_id"), "chat_id": d.get("chat_id"), "stopped": bool(d.get("stopped")),
+            # the downsampled series the agent looked at (local only; drawn as a small chart under the answer)
+            "series": {"signal": series.get("signal"), "columns": series.get("columns"), "points": list(series.get("points") or [])[:400], "row_start": series.get("row_start"), "row_end": series.get("row_end")} if series and series.get("points") else None}
 
 
 def _find_ids(text: str) -> list[str]:
     return sorted(set(re.findall(r"\b(?:EV|INF|CHK|FLAG|DIAG)-\d{6}\b", text or "")))
+
+
+# ------------------------------------------------------------------------------- chat ids + stop
+# The drawer keeps several chats per run (chat_id) and names a turn before it starts (client_turn_id) so its Stop
+# button can flag the turn while the model works. The flag registry lives in tpm.llm.agent; these helpers keep the
+# API usable when that module is missing.
+DEFAULT_CHAT_ID = "default"
+_TURN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+
+
+def _agent_mod() -> Any:
+    try:
+        from ..llm import agent
+        return agent
+    except Exception:
+        return None
+
+
+def clean_turn_id(turn_id: Any) -> Optional[str]:
+    s = str(turn_id or "").strip()
+    return s if s and _TURN_ID_RE.match(s) else None
+
+
+def clean_chat_id(chat_id: Any) -> str:
+    s = str(chat_id or "").strip()
+    return s if s and _TURN_ID_RE.match(s) else DEFAULT_CHAT_ID
+
+
+def turn_chat_id(turn: dict[str, Any]) -> str:
+    return str(turn.get("chat_id") or DEFAULT_CHAT_ID)
+
+
+def request_stop(turn_id: Optional[str], chat_id: Optional[str]) -> list[str]:
+    a = _agent_mod()
+    return list(a.request_stop(turn_id, chat_id)) if a is not None else []
+
+
+def is_stopped(turn_id: Optional[str]) -> bool:
+    a = _agent_mod()
+    return bool(a.is_stopped(turn_id)) if a is not None else False
+
+
+def clear_chat(ws: Workspace, chat_id: str) -> int:
+    """Remove the persisted turns of one chat. Returns how many were removed."""
+    if not ws.exists("chat"):
+        return 0
+    turns = ws.read_jsonl("chat")
+    keep = [t for t in turns if turn_chat_id(t) != chat_id]
+    if len(keep) != len(turns):
+        ws.rewrite_jsonl("chat", keep)
+    return len(turns) - len(keep)
 
 
 def _pct(x: Any) -> str:

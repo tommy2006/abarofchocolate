@@ -120,10 +120,13 @@ code, .mono { font-family: inherit; font-variant-numeric: tabular-nums; }
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 18px;
-  min-height: var(--topbar-h); padding: 6px 16px;
+  min-height: 54px; padding: 6px 16px;   /* never var(--topbar-h): that is measured from this bar and would only ever grow */
   background: var(--bg-2); border-bottom: 1px solid var(--line);
 }
-@media (max-width: 1440px) { .brand-name { display: none; } .runpick select { max-width: 200px; } }
+/* The page is a size container: the narrow layouts below follow the width the page really has, so they also kick in
+   when the text is made larger (A+ sets CSS zoom on <body>; media queries never see that, container queries do). */
+body { container: page / inline-size; }
+@container page (max-width: 1440px) { .brand-name { display: none; } .runpick select { max-width: 200px; } }
 .brand { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
 .brand-mark { font-weight: 600; font-size: 15px; letter-spacing: 0.08em; color: var(--accent); }
 .brand-name { font-weight: 500; }
@@ -187,6 +190,7 @@ code, .mono { font-family: inherit; font-variant-numeric: tabular-nums; }
 .btn:hover { background: var(--bg-3); }
 .btn:disabled { opacity: 0.55; cursor: default; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+a.btn { text-decoration: none; }
 .btn-primary:hover { filter: brightness(1.08); background: var(--accent); }
 .btn-quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
 .btn-quiet:hover { background: var(--bg-3); color: var(--ink); }
@@ -470,20 +474,21 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .toast.fail { background: var(--fail); color: #fff; }
 .toast.ok { background: var(--ok); color: #fff; }
 
-/* ---------- responsive ---------- */
-@media (max-width: 1100px) {
+/* ---------- responsive (container queries on the page: they follow the text size, see body above) ---------- */
+@container page (max-width: 1100px) {
   .frame.with-drawer { grid-template-columns: var(--rail-w) 1fr; }
   .drawer { position: fixed; right: 0; top: var(--topbar-h); width: min(420px, 100%); z-index: 40; box-shadow: var(--shadow); }
   .cols-side { grid-template-columns: 1fr; }
 }
-@media (max-width: 900px) {
-  .topbar { grid-template-columns: 1fr auto; grid-auto-rows: auto; height: auto; padding: 8px 12px; row-gap: 6px; }
+@container page (max-width: 900px) {
+  .topbar { grid-template-columns: minmax(0, 1fr) auto; grid-auto-flow: row dense; grid-auto-rows: auto; height: auto; padding: 8px 12px; row-gap: 6px; }
   .brand-name { display: none; }
   .lamps { grid-column: 1 / -1; justify-content: flex-start; gap: 4px 16px; }
-  .runpick { grid-column: 1 / -1; }
-  .runpick select { max-width: 100%; flex: 1; }
+  .runpick { grid-column: 1 / -1; min-width: 0; }
+  .runpick select { max-width: 100%; flex: 1; min-width: 0; }
+  .tools { flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; }
   .frame, .frame.with-drawer { grid-template-columns: 1fr; }
-  .rail { position: sticky; top: 0; height: auto; display: flex; overflow-x: auto; padding: 0; border-right: 0; border-bottom: 1px solid var(--line); }
+  .rail { position: sticky; top: var(--topbar-h); z-index: 20; height: auto; display: flex; overflow-x: auto; padding: 0; border-right: 0; border-bottom: 1px solid var(--line); }
   .rail-tag { display: none; }
   .rail-item { grid-template-columns: auto auto; gap: 6px; padding: 10px 12px; border-left: 0; border-bottom: 3px solid transparent; white-space: nowrap; }
   .rail-item[aria-current="page"] { border-bottom-color: var(--accent); }
@@ -499,7 +504,13 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   .kv dt { margin-top: 6px; font-size: 12px; }
   .chain .edge { min-width: 64px; }
 }
-@media (max-width: 480px) {
+@container page (max-width: 600px) {
+  /* a phone: the top bar scrolls away (it is tall once it wraps), the numbered rail stays on top */
+  .topbar { position: static; grid-template-columns: minmax(0, 1fr); }
+  .tools { justify-content: flex-start; }
+  .rail { top: 0; }
+}
+@container page (max-width: 480px) {
   .meter { grid-template-columns: 84px 1fr 40px; }
   .tbl td.wrap { min-width: 160px; }
 }
@@ -604,7 +615,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .sus-detail { margin-top: 12px; }
 .sus .tbl td.wrap { min-width: 150px; }
 
-@media (max-width: 900px) {
+@container page (max-width: 900px) {
   .rail-item { grid-template-columns: auto auto auto; }
   .rail-prog { left: 12px; bottom: 5px; }
   .upload-screen { padding: 16px; }
@@ -648,6 +659,12 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .brief-item .brief-points { margin: 6px 0 0 33px; padding-left: 16px; font-size: 14px; }
 .brief-item .brief-actions { margin: 8px 0 0 33px; }
 .brief-item .brief-action { font-size: 13px; padding: 5px 10px; }
+/* what to do about an object (the suggestion library), under its points */
+.brief-fix { margin: 12px 0 0 46px; max-width: 80ch; min-width: 0; }
+.brief-item .brief-fix { margin: 8px 0 0 33px; }
+.brief-fix-list { margin: 0; padding-left: 1.3em; font-size: 14px; line-height: 1.45; }
+.brief-fix-list li { margin: 2px 0; }
+@container page (max-width: 600px) { .brief-fix, .brief-item .brief-fix { margin-left: 0; } }
 .brief-decide { margin: 8px 0 4px; min-width: 0; }
 .brief-decide .decisions { flex-wrap: wrap; }
 
@@ -695,7 +712,7 @@ details.tech-details.nested.inline > .tech-body { padding: 4px 0 2px 8px; font-s
 .tooltrace { margin: 0 0 8px; }
 .tooltrace code { font-size: 12px; }
 
-@media (max-width: 600px) {
+@container page (max-width: 600px) {
   .brief-card { padding: 12px; border-left-width: 5px; }
   .brief-headline { font-size: 17px; }
   .brief-icon { width: 28px; height: 28px; font-size: 15px; }
@@ -729,8 +746,50 @@ details.tech-details.nested.inline > .tech-body { padding: 4px 0 2px 8px; font-s
 .extuse-stat span { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 .extuse-stat .sub { color: var(--ink-3); }
 .extuse .tbl-wrap { max-width: 100%; }
-@media (max-width: 600px) {
+@container page (max-width: 600px) {
   .sec.extuse { padding: 12px; border-left-width: 5px; }
   .extuse-first { font-size: 15.5px; }
   .extuse-stat b { font-size: 18px; }
 }
+
+/* ---------- modes: each has its own colour scheme (html[data-role]) ---------- */
+:root[data-role="basic"] { --accent: #2e64b8; --focus: #2e64b8; --lamp-glow: 0 0 0 3px rgba(46, 100, 184, 0.18); --rail-tint: #e8eef8; --topbar-tint: #f1f5fc; --mode-ink: #2e64b8; }
+:root[data-role="operator"] { --rail-tint: #e6f2f0; --topbar-tint: #eff7f5; --mode-ink: #147f75; }
+:root[data-role="engineer"] { --accent: #6d4fc2; --focus: #6d4fc2; --lamp-glow: 0 0 0 3px rgba(109, 79, 194, 0.18); --rail-tint: #ede8f8; --topbar-tint: #f5f2fc; --mode-ink: #6d4fc2; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"])[data-role="basic"] { --accent: #7aa7e6; --focus: #7aa7e6; --rail-tint: #17212e; --topbar-tint: #19243a; --mode-ink: #7aa7e6; --mode-on: #0f1620; --lamp-glow: 0 0 0 3px rgba(122, 167, 230, 0.22), 0 0 12px rgba(122, 167, 230, 0.45); }
+  :root:not([data-theme="light"])[data-role="operator"] { --rail-tint: #172624; --topbar-tint: #182c29; --mode-ink: #4cc0b2; --mode-on: #0f1a19; }
+  :root:not([data-theme="light"])[data-role="engineer"] { --accent: #a58cf0; --focus: #a58cf0; --rail-tint: #221b34; --topbar-tint: #261e3c; --mode-ink: #a58cf0; --mode-on: #16111f; --lamp-glow: 0 0 0 3px rgba(165, 140, 240, 0.22), 0 0 12px rgba(165, 140, 240, 0.45); }
+}
+:root[data-theme="dark"][data-role="basic"] { --accent: #7aa7e6; --focus: #7aa7e6; --rail-tint: #17212e; --topbar-tint: #19243a; --mode-ink: #7aa7e6; --mode-on: #0f1620; }
+:root[data-theme="dark"][data-role="operator"] { --rail-tint: #172624; --topbar-tint: #182c29; --mode-ink: #4cc0b2; --mode-on: #0f1a19; }
+:root[data-theme="dark"][data-role="engineer"] { --accent: #a58cf0; --focus: #a58cf0; --rail-tint: #221b34; --topbar-tint: #261e3c; --mode-ink: #a58cf0; --mode-on: #16111f; }
+.topbar { border-bottom: 3px solid var(--accent); background: var(--topbar-tint, var(--bg-2)); }
+.rail { background: var(--rail-tint, var(--bg-2)); }
+.rail-mode { display: block; width: calc(100% - 32px); margin: 12px 16px 6px; padding: 5px 10px; border: 0; border-radius: 999px; background: var(--accent); color: var(--mode-on, #fff); font: inherit; font-size: 12px; font-weight: 600; text-align: center; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; }
+.rail-mode:hover { filter: brightness(1.08); }
+@container page (max-width: 900px) { .rail-mode { flex: 0 0 auto; width: auto; margin: 7px 8px; align-self: center; white-space: nowrap; } }
+.main:focus { outline: none; }
+.rail-gear { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.userchip .role { color: var(--mode-ink, var(--accent)); font-weight: 600; }
+:root[data-role="basic"] .summary-card, :root[data-role="basic"] .brief-card { font-size: 1.06em; }
+.basic-wrap { margin: 10px 0 18px; }
+.basic-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border: 1px dashed var(--line-2); border-radius: 6px; color: var(--ink-2); font-size: 13px; }
+.basic-hidden { display: none !important; }
+/* ---------- settings page ---------- */
+.settings-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.settings-tab { padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2); color: var(--ink-2); cursor: pointer; }
+.settings-tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.settings-body h3 { margin: 18px 0 8px; }
+/* an embedded page keeps the controls of its head (Verify / Export of the decision log), not its numbered title */
+.settings-embed .view > .view-head > .view-title { display: none; }
+.settings-embed .view > .view-head { justify-content: flex-start; margin-bottom: 12px; }
+.settings-embed .view > .view-head:not(:has(> :nth-child(2))) { display: none; }
+.settings-embed .view { max-width: none; }
+/* ---------- text size + logo ---------- */
+.tool.zoom { font-weight: 600; letter-spacing: 0.02em; }
+.brand-logo { width: 28px; height: 28px; border-radius: 6px; margin-right: 8px; vertical-align: middle; }
+:root[data-zoom="large"] .main { padding-left: 16px; padding-right: 16px; }
+.rail-sep { margin: 12px 14px 4px; border-top: 1px solid var(--line); }
+.rail-settings .rail-num { font-size: 15px; }
+.tool.zoom-tool { font-weight: 600; letter-spacing: 0.02em; }

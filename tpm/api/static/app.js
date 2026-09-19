@@ -1,6 +1,6 @@
 /* Trustworthy Process Monitor — frontend entry. Boot, router (hash), numbered rail, data-control
    lamps, role picker, language + theme switch, SSE subscription for the selected run. */
-import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows, navigate, recordNavigation, installRefHandler, viewAccess, lockText, lockProgressText, lockGlyph, viewHead } from './js/core.js';
+import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows, normalizeRole, MODES, navigate, recordNavigation, installRefHandler, viewAccess, lockText, lockProgressText, lockGlyph, viewHead } from './js/core.js';
 import { initChat } from './js/chat.js';
 import { focusSection } from './js/brief.js';
 import { openModelsPanel, mt as modelsText } from './js/models.js';
@@ -14,10 +14,14 @@ import * as assessor from './js/views/assessor.js';
 import * as log from './js/views/log.js';
 import * as dataflow from './js/views/dataflow.js';
 import * as report from './js/views/report.js';
+import * as settings from './js/views/settings.js';
+import { applyZoom, stepZoom } from './js/views/settings.js';
 import * as live from './js/views/live.js';
 
 export { navigate };
 
+// The rail is a path: 0 bring data in ... 7 watch it live. What is not a step of that path (privacy & data flow,
+// decision log, models, display) lives under Settings; the old ids 'dataflow' and 'log' still route there.
 const VIEWS = [
   { id: 'runs', num: '0', key: 'nav.runs', mod: runs },
   { id: 'understanding', num: '1', key: 'nav.understanding', mod: understanding },
@@ -25,11 +29,11 @@ const VIEWS = [
   { id: 'monitor', num: '3', key: 'nav.monitor', mod: monitor },
   { id: 'diagnoses', num: '4', key: 'nav.diagnoses', mod: diagnoses },
   { id: 'assessor', num: '5', key: 'nav.assessor', mod: assessor },
-  { id: 'log', num: '6', key: 'nav.log', mod: log, level: 'reviewer' },
-  { id: 'dataflow', num: '7', key: 'nav.dataflow', mod: dataflow },
-  { id: 'report', num: '8', key: 'nav.report', mod: report },
-  { id: 'live', num: '9', key: 'nav.live', mod: live },
+  { id: 'report', num: '6', key: 'nav.report', mod: report },
+  { id: 'live', num: '7', key: 'nav.live', mod: live },
+  { id: 'settings', num: '⚙', key: 'nav.settings', mod: settings, unnumbered: true },
 ];
+const SETTINGS_TABS = { dataflow: 'dataflow', log: 'log' };
 let current = null;
 let rendering = false;
 let routeSeq = 0;
@@ -44,7 +48,8 @@ function parseHash() {
 async function route() {
   const seq = ++routeSeq;
   recordNavigation(location.hash || '#/runs');
-  const { view, params } = parseHash();
+  let { view, params } = parseHash();
+  if (SETTINGS_TABS[view]) { params = { ...params, tab: SETTINGS_TABS[view] }; view = 'settings'; }
   const def = VIEWS.find((v) => v.id === view) || VIEWS[0];
   state.view = def.id;
   document.querySelectorAll('.rail-item').forEach((b) => b.setAttribute('aria-current', b.dataset.view === def.id ? 'page' : 'false'));
@@ -120,8 +125,12 @@ function renderRail() {
   const rail = document.getElementById('rail');
   clear(rail);
   rail.append(el('div', { class: 'rail-tag', text: t('app.tagline') }));
+  // the mode is always in sight, in its own colour; a click changes person or mode
+  const mode = state.user ? normalizeRole(state.user.role) : 'operator';
+  rail.append(el('button', { class: 'rail-mode', type: 'button', title: modeText('role.mode.change'), 'aria-label': `${modeText('role.mode.' + mode)} (${modeText('role.mode.change')})`, onClick: () => bus.emit('role.pick') }, modeText('role.mode.' + mode)));
   for (const v of VIEWS) {
-    const b = el('button', { class: 'rail-item', type: 'button', dataset: { view: v.id }, 'aria-current': state.view === v.id ? 'page' : 'false', onClick: () => navigate(v.id) }, el('span', { class: 'rail-num', text: v.num }), el('span', { class: 'rail-label' }, t(v.key), v.level && !roleAllows(v.level) ? el('span', { class: 'badge', title: t('role.tag.' + v.level), text: v.level[0] }) : null), el('span', { class: 'rail-lock' }), el('span', { class: 'rail-prog', 'aria-hidden': 'true' }, el('i')));
+    if (v.unnumbered) rail.append(el('div', { class: 'rail-sep' }));
+    const b = el('button', { class: 'rail-item' + (v.unnumbered ? ' rail-settings' : ''), type: 'button', dataset: { view: v.id }, 'aria-current': state.view === v.id ? 'page' : 'false', onClick: () => navigate(v.id) }, el('span', { class: 'rail-num', text: v.num }), el('span', { class: 'rail-label' }, t(v.key) === v.key && v.id === 'settings' ? 'Settings' : t(v.key), v.level && !roleAllows(v.level) ? el('span', { class: 'badge', title: t('role.tag.' + v.level), text: v.level[0] }) : null), el('span', { class: 'rail-lock' }), el('span', { class: 'rail-prog', 'aria-hidden': 'true' }, el('i')));
     rail.append(b);
   }
   updateRailLocks(false);
@@ -173,7 +182,7 @@ async function refreshSettings() { const r = await api('/api/settings'); if (r.o
 function renderLangs() {
   const box = document.getElementById('langs');
   clear(box);
-  for (const l of (state.settings ? state.settings.languages : ['en', 'fi', 'sv'])) box.append(el('button', { type: 'button', 'aria-pressed': String(state.lang === l), onClick: async () => { await loadLang(l); bus.emit('lang.changed', l); renderAll(); route(); } }, l.toUpperCase()));
+  for (const l of (state.settings ? state.settings.languages : ['en', 'fi', 'sv'])) box.append(el('button', { type: 'button', 'aria-pressed': String(state.lang === l), onClick: async () => { await loadLang(l); bus.emit('lang.changed', l); route(); } }, l.toUpperCase()));
 }
 function applyTheme() {
   const th = state.theme;
@@ -183,19 +192,31 @@ function applyTheme() {
   b.title = `${t('status.theme')}: ${t('status.theme.' + th)}`;
   b.setAttribute('aria-label', b.title);
 }
+// Texts of the three modes (fallbacks until the dictionaries carry them)
+const MODE_FB = { 'role.basic': 'Basic', 'role.operator': 'Operator', 'role.engineer': 'Engineer',
+  'role.pick.basic': 'Only the essentials: what is wrong, why, what to do. No tables, no long lists.',
+  'role.pick.operator': 'The everyday view: summaries, diagrams, findings and what to do, details on request.',
+  'role.pick.engineer': 'Everything: evidence tables, detector details, decision log, data-flow ledger, overrides audit.',
+  'role.mode.basic': 'Basic mode', 'role.mode.operator': 'Operator mode', 'role.mode.engineer': 'Engineer mode', 'role.mode.change': 'Change person or mode' };
+function modeText(k) { const v = t(k); return (!v || v === k || (k === 'role.pick.engineer' && !/log|loki|logg/i.test(v))) ? (MODE_FB[k] || k) : v; }
+/** Each mode has its own colour scheme across the whole app (styles.css: :root[data-role=...]). */
+function applyMode() {
+  if (state.user) state.user.role = normalizeRole(state.user.role);
+  document.documentElement.setAttribute('data-role', state.user ? state.user.role : 'operator');
+}
 function renderUser() {
   const b = document.getElementById('user-btn');
   clear(b);
-  if (state.user) b.append(el('span', { text: state.user.name }), el('span', { class: 'role', text: t('role.' + state.user.role) }));
+  if (state.user) b.append(el('span', { text: state.user.name }), el('span', { class: 'role', text: modeText('role.' + normalizeRole(state.user.role)) }));
   else b.append(t('role.pick.title'));
   b.title = t('role.change');
 }
 function pickRole() {
   return new Promise((resolve) => {
     const name = el('input', { type: 'text', value: state.user ? state.user.name : '', placeholder: t('role.pick.name'), required: true, style: { width: '100%' } });
-    const opts = ['operator', 'engineer', 'reviewer'].map((r) => { const inp = el('input', { type: 'radio', name: 'role', value: r }); if ((state.user && state.user.role === r) || (!state.user && r === 'operator')) inp.checked = true; return el('label', { class: 'opt' }, inp, el('span', {}, el('b', { text: t('role.' + r) }), el('span', { text: t('role.pick.' + r) }))); });
+    const opts = MODES.map((r) => { const inp = el('input', { type: 'radio', name: 'role', value: r }); if ((state.user && normalizeRole(state.user.role) === r) || (!state.user && r === 'operator')) inp.checked = true; return el('label', { class: 'opt' }, inp, el('span', {}, el('b', { class: 'mode-name mode-' + r, text: modeText('role.' + r) }), el('span', { text: modeText('role.pick.' + r) }))); });
     const body = el('div', { class: 'stack' }, el('p', { class: 'hint', text: t('role.pick.intro') }), el('label', { class: 'field' }, el('span', { text: t('role.pick.name') }), name), el('div', { class: 'rolepick' }, opts));
-    const m = modal({ title: t('role.pick.title'), body, onClose: () => resolve(state.user), actions: [{ label: t('role.pick.start'), cls: 'btn-primary', onClick: (close) => { const n = name.value.trim(); if (!n) { name.focus(); return; } const role = body.querySelector('input[name=role]:checked').value; state.user = { name: n, role }; store.set('user', state.user); renderUser(); renderRail(); bus.emit('user.changed', state.user); close(); resolve(state.user); } }] });
+    const m = modal({ title: t('role.pick.title'), body, onClose: () => resolve(state.user), actions: [{ label: t('role.pick.start'), cls: 'btn-primary', onClick: (close) => { const n = name.value.trim(); if (!n) { name.focus(); return; } const role = body.querySelector('input[name=role]:checked').value; state.user = { name: n, role }; store.set('user', state.user); applyMode(); renderUser(); renderRail(); bus.emit('user.changed', state.user); close(); resolve(state.user); } }] });
     name.focus();
   });
 }
@@ -235,7 +256,7 @@ function renderRunSelect() {
   sel.value = state.run || '';
 }
 
-function renderAll() { renderRail(); renderLamps(); renderLangs(); renderUser(); renderRunSelect(); applyTheme(); document.querySelectorAll('[data-i18n]').forEach((n) => { n.textContent = t(n.dataset.i18n); }); syncTopbarHeight(); }
+function renderAll() { applyMode(); renderRail(); renderLamps(); renderLangs(); renderUser(); renderRunSelect(); applyTheme(); document.querySelectorAll('[data-i18n]').forEach((n) => { n.textContent = t(n.dataset.i18n); }); syncTopbarHeight(); }
 /** The lamps may wrap to a second row on narrow screens; keep the sticky rail/drawer offsets in sync with the real bar height. */
 function syncTopbarHeight() {
   const bar = document.getElementById('topbar');
@@ -250,6 +271,8 @@ async function boot() {
   if (!['en', 'fi', 'sv'].includes(state.lang)) state.lang = 'en';
   state.theme = store.get('theme', 'auto');
   state.user = store.get('user', null);
+  applyMode();
+  applyZoom(store.get('zoom', 1));
   await loadLang(state.lang);
   await refreshSettings();
   const rr = await api('/api/runs');
@@ -259,10 +282,16 @@ async function boot() {
   installRefHandler();
   document.getElementById('theme-btn').addEventListener('click', () => { state.theme = { auto: 'light', light: 'dark', dark: 'auto' }[state.theme]; store.set('theme', state.theme); applyTheme(); bus.emit('theme.changed', state.theme); route(); });
   document.getElementById('user-btn').addEventListener('click', () => pickRole().then(() => route()));
+  bus.on('role.pick', () => pickRole().then(() => route()));
+  bus.on('theme.set', (th) => { state.theme = th; store.set('theme', th); applyTheme(); bus.emit('theme.changed', th); route(); });
+  document.getElementById('zoom-out').addEventListener('click', () => stepZoom(-1));
+  document.getElementById('zoom-in').addEventListener('click', () => stepZoom(1));
   document.getElementById('run-select').addEventListener('change', (e) => selectRun(e.target.value || null));
   bus.on('run.select', (id) => { selectRun(id); if (id && state.view === 'runs') { /* stay */ } });
   bus.on('runs.loaded', (runs) => { state.runs = runs; renderRunSelect(); });
   bus.on('settings.changed', () => renderLamps());
+  // a language picked anywhere (top bar or Settings > Display) re-labels the rail, the lamps and the top bar too
+  bus.on('lang.changed', () => renderAll());
   bus.on('status', () => { const r = state.runs.find((x) => x.run_id === state.run); if (r && state.runStatus) { r.state = state.runStatus.state; r.stages = state.runStatus.stages; renderRunSelect(); } });
   bus.on('run.changed', () => { route(); });
   setInterval(refreshSettings, 30000);

@@ -65,7 +65,7 @@ export async function render(main, params = {}) {
   await load();
 
   // ---- audit of human decisions (reviewer)
-  const audit = section(t('log.overrides'), { level: 'reviewer' });
+  const audit = section(t('log.overrides'), { level: 'engineer' });
   view.append(audit.root);
   const h = await runApi('/log', { params: { actor: 'human:', limit: 5000 } });
   const hs = h.ok ? h.data.items || [] : [];

@@ -4,9 +4,15 @@
    the question box comes last. Reads the real assessor.json shape (combined_score, fitness, coverage,
    dq_scores, more_data_verdict, less_data_verdict, recommendations) and the older fixture shape. */
 import { state, t, el, clear, runApi, fmt, conf, chip, section, viewHead, needRun, empty, evidenceButton, evChips, hiddenHint, meter, toast, errText, confirmDialog, actorName, actorRole, infStatus, unavailableNote, roleAllows, linkifyRefs, cleanText, prose, proseList, refLink, refChips, confWords, addPlainBox, kv, notice } from '../core.js';
-import { plot, purge, tokens } from '../charts.js';
+import { plot, purge, tokens, praStrip } from '../charts.js';
 import { summaryCard, techDetails, answerBlock } from '../brief.js';
 
+// English fallbacks of this page's own keys (the i18n files are edited by several people at once)
+const FB = {
+  'ass.plain.title': 'How to make the data better',
+  'ass.plain.help': 'Each strip reads left to right: what limits the analysis, why, and what to do about it. Nothing changes until you approve it.',
+};
+const ta = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [x, y] of Object.entries(vars || {})) v = v.replaceAll(`{${x}}`, String(y)); } return v; };
 function metricName(m) { const k = 'ass.metric.' + m; return t(k) === k ? String(m || '').replace(/_/g, ' ') : t(k); }
 function nGroups(n) { return Number(n) === 1 ? t('ass.oneGroup') : t('ass.nGroups', { n }); }
 function actionLabel(a) {
@@ -101,6 +107,27 @@ export async function render(main) {
   if (!r.ok || !raw.available) { view.append(r.unavailable ? unavailableNote(r) : el('div', { class: 'notice', text: t('common.notYet') })); }
   const a = normalize(raw);
 
+  /** Apply a recommendation after the person confirmed it (the button of a strip and of the list below). */
+  const applyRec = async (rec, onDone) => {
+    if (!(await confirmDialog(t('ass.applyConfirm', { action: rec.actionLabel })))) return;
+    const rr = await runApi('/assessor/apply', { method: 'POST', body: { action: rec.id, actor_name: actorName(), role: actorRole() } });
+    if (rr.ok) { rec.status = 'approved'; if (onDone) onDone(); toast(t('decision.recorded', { seq: rr.data.log_seq }), 'ok'); } else toast(errText(rr), 'fail');
+  };
+  // ---- round 5: every suggestion as problem -> reason -> answer, above the technical part (Basic mode: the first three).
+  // The generated text reads "<finding>; <what removing / adding it does>": the finding is the problem, the rest the reason.
+  if (a.recs.length) {
+    const recHost = el('section', { class: 'viz-host ass-recs', dataset: { briefSection: 'recommendations' } }, el('h2', { class: 'viz-title', text: ta('ass.plain.title') }), el('p', { class: 'viz-help', text: ta('ass.plain.help') }));
+    page.insertBefore(recHost, tech);
+    for (const rec of a.recs.slice(0, roleAllows('operator') ? 6 : 3)) {
+      const text = rec.text || rec.actionLabel;
+      const cut = text.indexOf('; ');
+      const why = cut > 0 ? capFirst(text.slice(cut + 2).trim()) : rec.rationale;
+      const btn = rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', disabled: rec.status === 'approved' || rec.status === 'applied', onClick: () => applyRec(rec, () => { btn.disabled = true; }) }, t('ass.applyAfterApproval'));
+      recHost.append(praStrip({ verdict: 'attention', label: [el('span', { class: 'dim', text: rec.id }), ' · ', conf(rec.confidence, { words: true })], problem: linkifyRefs(capFirst(cut > 0 ? text.slice(0, cut).trim() : text)), reason: why ? linkifyRefs(why) : null,
+        reasonMore: cut > 0 && rec.rationale ? linkifyRefs(rec.rationale) : null, fix: [rec.actionLabel], extra: [effectSummary(rec.effect), el('div', { class: 'pra-btns' }, btn)] }));
+    }
+  }
+
   // ---- headline: verdict cards + combined score
   const head = el('div', { class: 'cols cols-3 verdicts' });
   view.append(head);
@@ -169,7 +196,7 @@ export async function render(main) {
       rec.rationale ? el('div', { class: 'why small' }, linkifyRefs(rec.rationale)) : null,
       effectSummary(rec.effect),
       el('div', { class: 'row small muted', style: { marginTop: '4px' } }, conf(rec.confidence, { words: true }), rec.gain !== undefined && rec.gain !== null ? chip(`${t('ass.expectedGain')} ${fmt.pp(rec.gain)}`) : null, evidenceButton(rec.evidence_ids), status)),
-      el('div', { class: 'decisions' }, rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', disabled: rec.status === 'approved' || rec.status === 'applied', onClick: async () => { if (!(await confirmDialog(t('ass.applyConfirm', { action: rec.actionLabel })))) return; const rr = await runApi('/assessor/apply', { method: 'POST', body: { action: rec.id, actor_name: actorName(), role: actorRole() } }); if (rr.ok) { rec.status = 'approved'; setStatus(); toast(t('decision.recorded', { seq: rr.data.log_seq }), 'ok'); } else toast(errText(rr), 'fail'); } }, t('ass.applyAfterApproval'))));
+      el('div', { class: 'decisions' }, rec.applicable === false ? el('span', { class: 'small muted', text: t('ass.notApplicable') }) : el('button', { class: 'btn btn-sm btn-accept', type: 'button', disabled: rec.status === 'approved' || rec.status === 'applied', onClick: () => applyRec(rec, setStatus) }, t('ass.applyAfterApproval'))));
     rs.body.append(row);
   }
   if (roleAllows('engineer') && a.evaluations.length) rs.body.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('ass.evaluations') }), el('ul', { class: 'list small prose' }, a.evaluations.map((e) => el('li', {}, chip(e.recommendation || '', e.recommendation === 'recommend' ? 'ok' : e.recommendation === 'reject' ? 'fail' : ''), ' ', el('b', { text: actionLabel(e.action) }), ': ', linkifyRefs(reason(e.rationale || '')), e.seconds ? el('span', { class: 'dim', text: ` (${fmt.sec(e.seconds)})` }) : null))));
