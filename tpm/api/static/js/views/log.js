@@ -1,7 +1,16 @@
-/* View 6: decision log — filterable hash-chained table, verify chain, export, human decisions audit. */
-import { state, t, el, clear, runApi, fmt, chip, section, table, viewHead, needRun, empty, hiddenHint, roleAllows, infStatus, evChips, toast, errText, notice } from '../core.js';
+/* View 6: decision log — filterable hash-chained table, verify chain, export, human decisions audit.
+   Object ids and ids inside payloads are links. ?id=FLAG-000001 pre-filters. */
+import { state, t, el, clear, runApi, fmt, chip, section, table, viewHead, needRun, empty, hiddenHint, roleAllows, infStatus, evChips, toast, errText, notice, linkifyRefs, cleanText, refLink } from '../core.js';
 
-export async function render(main) {
+const TYPE_OF_OBJECT = { flag: 'flag', diagnosis: 'diagnosis', evidence: 'evidence', check: 'check', inference: 'inference', rule: 'rule', pattern: 'pattern', signal: 'signal', batch: 'batch', trust: 'batch', egress: 'egress' };
+function objectRef(objectType, objectId) {
+  const type = TYPE_OF_OBJECT[objectType];
+  const id = String(objectId || '');
+  if (type && /^(?:[A-Z]{2,7}-[0-9A-Z]{1,7}|S\d{2,3}|B\d{4,6}|G?\d{1,6})$/.test(id)) return el('span', {}, `${objectType} `, refLink(type, id));
+  return el('span', {}, `${objectType} `, linkifyRefs(id));
+}
+
+export async function render(main, params = {}) {
   const view = el('div', { class: 'view' });
   main.append(view);
   const verifyBtn = el('button', { class: 'btn btn-primary', type: 'button' }, t('log.verify'));
@@ -23,7 +32,7 @@ export async function render(main) {
   const fType = el('select', {}, [el('option', { value: '', text: t('common.all') }), ...(meta.object_types || []).map((x) => el('option', { value: x, text: x }))]);
   const fAction = el('select', {}, [el('option', { value: '', text: t('common.all') }), ...(meta.actions || []).map((x) => el('option', { value: x, text: x }))]);
   const fActor = el('select', {}, [el('option', { value: '', text: t('common.all') }), ...['human:', 'system:', 'llm:'].map((x) => el('option', { value: x, text: x })), ...(meta.actors || []).map((x) => el('option', { value: x, text: x }))]);
-  const fId = el('input', { type: 'text', placeholder: 'FLAG-000001', style: { width: '150px' } });
+  const fId = el('input', { type: 'text', placeholder: 'FLAG-000001', style: { width: '150px' }, value: params.id || '' });
   const host = el('div', { style: { marginTop: '12px' } });
   view.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('log.object'), fType), el('label', { class: 'row' }, t('log.action'), fAction), el('label', { class: 'row' }, t('log.actor'), fActor), fId), host);
   async function load() {
@@ -39,11 +48,11 @@ export async function render(main) {
         { label: t('log.ts'), render: (e) => fmt.ts(e.ts) },
         { label: t('log.actor'), render: (e) => chip(e.actor, e.actor.startsWith('human') ? 'ok' : e.actor.startsWith('llm:external') ? 'warn' : '') },
         { label: t('log.action'), key: 'action' },
-        { label: t('log.object'), render: (e) => `${e.object_type} ${e.object_id}` },
-        { label: t('log.payload'), cls: 'wrap', render: (e) => el('span', {}, el('span', { class: 'small', text: summarize(e.payload) }), e.evidence_ids && e.evidence_ids.length ? evChips(e.evidence_ids) : null) },
+        { label: t('log.object'), render: (e) => objectRef(e.object_type, e.object_id) },
+        { label: t('log.payload'), cls: 'wrap', render: (e) => el('span', {}, el('span', { class: 'small' }, linkifyRefs(summarize(e.payload))), e.evidence_ids && e.evidence_ids.length ? evChips(e.evidence_ids) : null) },
         { label: t('log.hash'), render: (e) => el('span', { class: 'dim small', title: `prev ${e.prev_hash}`, text: e.hash.slice(0, 12) }) },
       ],
-      rows, pageSize: 30,
+      rows, pageSize: 30, keyOf: (e) => e.seq,
     }));
   }
   [fType, fAction, fActor].forEach((x) => x.addEventListener('change', load));
@@ -63,8 +72,8 @@ export async function render(main) {
       el('div', {}, el('h3', { class: 'small muted', text: t('log.byActor') }), el('ul', { class: 'list plain' }, Object.entries(byActor).sort((a, b) => b[1] - a[1]).map(([k, v]) => el('li', {}, chip(k, 'ok'), ` ${v}`)))),
       el('div', {}, el('h3', { class: 'small muted', text: t('log.byAction') }), el('ul', { class: 'list plain' }, Object.entries(byAction).sort((a, b) => b[1] - a[1]).map(([k, v]) => el('li', {}, chip(k, ['override', 'reject_rule', 'dismiss'].includes(k) ? 'warn' : ''), ` ${v}`))))));
     audit.body.append(table({ columns: [
-      { label: t('log.seq'), key: 'seq', num: true }, { label: t('log.ts'), render: (e) => fmt.ts(e.ts) }, { label: t('log.actor'), render: (e) => e.actor.replace('human:', '') }, { label: t('log.action'), key: 'action' }, { label: t('log.object'), render: (e) => `${e.object_type} ${e.object_id}` }, { label: t('common.note'), cls: 'wrap', render: (e) => (e.payload && (e.payload.note || (e.payload.new_value ? JSON.stringify(e.payload.new_value) : ''))) || '' },
-    ], rows: hs.filter((e) => ['override', 'accept', 'question', 'dismiss', 'set_role', 'name_pattern', 'approve_rule', 'reject_rule', 'apply_assessor_action', 'settings'].includes(e.action)).reverse(), pageSize: 20 }));
+      { label: t('log.seq'), key: 'seq', num: true }, { label: t('log.ts'), render: (e) => fmt.ts(e.ts) }, { label: t('log.actor'), render: (e) => e.actor.replace('human:', '') }, { label: t('log.action'), key: 'action' }, { label: t('log.object'), render: (e) => objectRef(e.object_type, e.object_id) }, { label: t('common.note'), cls: 'wrap', render: (e) => linkifyRefs(cleanText((e.payload && (e.payload.note || (e.payload.new_value ? JSON.stringify(e.payload.new_value) : ''))) || '')) },
+    ], rows: hs.filter((e) => ['override', 'accept', 'question', 'dismiss', 'set_role', 'name_pattern', 'approve_rule', 'reject_rule', 'apply_assessor_action', 'settings'].includes(e.action)).reverse(), pageSize: 20, keyOf: (e) => e.seq }));
   }
   const hh = hiddenHint(view); if (hh) view.append(hh);
   return view;
@@ -76,7 +85,7 @@ function summarize(p) {
   for (const [k, v] of Object.entries(p)) {
     if (v === null || v === undefined || v === '') continue;
     if (typeof v === 'object') { const s = JSON.stringify(v); parts.push(`${k}: ${s.length > 80 ? s.slice(0, 80) + '…' : s}`); }
-    else parts.push(`${k}: ${String(v).length > 120 ? String(v).slice(0, 120) + '…' : v}`);
+    else { const s = cleanText(String(v)); parts.push(`${k}: ${s.length > 160 ? s.slice(0, 160) + '…' : s}`); }
   }
   return parts.join('  ');
 }

@@ -1,7 +1,8 @@
 /* Global chat drawer: usable from any view, pre-loaded with the context of a flag / diagnosis / signal.
    Answers come from tpm.llm.agent.chat when a model exists, otherwise from the server's template
-   answers; the source is always labelled. */
-import { state, t, el, clear, runApi, errText, bus, chip, evChips, actorName, actorRole, kindChip, store } from './core.js';
+   answers; the source is always labelled. Every reference in an answer (FLAG-, EV-, S07, B00003...)
+   is a link. */
+import { state, t, el, clear, runApi, errText, bus, chip, evChips, actorName, actorRole, kindChip, store, linkifyRefs, cleanText, refLink } from './core.js';
 
 const chat = { open: false, context: null, messages: [], busy: false };
 let drawer, msgsEl, ctxEl, inputEl;
@@ -25,11 +26,17 @@ export function toggle(force) {
 }
 
 export async function openChat(ctx) {
-  chat.context = ctx && (ctx.object_id || ctx.flag_id || ctx.diagnosis_id || ctx.signal_id) ? ctx : null;
+  setChatContext(ctx);
   toggle(true);
   if (ctx && ctx.seed) { inputEl.value = ctx.seed; }
   if (ctx && ctx.autoAsk) send(ctx.autoAsk);
 }
+/** Set the context (flag / diagnosis / signal) without opening the drawer; the drawer shows it when opened. */
+export function setChatContext(ctx) {
+  chat.context = ctx && (ctx.object_id || ctx.flag_id || ctx.diagnosis_id || ctx.signal_id) ? ctx : null;
+  if (chat.open) render();
+}
+export function isChatOpen() { return chat.open; }
 
 async function loadHistory() {
   if (!state.run) return;
@@ -40,12 +47,14 @@ async function loadHistory() {
 function ctxLabel(ctx) {
   if (!ctx) return [chip(t('chat.noContext'), 'solid')];
   const out = [];
-  if (ctx.flag_id) out.push(chip(ctx.flag_id, 'solid'));
-  if (ctx.diagnosis_id) out.push(chip(ctx.diagnosis_id, 'solid'));
-  if (ctx.signal_id) out.push(chip(ctx.signal_id, 'solid'));
+  if (ctx.flag_id) out.push(refLink('flag', ctx.flag_id));
+  if (ctx.diagnosis_id) out.push(refLink('diagnosis', ctx.diagnosis_id));
+  if (ctx.signal_id) out.push(refLink('signal', ctx.signal_id));
+  if (!ctx.flag_id && !ctx.diagnosis_id && !ctx.signal_id && ctx.object_id) out.push(chip(ctx.object_id, 'solid'));
   if (ctx.kind) out.push(kindChip(ctx.kind));
-  if (ctx.group_id !== undefined && ctx.group_id !== null) out.push(chip(`${t('common.group')} ${ctx.group_id}`));
-  if (ctx.title) out.push(el('span', { class: 'small muted', text: ctx.title }));
+  if (ctx.group_id !== undefined && ctx.group_id !== null) out.push(el('span', { class: 'small' }, `${t('common.group')} `, refLink('group', String(ctx.group_id))));
+  if (ctx.batch_id) out.push(refLink('batch', ctx.batch_id));
+  if (ctx.title) out.push(el('span', { class: 'small muted ctx-title' }, linkifyRefs(cleanText(ctx.title))));
   return out;
 }
 
@@ -73,7 +82,8 @@ function renderMsgs() {
   clear(msgsEl);
   if (!chat.messages.length) msgsEl.append(el('div', { class: 'drawer-empty', text: t('chat.empty') }));
   for (const m of chat.messages) {
-    const n = el('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'assistant') }, m.text);
+    const text = m.role === 'user' ? String(m.text || '') : cleanText(m.text);
+    const n = el('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'assistant') }, m.role === 'user' ? text : linkifyRefs(text || '–'));
     if (m.role !== 'user') { n.append(srcLabel(m)); if (m.evidence_ids && m.evidence_ids.length) n.append(evChips(m.evidence_ids)); }
     msgsEl.append(n);
     if (m.role !== 'user' && m.followups && m.followups.length && m === chat.messages[chat.messages.length - 1]) {
@@ -100,6 +110,6 @@ export async function send(text) {
 }
 
 /** Context helper for flags: everything the answer template needs. */
-export function flagContext(f, extra = {}) { return { object_type: 'flag', object_id: f.id, flag_id: f.id, kind: f.kind, group_id: f.group_id, batch_id: f.batch_id, title: f.statement, ...extra }; }
+export function flagContext(f, extra = {}) { return { object_type: 'flag', object_id: f.id, flag_id: f.id, kind: f.kind, group_id: f.group_id, batch_id: f.batch_id, title: cleanText(f.statement), ...extra }; }
 export function diagnosisContext(d) { return { object_type: 'diagnosis', object_id: d.id, diagnosis_id: d.id, flag_id: d.flag_ids && d.flag_ids[0], group_id: d.group_id, title: d.fault_type }; }
 export function signalContext(s) { return { object_type: 'signal', object_id: s.id, signal_id: s.id, title: s.structural_role }; }

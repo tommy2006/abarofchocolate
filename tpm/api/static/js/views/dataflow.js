@@ -1,5 +1,5 @@
 /* View 7: data flow — profile switch with confirmation, model status, plain statement, egress ledger. */
-import { state, t, el, clear, api, runApi, fmt, chip, section, table, viewHead, empty, hiddenHint, kv, st, confirmDialog, toast, errText, bus, roleAllows, notice } from '../core.js';
+import { state, t, el, clear, api, runApi, fmt, chip, section, table, viewHead, empty, hiddenHint, kv, st, confirmDialog, toast, errText, bus, roleAllows, notice, linkifyRefs, cleanText, refLink } from '../core.js';
 
 export async function render(main) {
   const view = el('div', { class: 'view' });
@@ -22,7 +22,7 @@ export async function render(main) {
         const r = await api('/api/settings', { method: 'PUT', body: { profile: name } });
         if (r.ok) { toast(t('flow.changed', { p: name }), 'ok'); const ns = await api('/api/settings'); if (ns.ok) { state.settings = ns.data; Object.assign(s, ns.data); } bus.emit('settings.changed', state.settings); renderCards(); renderStatement(); }
         else toast(errText(r), 'fail');
-      } }, el('span', { class: 'name' }, name, st(p.allow_external ? 'warn' : 'ok', p.allow_external ? t('status.egressPossible') : t('status.noEgress'))), el('span', { class: 'desc', text: p.description || '' }), el('span', { class: 'desc', text: `${t('flow.guard')}: ${p.guard_strict ? t('flow.strict') : t('flow.standard')}` })));
+      } }, el('span', { class: 'name' }, el('span', { class: 'pname', text: name }), st(p.allow_external ? 'warn' : 'ok', p.allow_external ? t('status.egressPossible') : t('status.noEgress'))), el('span', { class: 'desc', text: p.description || '' }), el('span', { class: 'desc', text: `${t('flow.guard')}: ${p.guard_strict ? t('flow.strict') : t('flow.standard')}` })));
     }
   };
   renderCards();
@@ -49,7 +49,8 @@ export async function render(main) {
   ss.body.append(stmt);
   async function renderStatement() {
     const r = state.run ? await runApi('/egress') : { ok: false };
-    stmt.textContent = r.ok && r.data.statement ? r.data.statement : (s.allow_external ? t('status.egressPossible') : t('status.noEgress'));
+    clear(stmt);
+    stmt.append(linkifyRefs(cleanText(r.ok && r.data.statement ? r.data.statement : (s.allow_external ? t('status.egressPossible') : t('status.noEgress')))));
   }
   await renderStatement();
 
@@ -59,14 +60,14 @@ export async function render(main) {
   if (!state.run) ls.body.append(el('div', { class: 'notice warn', text: t('runs.noRunHint') }));
   else if (!(E.ledger || []).length) ls.body.append(empty(t('flow.noLedger')));
   else ls.body.append(table({ columns: [
-    { label: '', key: 'id' }, { label: t('log.ts'), render: (r) => fmt.ts(r.ts) }, { label: t('flow.task'), key: 'task' },
+    { label: '', render: (r) => refLink('egress', r.id, r.id.replace('EGR-', '#')) }, { label: t('log.ts'), render: (r) => fmt.ts(r.ts) }, { label: t('flow.task'), key: 'task' },
     { label: t('flow.route'), render: (r) => chip(r.route, r.route === 'external' ? 'warn' : 'ok') },
-    { label: t('flow.model'), render: (r) => `${r.provider} ${r.model}` },
-    { label: t('flow.artifacts'), render: (r) => (r.artifact_types || []).join(', ') },
+    { label: t('flow.model'), cls: 'wrap', render: (r) => `${r.provider} ${r.model}` },
+    { label: t('flow.artifacts'), cls: 'wrap', render: (r) => (r.artifact_types || []).join(', ') },
     { label: t('flow.bytes'), render: (r) => fmt.bytes(r.payload_bytes), num: true },
-    { label: t('flow.guardResult'), render: (r) => el('span', {}, chip(r.guard_result, { allowed: 'ok', blocked: 'fail', fallback: 'warn' }[r.guard_result] || ''), r.guard_reason ? el('span', { class: 'dim small', text: ' ' + r.guard_reason }) : null) },
+    { label: t('flow.guardResult'), cls: 'wrap', render: (r) => el('span', {}, chip(r.guard_result, { allowed: 'ok', blocked: 'fail', fallback: 'warn' }[r.guard_result] || ''), r.guard_reason ? el('span', { class: 'dim small', text: ' ' + r.guard_reason }) : null) },
     { label: t('common.status'), render: (r) => st(r.ok ? 'ok' : 'fail', r.ok ? 'ok' : (r.error || 'error')) },
-    { label: t('flow.preview'), cls: 'wrap', render: (r) => el('span', { class: 'small dim', text: r.payload_preview || '' }) },
+    { label: t('flow.preview'), cls: 'wrap', render: (r) => el('span', { class: 'small dim preview' }, linkifyRefs(r.payload_preview || '')) },
   ], rows: (E.ledger || []).slice().reverse(), pageSize: 20 }));
   const hh = hiddenHint(view); if (hh) view.append(hh);
   return view;

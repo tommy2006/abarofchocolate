@@ -1339,37 +1339,70 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
     # ---------- misc ----------
     @app.post("/api/demo", status_code=202)
     async def create_demo(request: Request) -> dict[str, Any]:
-        """Write a demo run from synthetic data (tests/fixtures/fake_workspace.py) in the background."""
+        """Start a demo run: the REAL pipeline on ``samples/demo_process.csv`` (or ``path`` from the body)
+        in a background thread, exactly like ``POST /api/runs`` with a path. Answers at once with the run
+        id; progress arrives over ``/events`` like any other run. The synthetic fixture workspace
+        (tests/fixtures/fake_workspace.py) is for tests only and is no longer used here."""
         try:
             body = await request.json()
         except Exception:
             body = {}
-        run_id = body.get("run_id") or time.strftime("run_demo_%Y%m%d_%H%M%S")
-        try:
-            from tests.fixtures.fake_workspace import build_fake_workspace
-        except Exception as e:
-            raise HTTPException(501, f"demo fixture not available: {e}")
+        body = dict(body or {})
+        run_id = str(body.pop("run_id", None) or time.strftime("run_demo_%Y%m%d_%H%M%S"))
+        if "/" in run_id or "\\" in run_id or run_id.startswith("."):
+            raise HTTPException(400, "invalid run_id")
+        src_raw = body.pop("path", None) or body.pop("source_path", None)
+        if src_raw:
+            src = Path(str(src_raw))
+        else:
+            src = Path(__file__).resolve().parents[2] / "samples" / "demo_process.csv"
+            if not src.exists():  # no sample shipped: write one from the shared synthetic generator
+                try:
+                    from tests.fixtures.synth import make_synthetic
 
-        def worker() -> None:
-            job = state.jobs[run_id]
-            job["state"] = "running"
-            try:
-                ws = build_fake_workspace(state.settings, run_id=run_id, n_groups=int(body.get("groups") or 12), n_samples=int(body.get("samples") or 200))
-                ws.close()
-                job["state"] = "done"
-            except Exception as e:
-                job["state"] = "failed"
-                job["error"] = str(e)
-            job["finished_at"] = now_iso()
-            state.emit(run_id, "status", {"state": job["state"]})
+                    df, _truth = make_synthetic(n_groups=12, n_samples=200, seed=1, with_timestamp=True)
+                    src = state.settings.workspace_path / "_demo_source" / "demo_process.csv"
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    df.to_csv(src, index=False)
+                except Exception as e:
+                    raise HTTPException(501, f"no demo data available (samples/demo_process.csv missing and the synthetic generator failed: {e})")
+        if not src.exists():
+            raise HTTPException(400, f"path not found: {src}")
+        profile = body.pop("profile", None) or None
+        if profile and profile not in state.settings.profiles:
+            raise HTTPException(400, f"unknown profile {profile!r}")
+        options: dict[str, Any] = {k: v for k, v in body.items() if v not in ("", None)}
+        for k in ("has_header", "transposed"):
+            if k in options and isinstance(options[k], str):
+                options[k] = options[k].lower() in ("1", "true", "yes", "on")
+        options.setdefault("has_header", True)
+        existing = state.jobs.get(run_id)
+        if existing and existing.get("state") in ("pending", "running"):
+            raise HTTPException(409, f"run {run_id} is already processing")
+        ws = Workspace(run_id=run_id, settings=state.settings)
+        st = RunStatus(run_id=run_id, source_path=str(src), profile=profile or state.settings.profile, state="pending", options=options, stages=[StageStatus(stage=s, state="pending") for s in STAGE_NAMES])
+        ws.set_status(st)
+        with state.lock:
+            state.workspaces[run_id] = ws
+        _start_job(run_id, str(src), options, profile)
+        # The Workspace registered above was opened before the pipeline wrote evidence.jsonl / inferences.jsonl
+        # and a registry is loaded once at construction, so it would answer "missing" for every evidence id
+        # for the rest of the process. Drop it when the job ends; the next request re-opens the finished run.
+        th = state.jobs[run_id].get("thread")
 
-        state.jobs[run_id] = {"state": "pending", "run_id": run_id, "source_path": "synthetic", "created_at": now_iso()}
-        threading.Thread(target=worker, name=f"tpm-demo-{run_id}", daemon=True).start()
-        for _ in range(100):  # the fixture takes ~1 s; wait briefly so the run appears in the list
-            if state.jobs[run_id]["state"] in ("done", "failed"):
-                break
-            await asyncio.sleep(0.1)
-        return {"run_id": run_id, "state": state.jobs[run_id]["state"]}
+        def release() -> None:
+            if th is not None:
+                th.join()
+            with state.lock:
+                old = state.workspaces.pop(run_id, None)
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=release, name=f"tpm-demo-release-{run_id}", daemon=True).start()
+        return {"run_id": run_id, "state": "pending", "source_path": str(src), "profile": st.profile, "options": options, "demo": True}
 
     @app.get("/api/runs/{run_id}/export")
     def export_run(run_id: str):

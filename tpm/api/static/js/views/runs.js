@@ -71,11 +71,12 @@ export async function render(main) {
     await refreshRuns();
   });
   demoBtn.addEventListener('click', async () => {
+    // runs the real pipeline on samples/demo_process.csv in the background (same path as "Start analysis")
     demoBtn.disabled = true;
-    const r = await api('/api/demo', { method: 'POST', body: {} });
+    const r = await api('/api/demo', { method: 'POST', body: { language: opts.language.value, profile: opts.profile.value } });
     demoBtn.disabled = false;
     if (!r.ok) { toast(errText(r), 'fail'); return; }
-    toast(t('runs.started', { id: r.data.run_id }), 'ok');
+    toast(t('runs.demoStarted', { id: r.data.run_id, src: (r.data.source_path || '').split(/[\\/]/).pop() }), 'ok');
     await refreshRuns();
     bus.emit('run.select', r.data.run_id);
   });

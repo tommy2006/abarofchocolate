@@ -1,6 +1,6 @@
 /* Trustworthy Process Monitor — frontend entry. Boot, router (hash), numbered rail, data-control
    lamps, role picker, language + theme switch, SSE subscription for the selected run. */
-import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows } from './js/core.js';
+import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows, navigate, recordNavigation, installRefHandler } from './js/core.js';
 import { initChat } from './js/chat.js';
 import * as runs from './js/views/runs.js';
 import * as understanding from './js/views/understanding.js';
@@ -11,6 +11,8 @@ import * as assessor from './js/views/assessor.js';
 import * as log from './js/views/log.js';
 import * as dataflow from './js/views/dataflow.js';
 import * as report from './js/views/report.js';
+
+export { navigate };
 
 const VIEWS = [
   { id: 'runs', num: '0', key: 'nav.runs', mod: runs },
@@ -33,11 +35,8 @@ function parseHash() {
   const params = Object.fromEntries(new URLSearchParams(qs || ''));
   return { view: path || 'runs', params };
 }
-export function navigate(view, params) {
-  const qs = params ? '?' + new URLSearchParams(params).toString() : '';
-  location.hash = `#/${view}${qs}`;
-}
 async function route() {
+  recordNavigation(location.hash || '#/runs');
   const { view, params } = parseHash();
   const def = VIEWS.find((v) => v.id === view) || VIEWS[0];
   state.view = def.id;
@@ -52,6 +51,7 @@ async function route() {
   main.focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
+bus.on('route.same', () => route());
 
 // ---------------------------------------------------------------- rail
 function renderRail() {
@@ -130,7 +130,7 @@ function subscribe() {
   if (!state.run || !window.EventSource) return;
   const es = new EventSource(`/api/runs/${encodeURIComponent(state.run)}/events`);
   state.es = es;
-  es.addEventListener('status', (e) => { try { const s = JSON.parse(e.data); const prev = state.runStatus; state.runStatus = Object.assign({}, prev || {}, s); bus.emit('status', state.runStatus); if (prev && prev.state !== 'done' && s.state === 'done') toast(t('toast.runDone', { id: s.run_id, state: s.state }), 'ok'); if (prev && prev.state !== 'failed' && s.state === 'failed') toast(t('toast.runDone', { id: s.run_id, state: s.state }), 'fail'); } catch { /* ignore */ } });
+  es.addEventListener('status', (e) => { try { const s = JSON.parse(e.data); const prev = state.runStatus; state.runStatus = Object.assign({}, prev || {}, s); bus.emit('status', state.runStatus); if (prev && prev.state !== 'done' && s.state === 'done') { state.cache.clear(); toast(t('toast.runDone', { id: s.run_id, state: s.state }), 'ok'); } if (prev && prev.state !== 'failed' && s.state === 'failed') toast(t('toast.runDone', { id: s.run_id, state: s.state }), 'fail'); } catch { /* ignore */ } });
   es.addEventListener('progress', (e) => { try { const p = JSON.parse(e.data); if (state.runStatus) { const sg = (state.runStatus.stages || []).find((x) => x.stage === p.stage); if (sg) { sg.progress = p.progress; sg.message = p.message; sg.state = 'running'; bus.emit('status', state.runStatus); } } } catch { /* ignore */ } });
   es.addEventListener('flags', (e) => { try { const d = JSON.parse(e.data); toast(t('toast.newFlags', { n: (d.latest || []).length }), 'warn'); bus.emit('flags', d); } catch { /* ignore */ } });
   es.addEventListener('batch', (e) => { try { const d = JSON.parse(e.data); toast(t('toast.batch', { id: d.batch_id, n: d.n_rows })); bus.emit('batch', d); } catch { /* ignore */ } });
@@ -145,7 +145,14 @@ function renderRunSelect() {
   sel.value = state.run || '';
 }
 
-function renderAll() { renderRail(); renderLamps(); renderLangs(); renderUser(); renderRunSelect(); applyTheme(); document.querySelectorAll('[data-i18n]').forEach((n) => { n.textContent = t(n.dataset.i18n); }); }
+function renderAll() { renderRail(); renderLamps(); renderLangs(); renderUser(); renderRunSelect(); applyTheme(); document.querySelectorAll('[data-i18n]').forEach((n) => { n.textContent = t(n.dataset.i18n); }); syncTopbarHeight(); }
+/** The lamps may wrap to a second row on narrow screens; keep the sticky rail/drawer offsets in sync with the real bar height. */
+function syncTopbarHeight() {
+  const bar = document.getElementById('topbar');
+  const h = bar ? bar.offsetHeight : 0;
+  if (h > 0) document.documentElement.style.setProperty('--topbar-h', h + 'px');
+}
+window.addEventListener('resize', syncTopbarHeight);
 
 // ---------------------------------------------------------------- boot
 async function boot() {
@@ -159,6 +166,7 @@ async function boot() {
   state.runs = rr.ok ? rr.data.runs || [] : [];
   renderAll();
   initChat();
+  installRefHandler();
   document.getElementById('theme-btn').addEventListener('click', () => { state.theme = { auto: 'light', light: 'dark', dark: 'auto' }[state.theme]; store.set('theme', state.theme); applyTheme(); bus.emit('theme.changed', state.theme); route(); });
   document.getElementById('user-btn').addEventListener('click', () => pickRole().then(() => route()));
   document.getElementById('run-select').addEventListener('change', (e) => selectRun(e.target.value || null));

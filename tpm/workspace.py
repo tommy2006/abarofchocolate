@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -75,44 +76,92 @@ class _Registry:
         self._lock = threading.RLock()
         self._n = 0
         self._cache: dict[str, Any] = {}
-        if self.path.exists():
-            with open(self.path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    obj = self.model(**json.loads(line))
-                    self._cache[obj.id] = obj
+        self._offset = 0  # bytes already loaded; the pipeline (another Workspace object/thread) keeps appending
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Load lines appended since the last load, so an API-side registry sees what the pipeline wrote after
+        the Workspace was opened. A shrunken file (rewrite) is reloaded from the start."""
+        if not self.path.exists():
+            return
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return
+        with self._lock:
+            if size < self._offset:
+                self._cache.clear()
+                self._n = 0
+                self._offset = 0
+            if size == self._offset:
+                return
+            try:
+                with open(self.path, "rb") as f:
+                    f.seek(self._offset)
+                    data = f.read()
+            except OSError:
+                return
+            end = data.rfind(b"\n")  # only complete lines; a partial tail is read next time
+            if end < 0:
+                return
+            chunk = data[: end + 1]
+            for raw in chunk.split(b"\n"):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = self.model(**json.loads(line.decode("utf-8")))
+                except Exception:
+                    continue
+                self._cache[obj.id] = obj
+                try:
                     self._n = max(self._n, int(obj.id.split("-")[-1]))
+                except ValueError:
+                    pass
+            self._offset += len(chunk)
 
     def next_id(self) -> str:
         with self._lock:
+            self._refresh()
             self._n += 1
             return f"{self.prefix}-{self._n:06d}"
 
     def add_obj(self, obj: Any) -> Any:
         with self._lock:
             self._cache[obj.id] = obj
+            line = obj.model_dump_json() + "\n"
             with open(self.path, "a", encoding="utf-8") as f:
-                f.write(obj.model_dump_json() + "\n")
+                f.write(line)
+            self._offset += len(line.encode("utf-8"))
         return obj
 
     def get(self, id_: str) -> Optional[Any]:
-        return self._cache.get(id_)
+        obj = self._cache.get(id_)
+        if obj is None:
+            self._refresh()
+            obj = self._cache.get(id_)
+        return obj
 
     def all(self) -> list[Any]:
+        self._refresh()
         return list(self._cache.values())
 
     def update(self, obj: Any) -> Any:
         """Rewrite the file with an updated object (rare: human status changes)."""
         with self._lock:
+            self._refresh()
             self._cache[obj.id] = obj
             with open(self.path, "w", encoding="utf-8") as f:
                 for o in self._cache.values():
                     f.write(o.model_dump_json() + "\n")
+            try:
+                self._offset = self.path.stat().st_size
+            except OSError:
+                pass
         return obj
 
     def __len__(self) -> int:
+        self._refresh()
         return len(self._cache)
 
 
@@ -167,8 +216,16 @@ class Workspace:
         p = self.path(artifact)
         if not p.exists():
             return default
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        # Windows: a concurrent atomic replace (tmp.replace(p)) can make the open fail for an instant
+        for attempt in range(3):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (PermissionError, FileNotFoundError, json.JSONDecodeError):
+                if attempt == 2:
+                    return default
+                time.sleep(0.05)
+        return default
 
     def append_jsonl(self, artifact: str, obj: Any) -> None:
         p = self.path(artifact)
