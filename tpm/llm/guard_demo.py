@@ -415,7 +415,7 @@ def run_demo(ws: Any, settings: Settings, profile: Optional[str] = None, send: b
 _TEXT: dict[str, dict[str, str]] = {
     "en": {
         "title": "Egress guard demonstration",
-        "intro": "Made on {created} with `python -m tpm guard-demo` (profile {profile}, {strict}). {sent_note} The unsafe payload is never sent.",
+        "intro": "Made on {created} (profile {profile}, {strict}; the Data flow page or `python -m tpm guard-demo`). {sent_note} The unsafe payload is never sent.",
         "strict": "strict guard", "nonstrict": "non-strict guard",
         "not_sent": "Nothing was sent.", "was_sent": "The real payload was then sent once (--send): {detail}.",
         "src_diagnosis": "the narrative payload of {id} (the strongest diagnosis), as the diagnose stage builds it",
@@ -449,7 +449,7 @@ _TEXT: dict[str, dict[str, str]] = {
     },
     "fi": {
         "title": "Tietovirran vartijan (egress guard) esittely",
-        "intro": "Tehty {created} komennolla `python -m tpm guard-demo` (profiili {profile}, {strict}). {sent_note} Vaarallista testikuormaa ei lähetetä koskaan.",
+        "intro": "Tehty {created} (profiili {profile}, {strict}; Tietovirta-sivu tai `python -m tpm guard-demo`). {sent_note} Vaarallista testikuormaa ei lähetetä koskaan.",
         "strict": "tiukka vartija", "nonstrict": "ei-tiukka vartija",
         "not_sent": "Mitään ei lähetetty.", "was_sent": "Todellinen kuorma lähetettiin sen jälkeen kerran (--send): {detail}.",
         "src_diagnosis": "diagnoosin {id} (vahvin diagnoosi) selityskuorma sellaisena kuin diagnoosivaihe sen rakentaa",
@@ -483,7 +483,7 @@ _TEXT: dict[str, dict[str, str]] = {
     },
     "sv": {
         "title": "Demonstration av utflödesvakten (egress guard)",
-        "intro": "Gjord {created} med `python -m tpm guard-demo` (profil {profile}, {strict}). {sent_note} Den osäkra testnyttolasten skickas aldrig.",
+        "intro": "Gjord {created} (profil {profile}, {strict}; sidan Dataflöde eller `python -m tpm guard-demo`). {sent_note} Den osäkra testnyttolasten skickas aldrig.",
         "strict": "strikt vakt", "nonstrict": "icke-strikt vakt",
         "not_sent": "Inget skickades.", "was_sent": "Den verkliga nyttolasten skickades sedan en gång (--send): {detail}.",
         "src_diagnosis": "förklaringsnyttolasten för {id} (den starkaste diagnosen), så som diagnossteget bygger den",
