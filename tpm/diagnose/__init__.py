@@ -41,6 +41,15 @@ def _load_context(ws, settings) -> dict[str, Any]:
     detect_meta = ws.read_json("detect_meta", {}) or {}
     detect_meta.setdefault("window", int(settings.detect.window))
     patterns = {p.get("id"): p for p in (ws.read_json("patterns", []) or [])}
+    try:  # name recurring patterns from the plant's list of known failure types, or say "cannot name"
+        from .fault_names import load_catalogue, name_patterns
+
+        cat = load_catalogue(ws)
+        if patterns and cat:
+            for pid, hyp in name_patterns(patterns, ws.read_json("signals", []) or [], cat).items():
+                patterns[pid]["hypothesis"] = hyp
+    except Exception as e:
+        ws.log.record("system:diagnose", "warning", "dataset", "patterns", {"naming": str(e)[:200]})
     propagation = ws.read_json("propagation", {}) or {}
     human_labels = [h for h in ws.read_jsonl("human_labels.jsonl") if isinstance(h, dict)]
     try:

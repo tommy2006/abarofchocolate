@@ -67,7 +67,10 @@ def _fault_type(main: Flag, pattern: Optional[dict[str, Any]], human_labels: lis
     if pattern:
         if pattern.get("name"):
             return str(pattern["name"]), None
-        return f"{pattern['id']} (unnamed)", None
+        hyp = pattern.get("hypothesis") or {}
+        if hyp.get("named"):
+            return f"{pattern['id']}: possibly {hyp.get('name')}", None
+        return f"{pattern['id']} ({'cannot name' if hyp else 'unnamed'})", None
     spread = det.get("spread")
     if spread:
         grp = f" (cluster {spread['cluster']})" if spread.get("cluster") else ""
@@ -128,6 +131,8 @@ def _steps(main: Flag, ranked: list[SignalContribution], onset_flag: Optional[Fl
     steps.append(f"How confident we are: {conf:.0%} (a heuristic score, not a calibrated probability: it combines detector agreement, how far and how long the score stayed above the threshold, and the baseline's confidence, minus a share for every uncertainty listed). It rests on {main.score:.1f}x the calibrated threshold over {main.row_end - main.row_start + 1} rows, detectors {', '.join(dets) if dets else 'the ensemble'} scored out-of-fold (no model saw this group while fitting)." + (f" Uncertainties: {'; '.join(uncertainty[:3])}." if uncertainty else ""))
     if pattern:
         steps.append(f"Similar events: this matches {pattern['id']}{' (' + pattern['name'] + ')' if pattern.get('name') else ''}, seen {pattern.get('n_events', 0)} times in {len(pattern.get('groups_affected', []))} group(s); pattern classifier reliability {pattern.get('classifier_reliability') if pattern.get('classifier_reliability') is not None else 'n/a'}.")
+        if (pattern.get("hypothesis") or {}).get("text"):
+            steps.append(f"Which known failure type: {pattern['hypothesis']['text']}.")
     checks = {
         "sensor": f"What to check: inspect the instrument behind {ranked[0].signal if ranked else 'the leading signal'} (wiring, freeze, calibration) and compare it with its peers {', '.join(s.signal for s in ranked[1:3]) or 'in the same cluster'} before acting on the process.",
         "data": "What to check: the data path (units, scaling, transmission gaps) of the leading signal in this batch; re-run detection once the data-quality issue is fixed.",
