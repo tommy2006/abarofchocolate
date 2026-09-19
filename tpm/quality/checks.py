@@ -49,7 +49,7 @@ from ._common import (
 
 CATEGORY_OF = {
     "missing": "completeness", "dropout": "completeness", "empty_rows": "completeness",
-    "out_of_range": "validity", "impossible_value": "validity", "unit_shift": "validity", "quantization_change": "validity",
+    "out_of_range": "validity", "impossible_value": "validity", "unit_shift": "validity", "quantization_change": "validity", "local_spike": "validity",
     "duplicate_rows": "consistency", "duplicate_key": "consistency", "stuck": "consistency", "saturation": "consistency",
     "sign_violation": "consistency", "relation_break": "consistency",
     "gap": "timeliness", "out_of_order": "timeliness", "duplicate_timestamp": "timeliness", "irregular_sampling": "timeliness", "stale": "timeliness",
@@ -57,6 +57,8 @@ CATEGORY_OF = {
 CATEGORIES = ["completeness", "validity", "consistency", "timeliness"]
 CHECKABLE_ROLES = {"continuous_measured", "actuator_like", "held_sampled", "derived_redundant", "unknown"}
 MAX_EVENTS = 12  # row ranges kept per check (aggregates only)
+MAX_POINTS = 200  # per-run deviations kept per check for the suspicious-rows list (row ids + z, never raw values)
+SPIKE_ROLES = {"continuous_measured", "derived_redundant", "unknown"}
 ABSURD_ABS = 1e30
 
 
@@ -70,6 +72,11 @@ class _SigAcc:
     oor_maxz: float = 0.0
     oor_rows: list[tuple[int, int]] = field(default_factory=list)
     oor_examples: list[tuple[int, float]] = field(default_factory=list)
+    oor_points: list[tuple[int, int, float]] = field(default_factory=list)  # (row_start, row_end, max robust z) per out-of-range run
+    spike_n: int = 0
+    spike_maxz: float = 0.0
+    spike_rows: list[tuple[int, int]] = field(default_factory=list)
+    spike_points: list[tuple[int, int, float, str]] = field(default_factory=list)  # (row_start, row_end, local z, direction)
     imp_n: int = 0
     imp_rows: list[tuple[int, int]] = field(default_factory=list)
     shift_windows: list[tuple[int, int, int]] = field(default_factory=list)  # (row_start, row_end, k)
@@ -166,6 +173,11 @@ class BatchAccumulator:
                 self.group_ids.update(str(g) for g in pd.unique(df[GROUP_COL].dropna()))
             except Exception:
                 pass
+        if GROUP_COL in df.columns and n > 1:
+            gv = df[GROUP_COL].to_numpy()
+            self._boundary = np.concatenate([[True], gv[1:] != gv[:-1]])
+        else:
+            self._boundary = None
         colmap = resolve_columns(df.columns, self.catalog)
         sigs = [s for s in numeric_signals(self.catalog) if s.alias in colmap]
         all_nan = np.ones(n, dtype=bool) if sigs else np.zeros(n, dtype=bool)
@@ -271,8 +283,13 @@ class BatchAccumulator:
             if len(acc.oor_examples) < 5:
                 idx = np.flatnonzero(oor)[: 5 - len(acc.oor_examples)]
                 acc.oor_examples.extend((int(rows[i]), float(x[i])) for i in idx)
+            for a, b in contiguous_runs(oor):
+                if len(acc.oor_points) >= MAX_POINTS:
+                    break
+                acc.oor_points.append((int(rows[a]), int(rows[b]), round(float(np.nanmax(z[a : b + 1])), 2)))
         if self.fast:
             return
+        self._local_spikes(acc, s, x, ok & ~imp, rows, float(med), float(scale))
         # unit shift: window median vs global median ~ 10^k (windows of 25 samples; shorter shifts are caught as out_of_range)
         n = x.size
         w = 25 if n >= 50 else max(5, n // 2)
@@ -309,6 +326,60 @@ class BatchAccumulator:
                             if len(acc.quant_windows) >= MAX_EVENTS:
                                 break
                             acc.quant_windows.append((int(rows[a * w]), int(rows[min(n - 1, (b + 1) * w - 1)]), float(np.nanmean(uniq[a : b + 1]) / ref)))
+
+    def _local_spikes(self, acc: _SigAcc, s: SignalInfo, x: np.ndarray, ok: np.ndarray, rows: np.ndarray, med: float, scale: float) -> None:
+        """Local spike check: a reading that jumps away from its own neighbourhood (rolling median) and comes
+        straight back, even when it stays inside the signal's global range. The noise scale is local too (rolling
+        median of the absolute residual), so a noisy regime does not turn ordinary readings into spikes. A spike
+        must (1) be at most `spike_max_len` readings long, (2) return to the neighbourhood on both sides (a step or
+        a fault onset does not), (3) be isolated in time (a burst of candidates is a regime change, handled by the
+        detectors) and (4) not sit at a group boundary. Step-like and sample-and-hold signals are skipped (jumps are
+        their normal behaviour); strided reads are skipped (neighbours missing)."""
+        q = self.q
+        w = int(getattr(q, "spike_window", 7))
+        k = float(getattr(q, "spike_sigma", 10.0))
+        if self.stride != 1 or s.role not in SPIKE_ROLES or x.size < max(60, 3 * w) or scale <= 0:
+            return
+        from scipy.ndimage import median_filter, uniform_filter1d
+
+        filled = np.where(ok & np.isfinite(x), x, med)
+        # mirror padding: "nearest" replicates the last residual, which is often exactly 0 (the last value is the
+        # median of its own padded window), and made the local noise collapse near chunk ends
+        r = filled - median_filter(filled, size=w, mode="mirror")
+        a = np.abs(r)
+        # local noise = rolling MEAN absolute residual (x 1.2533 = sigma for Gaussian noise): O(n), and unlike a
+        # rolling median it cannot collapse to 0 when many residuals are exactly 0
+        # leave each reading out of its own noise estimate, so a spike does not inflate the scale it is judged by
+        loc = 1.2533 * np.maximum(uniform_filter1d(a, size=51, mode="mirror") * 51.0 - a, 0.0) / 50.0
+        glob = 1.2533 * float(np.mean(a))
+        floor = float(getattr(q, "spike_min_scale", 0.15)) * scale / max(k, 1e-9)  # visible at the signal's own scale
+        zloc = a / np.maximum(np.maximum(loc, 0.5 * glob), max(floor, 1e-12))
+        cand = [(c0, c1) for c0, c1 in contiguous_runs((zloc > k) & ok)]
+        if not cand:
+            return
+        starts = np.array([c0 for c0, _ in cand])
+        max_len = int(getattr(q, "spike_max_len", 2))
+        boundary = getattr(self, "_boundary", None)
+        n = x.size
+        for c0, c1 in cand:
+            if c1 - c0 + 1 > max_len:
+                continue  # a longer excursion is a level change, not a spike
+            if boundary is not None and boundary[max(0, c0 - 3) : c1 + 4].any():
+                continue  # level jumps between groups are not glitches
+            if int((np.abs(starts - c0) <= 20).sum()) - 1 >= 2:
+                continue  # burst of candidates: regime change, not an isolated reading
+            peak = float(a[c0 : c1 + 1].max())
+            left = float(a[c0 - 1]) if c0 > 0 else 0.0
+            right = float(a[c1 + 1]) if c1 + 1 < n else 0.0
+            if max(left, right) >= 0.4 * peak:
+                continue  # does not come straight back
+            zmax = float(zloc[c0 : c1 + 1].max())
+            acc.spike_n += c1 - c0 + 1
+            acc.spike_maxz = max(acc.spike_maxz, zmax)
+            if len(acc.spike_rows) < MAX_EVENTS:
+                acc.spike_rows.append((int(rows[c0]), int(rows[c1])))
+            if len(acc.spike_points) < MAX_POINTS:
+                acc.spike_points.append((int(rows[c0]), int(rows[c1]), round(zmax, 2), "up" if r[c0 + int(np.argmax(a[c0 : c1 + 1]))] > 0 else "down"))
 
     def _runs(self, acc: _SigAcc, s: SignalInfo, st: dict[str, Any], x: np.ndarray, rows: np.ndarray) -> None:
         starts, lengths, values = value_runs(x)
@@ -470,7 +541,15 @@ class BatchAccumulator:
             sev = 0.4 + 0.4 * min(1.0, frac / 0.05) + 0.2 * min(1.0, (ratio - 1.0) / 10.0)
             ev = _stride_events(acc.oor_rows, self.stride)
             ex = ", ".join(f"row {r}: {fmt_num(v)}" for r, v in acc.oor_examples[:3])
-            out.append(self._make("out_of_range", "validity", [alias], status, sev, f"{alias} has {acc.oor_n * self.stride} values beyond {q.range_sigma:g} robust sigma of its usual range in batch {self.batch_id} (max {acc.oor_maxz:.0f} sigma; e.g. {ex})", {"n": acc.oor_n * self.stride, "fraction": round(frac, 6), "max_robust_z": round(acc.oor_maxz, 2), "events": ev, "examples": acc.oor_examples}, row_start=ev[0][0] if ev else None, row_end=ev[-1][1] if ev else None))
+            out.append(self._make("out_of_range", "validity", [alias], status, sev, f"{alias} has {acc.oor_n * self.stride} values beyond {q.range_sigma:g} robust sigma of its usual range in batch {self.batch_id} (max {acc.oor_maxz:.0f} sigma; e.g. {ex})", {"n": acc.oor_n * self.stride, "fraction": round(frac, 6), "max_robust_z": round(acc.oor_maxz, 2), "events": ev, "examples": acc.oor_examples, "points": [list(pt) for pt in acc.oor_points]}, row_start=ev[0][0] if ev else None, row_end=ev[-1][1] if ev else None))
+        if acc.spike_n:
+            ev = list(acc.spike_rows)
+            frac = acc.spike_n / n
+            status = "fail" if acc.spike_n >= 10 else "warn"
+            sev = float(min(0.7, 0.25 + 0.03 * acc.spike_n + 0.01 * min(20.0, acc.spike_maxz)))
+            first = acc.spike_points[0] if acc.spike_points else None
+            eg = f"; e.g. row {first[0]}, {first[2]:.0f} times the local noise, {first[3]}" if first else ""
+            out.append(self._make("local_spike", "validity", [alias], status, sev, f"{alias} has {acc.spike_n} isolated reading(s) in batch {self.batch_id} that jump away from their neighbours and come straight back (up to {acc.spike_maxz:.0f} times the local noise{eg}). Each is either a glitch or a manipulated value; the data alone cannot tell which.", {"n": acc.spike_n, "fraction": round(frac, 8), "max_local_z": round(acc.spike_maxz, 2), "window": int(getattr(q, "spike_window", 7)), "events": ev, "points": [list(p) for p in acc.spike_points]}, row_start=ev[0][0] if ev else None, row_end=ev[-1][1] if ev else None))
         if acc.shift_windows:
             ks = sorted({k for _, _, k in acc.shift_windows})
             ev = [(a, b) for a, b, _ in acc.shift_windows]

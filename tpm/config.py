@@ -83,6 +83,10 @@ class QualityConfig(BaseModel):
     missing_warn: float = 0.02
     missing_fail: float = 0.20
     range_sigma: float = 6.0
+    spike_sigma: float = 10.0  # local spike: distance from the rolling median, in units of local noise (residuals are heavy-tailed: 6 gave false alarms)
+    spike_min_scale: float = 0.15  # ...and at least this share of the signal's own robust spread
+    spike_window: int = 7  # rolling-median window (samples)
+    spike_max_len: int = 2  # a local spike is at most this many consecutive readings
     gap_factor: float = 3.0
     trust_fail_threshold: float = 0.5
     critical_signal_fraction: float = 0.3

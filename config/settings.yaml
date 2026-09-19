@@ -96,6 +96,10 @@ quality:
   missing_warn: 0.02
   missing_fail: 0.20
   range_sigma: 6                    # robust z beyond this is out-of-range
+  spike_sigma: 10                   # local spike: distance from the rolling median in units of local noise
+  spike_min_scale: 0.15             # ...and at least this share of the signal's own robust spread
+  spike_window: 7                   # rolling-median window (samples)
+  spike_max_len: 2                  # a local spike is at most this many consecutive readings
   gap_factor: 3                     # timestamp gap > gap_factor * median period
   trust_fail_threshold: 0.5         # trust_score below this => "data cannot be trusted" banner
   critical_signal_fraction: 0.3     # if > this share of signals fail, batch is untrusted
