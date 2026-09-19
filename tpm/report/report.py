@@ -54,7 +54,7 @@ LLM_MAX_TOKENS = 1600  # the narrative JSON needs ~600-1000 tokens; 700 cut it m
 LLM_WAIT_S = 75.0  # blocking callers (pipeline stage, CLI) wait at most this long for the model summary
 LLM_RETRY_S = 600.0  # after a failed model call, do not try again for this long (unless the artifacts change)
 # artifacts whose change makes a cached report stale / a cached model summary stale
-_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger", "suspicious_rows.json", "group_scores.json")
+_REPORT_INPUTS = ("meta", "status", "schema", "signals", "relations", "domain", "evidence", "inferences", "checks", "trust", "batches", "rules", "scores", "flags", "patterns", "baseline", "detect_meta", "evaluation", "diagnoses", "assessor", "egress_ledger", "suspicious_rows.json", "group_scores.json", "quality_summary.json")
 _NARRATIVE_INPUTS = ("schema", "signals", "checks", "trust", "flags", "patterns", "diagnoses")
 
 
@@ -110,6 +110,22 @@ def _thousands(v: Any, lang: str = "en") -> str:
     except Exception:
         return "" if v is None else str(v)
     return out if lang == "en" else out.replace(",", "\u00a0")
+
+
+def _quality_verdict(t: Any, qsum: dict[str, Any], trust: list[dict[str, Any]], n_batches: int, st_counts: Any) -> str:
+    """One plain sentence on the whole run: untrusted | partly untrusted | usable but not clean | clean. Runs whose
+    quality stage wrote no quality_summary.json (older runs) get the same verdict derived from trust and checks."""
+    n_bad = sum(1 for x in trust if not x.get("trusted", True))
+    n_b = len(trust) or n_batches
+    v = str(qsum.get("verdict") or "")
+    if not v:
+        v = "untrusted" if n_bad and 2 * n_bad >= max(1, n_b) else "partly_untrusted" if n_bad else "usable_with_problems" if st_counts.get("fail") else "clean"
+    share = qsum.get("untrusted_batch_row_share")
+    pct = _pct(share if isinstance(share, (int, float)) else (n_bad / max(1, n_b)))
+    top = str(qsum.get("top_problem") or "")
+    key = {"untrusted": "dq_verdict_untrusted", "partly_untrusted": "dq_verdict_partly", "usable_with_problems": "dq_verdict_usable"}.get(v, "dq_verdict_clean")
+    because = f", mainly because of {top}" if top and str(getattr(t, "lang", "en")).startswith("en") else ""  # the problem words are English
+    return t(key, n_bad=n_bad, n_batches=n_b, pct=pct, because=because, n_fail=st_counts.get("fail", 0), n_warn=st_counts.get("warn", 0))
 
 
 def _short(s: Any, n: int = 140) -> str:
@@ -544,12 +560,17 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     by_cat = [(t.cat(k), dict(v)) for k, v in cats.items() if sum(v.values()) > 0]
     failed = sorted([c for c in checks if c.get("status") in ("fail", "warn")], key=lambda c: (c.get("status") != "fail", -float(c.get("severity") or 0)))[:MAX_CHECK_ROWS]
     untrusted = [x for x in trust if not x.get("trusted", True)]
+    # run-level verdict (round 6): never "fine" while checks fail; "not testable" is neither a pass nor a failure
+    verdict_text = _quality_verdict(t, ws.read_json("quality_summary.json", {}) or {}, trust, n_batches, st_counts)
+    nt_cats = sorted({str(c.get("category")) for c in checks if c.get("status") == "not_testable"})
+    not_testable_text = t("dq_not_testable", n=st_counts.get("not_testable", 0), cats=", ".join(t.cat(c) for c in nt_cats)) if nt_cats else ""
     rule_rows = []
     checks_by_rule = Counter(str(c.get("rule_id")) for c in checks if c.get("rule_id"))
     for r in rules:
         comp = r.get("compiled")
         rule_rows.append({"id": r.get("id"), "text": r.get("text"), "status": r.get("status"), "compiled": _short(json.dumps(comp, ensure_ascii=False), 220) if comp else "", "explanation_text": clean_text(r.get("compile_explanation")), "compile_source": r.get("compile_source"), "compile_confidence": r.get("compile_confidence"), "explanation": r.get("compile_explanation"), "n_checks": checks_by_rule.get(str(r.get("id")), 0)})
-    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "trust_series": _trust_series(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
+    quality = {"n_checks": len(checks), "n_pass": st_counts.get("pass", 0), "n_warn": st_counts.get("warn", 0), "n_fail": st_counts.get("fail", 0), "n_not_testable": st_counts.get("not_testable", 0), "verdict_text": verdict_text, "not_testable_text": not_testable_text,
+               "by_category": by_cat, "svg": charts.stacked_bars(by_cat, labels={"pass": t("pass"), "warn": t("warn"), "fail": t("fail"), "not_testable": t("not_testable")}), "failed": failed, "n_failed_total": sum(1 for c in checks if c.get("status") in ("fail", "warn")), "rules": rule_rows, "trust": trust[:MAX_CHECK_ROWS], "n_trust_total": len(trust), "trust_series": _trust_series(trust), "untrusted": sorted(untrusted, key=lambda x: float(x.get("trust_score") or 0))[:MAX_UNTRUSTED], "n_untrusted_total": len(untrusted), "threshold": settings.quality.trust_fail_threshold, "n_batches": n_batches}
 
     # ---- detect
     tl = _score_timelines(ws, schema, flags, detect_meta, t)
@@ -630,6 +651,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         overview.append(t("overview_dataset_missing"))
     if checks:
         overview.append(t("overview_quality", n_checks=len(checks), n_pass=quality["n_pass"], n_warn=quality["n_warn"], n_fail=quality["n_fail"], n_untrusted=len(untrusted), n_batches=n_batches))
+        overview.append(" ".join(x for x in (verdict_text, not_testable_text) if x))
     if flags or patterns:
         overview.append(t("overview_detect", n_flags=len(sustained), n_groups_flagged=len({f.get("group_id") for f in sustained}), n_patterns=len(patterns)))
     if suspicious and (suspicious["rows"] or suspicious["point_flags"]):

@@ -204,8 +204,12 @@ def _plain_quality(ws) -> list[str]:
     warns = Counter(c["check_type"] for c in checks if c.get("status") == "warn")
     local_n = sum(len(t.get("local_untrusted") or []) for t in trust)
     words = {"stuck": "frozen or stale values", "missing": "missing values", "dropout": "signals with no values at all", "out_of_range": "values far outside the usual range", "impossible_value": "impossible values", "unit_shift": "sudden changes of scale (unit or decimal-point errors)", "duplicate_rows": "exact duplicate rows", "duplicate_key": "duplicate keys", "gap": "gaps in time", "out_of_order": "time stamps out of order", "saturation": "signals stuck at their limit", "quantization_change": "changes of measurement precision", "sign_violation": "unexpected negative values", "stale": "signals that stopped updating", "redundancy_violation": "copies that no longer agree with their source", "empty_rows": "empty rows"}
+    words.update({"frozen_block": "rows frozen in many signals at once", "missing_block": "rows missing in many signals at once", "quantization_block": "resolution changes in many signals at once", "plausibility": "values outside their plausible range"})
     p1 = f"The data was checked in {n_b} batches before any fault reasoning. Average trust is {mean_trust:.0%}."
-    if bad:
+    qsum = _read(ws, "quality_summary.json", {}) or {}
+    if qsum.get("statement"):  # run-level verdict (round 6): never "fine" while checks fail
+        p1 = f"{qsum['statement']} The data was checked in {n_b} batches before any fault reasoning; average trust is {mean_trust:.0%}."
+    elif bad:
         p1 += f" {len(bad)} batch(es) cannot be trusted: {bad[0].get('statement', '')[:220]}"
     else:
         p1 += " No batch had to be rejected as untrustworthy."
@@ -213,6 +217,9 @@ def _plain_quality(ws) -> list[str]:
         p1 += f" In addition, {local_n} short stretches were marked unreliable for a single signal; detection treats those rows as data problems and does not blame the process for them."
     top = [f"{words.get(k, k.replace('_', ' '))} ({v})" for k, v in (fails + warns).most_common(4)]
     p2 = ("The most common findings were " + ", ".join(top) + ".") if top else "No data-quality problems were found."
+    nt = sorted({str(c.get("category")) for c in checks if c.get("status") == "not_testable"})
+    if nt:
+        p2 += f" {', '.join(nt).capitalize()} could not be tested on this data (for example, there is no time column); that is neither a pass nor a failure."
     p3 = "Why this matters: a frozen or missing sensor and a real process upset can look alike in a chart. These checks separate the two, so an alarm is not raised on bad data and a real fault is not hidden by it. Operating rules you type in plain language become extra checks here."
     return [p1, p2, p3]
 

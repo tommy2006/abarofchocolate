@@ -896,10 +896,14 @@ def _k_trust(E: _Ev) -> str:
     if score is None:
         return ""
     bs = _f(v.get("batch_severity")) or 0.0
+    rs = _f(v.get("record_share")) or 0.0  # round 6: duplicated / frozen / missing records count by the share of rows they cover
     whole = "no problems affecting the whole batch" if bs < 0.05 else ("minor problems affecting the whole batch, such as time gaps or duplicates" if bs < 0.4 else "serious problems affecting the whole batch, such as time gaps or duplicates")
+    rec = f"; {_pct(rs)} of its rows are duplicated, frozen or missing records rather than real measurements" if rs >= 0.001 else ""
+    if rec and bs < 0.05:
+        whole = "no time or ordering problems"
     verdict = "Alarms from this batch can be taken at face value." if score >= 0.8 else "Alarms that involve the affected signals should be read with care." if score >= 0.5 else "The batch is unreliable: an alarm raised on it may be caused by bad data rather than by the process."
     bad = f" ({_join(E.d.get('signals') or [], 6)})" if E.d.get("signals") else ""
-    return f"The data of {'batch ' + E.batch if E.batch else 'this batch'} is rated {_pct(score, 0)} trustworthy: {_n(v.get('n_untrusted'))} of {_n(v.get('n_signals'))} signals had reliability problems{bad}, and there were {whole}. {verdict}"
+    return f"The data of {'batch ' + E.batch if E.batch else 'this batch'} is rated {_pct(score, 0)} trustworthy: {_n(v.get('n_untrusted'))} of {_n(v.get('n_signals'))} signals had reliability problems{bad}, and there were {whole}{rec}. {verdict}"
 
 
 def _k_batching(E: _Ev) -> str:
@@ -1200,6 +1204,74 @@ def _k_curation(E: _Ev) -> str:
     return f"An approved clean-up step was applied to a copy of the data: the number of rows went from {_n(v.get('n_rows_before'))} to {_n(v.get('n_rows_after'))}{cols}. The original file is untouched."
 
 
+# ---- round 6: grouped (common-mode) findings, plausible ranges, checks that could not run
+def _rec(E: _Ev) -> bool:
+    return str(E.v.get("wording") or "") == "records"
+
+
+def _k_frozen_block(E: _Ev) -> str:
+    v = E.v
+    what = "columns" if _rec(E) else "signals"
+    n_sig = _f(v.get("n_signals")) or len(E.sigs)
+    per = _f(v.get("signals_per_block_median")) or n_sig
+    nb = _f(v.get("n_blocks")) or 1
+    rows = f"{_n(v.get('n_rows'))} rows" if _f(v.get("n_rows")) is not None else "Some rows"
+    share = f" ({_pct(v.get('fraction'))} of the batch)" if _f(v.get("fraction")) is not None else ""
+    blocks = f" in {_n(nb)} separate stretches" if nb > 1 else ""
+    if _rec(E):
+        why = f"When many columns repeat their values in exactly the same rows, the entries were copied or exported wrongly: it is one entry or export problem, not {_n(n_sig or 0)} separate column problems."
+    else:
+        why = f"When many sensors stop changing in exactly the same rows, the logger or the data link stalled: it is one data problem, not {_n(n_sig or 0)} broken sensors."
+    return f"{rows}{E.in_batch()}{share} are frozen in {_n(per or 0)} {what} at the same time{blocks}{E.rows()}. {why} Those rows are not used as evidence for any of them."
+
+
+def _k_missing_block(E: _Ev) -> str:
+    v = E.v
+    what = "columns" if _rec(E) else "signals"
+    typical = _f(v.get("signals_per_row_typical")) or len(E.sigs)
+    rows = f"{_n(v.get('n_rows'))} rows" if _f(v.get("n_rows")) is not None else "Some rows"
+    share = f" ({_pct(v.get('fraction'))} of the batch)" if _f(v.get("fraction")) is not None else ""
+    gap = "an entry or export gap" if _rec(E) else "a logging or transmission gap"
+    return f"{rows}{E.in_batch()}{share} are missing in {_n(typical or 0)} {what} at the same time{E.rows()}. That is one {gap}, not a separate problem in each of them, so those rows are set aside for all of them."
+
+
+def _k_quantization_block(E: _Ev) -> str:
+    v = E.v
+    what = "columns" if _rec(E) else "signals"
+    n_sig = _f(v.get("n_signals")) or len(E.sigs)
+    how = "rounded or exported" if _rec(E) else "logged or rounded"
+    return f"{_n(n_sig or 0)} {what} were recorded much more coarsely than usual in the same rows{E.in_batch()}{E.rows()}. A change in how the data was {how} affects all of them at once; it is one data problem, not a change in the process."
+
+
+_RANGE_SOURCE = {"data": "the data itself (its normal range, widened generously)", "non_negative": "the fact that it is never below zero in normal operation", "percentage": "its 0 to 100 scale", "rule": "an operator rule"}
+
+
+def _k_plausibility(E: _Ev) -> str:
+    v, a = E.v, E.s0
+    n = _f(v.get("n"))
+    lo, hi = _f(v.get("lo")), _f(v.get("hi"))
+    rng = f" ({_num(lo)} to {_num(hi)})" if lo is not None and hi is not None else ""
+    srcs = list(dict.fromkeys(_RANGE_SOURCE[s] for s in (v.get("lo_source"), v.get("hi_source")) if s in _RANGE_SOURCE))
+    came = f" The range comes from {_join(srcs)}." if srcs else ""
+    what = "an entry or export problem" if _rec(E) else "a sensor, conversion or logging error"
+    count = f"{_n(n)} {_plural(n, 'value')}" if n is not None else "Values"
+    return f"{a} has {count} outside the range it can plausibly take{rng}{E.in_batch()}{E.rows()}.{came} A value outside that range cannot be real: it is {what}, not something the process did."
+
+
+def _k_not_testable(E: _Ev) -> str:
+    why = {"no_time_column": "the file has no time column", "no_timestamps": "the time column holds no usable time stamps", "too_few_rows": "the batch has fewer than two rows"}.get(str(E.v.get("reason") or ""), "the data lacks what the check needs")
+    return f"The time line{E.in_batch()} could not be checked because {why}. Holes, repeats or disorder in time cannot be seen without time stamps, so this counts as neither passed nor failed."
+
+
+def _k_plausible_range(E: _Ev) -> str:
+    v = E.v
+    n = _f(v.get("n_signals"))
+    hinted = _f(v.get("n_hinted"))
+    extra = f", {_n(hinted)} of them with a physical hint such as never below zero or a 0 to 100 scale" if hinted else ""
+    who = f"Each of the {_n(n)} signals" if n else "Each signal"
+    return f"{who} got a plausible range, the values it can take at all{extra}. Readings outside a signal's range are reported as implausible values, readings inside it but far from the usual level as unusual ones."
+
+
 _KIND: dict[str, Callable[[_Ev], str]] = {
     "format": _k_format, "header": _k_header, "orientation": _k_orientation, "sampling": _k_sampling, "typing": _k_typing,
     "name_hint": _k_name_hint, "time": _k_time, "period": _k_period, "counter": _k_counter, "grouping": _k_grouping,
@@ -1221,6 +1293,8 @@ _KIND: dict[str, Callable[[_Ev], str]] = {
     "learning_curve": _k_learning_curve, "regime_coverage": _k_regime_coverage, "coverage": _k_coverage,
     "signal_information": _k_signal_information, "dq_score": _k_dq_score, "assessor_evaluation": _k_assessor_evaluation,
     "new_file_profile": _k_new_file, "curation": _k_curation, "human_decision": _k_human_decision,
+    "frozen_block": _k_frozen_block, "missing_block": _k_missing_block, "quantization_block": _k_quantization_block, "plausibility": _k_plausibility,
+    "timeliness_not_testable": _k_not_testable, "not_testable": _k_not_testable, "plausible_range": _k_plausible_range,
 }
 KINDS = tuple(sorted(_KIND))
 
@@ -1373,7 +1447,7 @@ def _plain_diag(d: dict[str, Any]) -> str:
     return f"Diagnosis {d.get('id')}{grp}: {lead}" + (f', described as "{ft}"' if ft else "") + f" ({_conf_words(d.get('confidence'))}).{involved}{crit}"
 
 
-_STATUS_WORDS = {"pass": "This check passed.", "warn": "This check raised a warning.", "fail": "This check failed."}
+_STATUS_WORDS = {"pass": "This check passed.", "warn": "This check raised a warning.", "fail": "This check failed.", "not_testable": "This check could not be run on this data."}
 
 
 def _plain_check(c: dict[str, Any]) -> str:

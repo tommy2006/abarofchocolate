@@ -259,8 +259,9 @@ details summary { cursor: pointer; color: var(--primary); }
 <section id="section-2">
   <h2>{{ t('section_2') }}</h2>
   <p class="intro">{{ t('s2_intro') }}</p>
+  {% if quality.verdict_text %}<p><strong>{{ quality.verdict_text }}</strong>{% if quality.not_testable_text %} {{ quality.not_testable_text }}{% endif %}</p>{% endif %}
   {% if quality.n_checks %}
-  <h3>{{ t('s2_by_category') }} — {{ quality.n_checks }} ({{ t('pass') }} {{ quality.n_pass }} · {{ t('warn') }} {{ quality.n_warn }} · {{ t('fail') }} {{ quality.n_fail }})</h3>
+  <h3>{{ t('s2_by_category') }} — {{ quality.n_checks }} ({{ t('pass') }} {{ quality.n_pass }} · {{ t('warn') }} {{ quality.n_warn }} · {{ t('fail') }} {{ quality.n_fail }}{% if quality.n_not_testable %} · {{ t('not_testable') }} {{ quality.n_not_testable }}{% endif %})</h3>
   {{ quality.svg|safe }}
   <h3>{{ t('s2_failed_checks') }}</h3>
   {% if quality.failed %}

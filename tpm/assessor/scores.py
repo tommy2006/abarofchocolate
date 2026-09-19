@@ -3,6 +3,8 @@
 score_category = 1 - min(1, penalty / critical_signal_fraction), where penalty is the severity-weighted share of
 (batch, signal) cells with a warn (weight 0.4) or fail (weight 1.0) in that category; batch-level checks (duplicates,
 gaps, ...) count as half a batch. overall = 0.7 * mean(category scores) + 0.3 * mean trust score.
+A category whose checks could not run at all (status "not_testable", e.g. timeliness without a time column) gets the
+score None ("not testable") instead of a trivial 1.0 and is left out of the mean.
 
 ``compute_dq_scores`` is pure so the assessor can evaluate what-if scenarios (drop a signal, a group, a row range,
 duplicates) without touching the workspace; ``dq_scores`` adds evidence.
@@ -12,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Optional
 
 from ..contracts import CheckResult, TrustVerdict
-from ..quality._common import load_catalog, numeric_signals
+from ..quality._common import NOT_TESTABLE, is_problem, load_catalog, numeric_signals
 from ..quality.trust import compute_trust
 
 CATEGORIES = ["completeness", "validity", "consistency", "timeliness"]
@@ -20,7 +22,7 @@ STATUS_W = {"fail": 1.0, "warn": 0.4}
 
 
 def _keep(c: CheckResult, exclude_signals: set[str], exclude_batches: set[str], exclude_types: set[str], exclude_rows: Optional[tuple[int, int]]) -> bool:
-    if c.status == "pass" or c.category not in CATEGORIES:
+    if not is_problem(c.status) or c.category not in CATEGORIES:
         return False
     if c.batch_id in exclude_batches or c.check_type in exclude_types:
         return False
@@ -34,6 +36,8 @@ def _keep(c: CheckResult, exclude_signals: set[str], exclude_batches: set[str], 
 def compute_dq_scores(checks: Iterable[CheckResult], verdicts: Iterable[TrustVerdict], n_batches: int, n_signals: int, settings: Any, exclude_signals: Iterable[str] = (), exclude_batches: Iterable[str] = (), exclude_types: Iterable[str] = (), exclude_rows: Optional[tuple[int, int]] = None) -> dict[str, Any]:
     ex_s, ex_b, ex_t = set(exclude_signals), set(exclude_batches), set(exclude_types)
     checks = list(checks)
+    ran = {c.category for c in checks if c.category in CATEGORIES and c.status != NOT_TESTABLE}
+    untestable = {c.category for c in checks if c.category in CATEGORIES and c.status == NOT_TESTABLE} - ran
     n_batches = max(1, int(n_batches) - len(ex_b))
     n_sig = max(1, int(n_signals) - len(ex_s))
     pen = {c: 0.0 for c in CATEGORIES}
@@ -51,7 +55,7 @@ def compute_dq_scores(checks: Iterable[CheckResult], verdicts: Iterable[TrustVer
             pen[c.category] += 0.5 * w / n_batches
         counts[c.category]["n_fail" if c.status == "fail" else "n_warn"] += 1
     crit = max(float(settings.quality.critical_signal_fraction), 1e-6)
-    scores = {c: round(max(0.0, 1.0 - min(1.0, pen[c] / crit)), 4) for c in CATEGORIES}
+    scores = {c: (None if c in untestable else round(max(0.0, 1.0 - min(1.0, pen[c] / crit)), 4)) for c in CATEGORIES}
     # trust: recompute per batch when something is excluded (a dropped signal no longer hurts)
     trust_scores: list[float] = []
     n_untrusted = 0
@@ -68,8 +72,9 @@ def compute_dq_scores(checks: Iterable[CheckResult], verdicts: Iterable[TrustVer
         trust_scores = [float(v.trust_score) for v in verdicts]
         n_untrusted = sum(0 if v.trusted else 1 for v in verdicts)
     mean_trust = sum(trust_scores) / len(trust_scores) if trust_scores else 1.0
-    overall = round(0.7 * (sum(scores.values()) / len(scores)) + 0.3 * mean_trust, 4)
-    return {**scores, "overall": overall, "mean_trust": round(mean_trust, 4), "n_untrusted_batches": n_untrusted, "n_batches": n_batches, "n_signals": n_sig, "penalties": {c: round(pen[c], 5) for c in CATEGORIES}, "counts": {c: {"n_fail": counts[c]["n_fail"], "n_warn": counts[c]["n_warn"], "n_signals": len(counts[c]["signals"])} for c in CATEGORIES}}
+    tested = [v for v in scores.values() if v is not None]
+    overall = round(0.7 * (sum(tested) / len(tested) if tested else 1.0) + 0.3 * mean_trust, 4)
+    return {**scores, "overall": overall, "not_testable": sorted(untestable), "mean_trust": round(mean_trust, 4), "n_untrusted_batches": n_untrusted, "n_batches": n_batches, "n_signals": n_sig, "penalties": {c: round(pen[c], 5) for c in CATEGORIES}, "counts": {c: {"n_fail": counts[c]["n_fail"], "n_warn": counts[c]["n_warn"], "n_signals": len(counts[c]["signals"])} for c in CATEGORIES}}
 
 
 def worst_signals(checks: Iterable[CheckResult], verdicts: Iterable[TrustVerdict], top: int = 8) -> list[dict[str, Any]]:
@@ -81,7 +86,7 @@ def worst_signals(checks: Iterable[CheckResult], verdicts: Iterable[TrustVerdict
         for s in v.untrusted_signals:
             agg.setdefault(s, {"signal": s, "untrusted_batches": 0, "severity_sum": 0.0, "types": set(), "n_checks": 0})["untrusted_batches"] += 1
     for c in checks:
-        if c.status == "pass" or c.category == "rule":
+        if not is_problem(c.status) or c.category == "rule":
             continue
         for s in c.signals:
             d = agg.setdefault(s, {"signal": s, "untrusted_batches": 0, "severity_sum": 0.0, "types": set(), "n_checks": 0})
@@ -110,15 +115,18 @@ def dq_scores(ws: Any, settings: Any) -> dict[str, Any]:
     details: dict[str, Any] = {}
     for cat in CATEGORIES:
         cnt = res["counts"][cat]
-        stmts = sorted((c for c in checks if c.category == cat and c.status != "pass"), key=lambda c: -c.severity)[:5]
+        stmts = sorted((c for c in checks if c.category == cat and is_problem(c.status)), key=lambda c: -c.severity)[:5]
         top = [{"check_id": c.check_id, "statement": c.statement, "severity": c.severity, "batch_id": c.batch_id, "signals": c.signals} for c in stmts]
-        if cnt["n_fail"] or cnt["n_warn"]:
+        if res[cat] is None:
+            why = next((c.statement for c in checks if c.category == cat and c.status == NOT_TESTABLE), "")
+            st = f"{cat.capitalize()} not testable: {why}" if why else f"{cat.capitalize()} not testable on this data"
+        elif cnt["n_fail"] or cnt["n_warn"]:
             st = f"{cat.capitalize()} score {res[cat]:.2f}: {cnt['n_fail']} failing and {cnt['n_warn']} warning checks over {n_batches} batches, {cnt['n_signals']} signal(s) involved; worst: {stmts[0].statement}" if stmts else f"{cat.capitalize()} score {res[cat]:.2f}"
         else:
             st = f"{cat.capitalize()} score {res[cat]:.2f}: no problems found in {n_batches} batches x {n_signals} signals"
-        ev = ws.evidence.add("dq_score", st, signals=sorted({s for c in stmts for s in c.signals})[:20], values={"category": cat, "score": res[cat], "penalty": res["penalties"][cat], **cnt}, computed_by="assessor.scores.dq_scores", n_samples=n_batches)
+        ev = ws.evidence.add("dq_score", st, signals=sorted({s for c in stmts for s in c.signals})[:20], values={"category": cat, "score": res[cat], "penalty": res["penalties"][cat], "testable": res[cat] is not None, **cnt}, computed_by="assessor.scores.dq_scores", n_samples=n_batches)
         ev_ids.append(ev.id)
-        details[cat] = {"score": res[cat], "statement": st, "evidence_id": ev.id, "top": top, **cnt}
+        details[cat] = {"score": res[cat], "testable": res[cat] is not None, "statement": st, "evidence_id": ev.id, "top": top, **cnt}
     ev = ws.evidence.add("dq_score", f"Overall data-quality score {res['overall']:.2f} (mean trust {res['mean_trust']:.2f}, {res['n_untrusted_batches']} of {n_batches} batches untrusted)", values={k: res[k] for k in ("overall", "mean_trust", "n_untrusted_batches", "n_batches", "n_signals")}, computed_by="assessor.scores.dq_scores", n_samples=n_batches)
     ev_ids.append(ev.id)
     res["details"] = details

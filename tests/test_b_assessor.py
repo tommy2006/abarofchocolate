@@ -33,9 +33,10 @@ def test_dq_scores(assessed):
 
     ws, settings = assessed["ws"], assessed["settings"]
     sc = dq_scores(ws, settings)
-    for k in ("completeness", "validity", "consistency", "timeliness", "overall", "mean_trust"):
+    for k in ("completeness", "validity", "consistency", "overall", "mean_trust"):
         assert 0.0 <= sc[k] <= 1.0
-    assert sc["timeliness"] == 1.0  # no timestamps in this fixture
+    # round 6 (review item 20): this fixture has no timestamps, so timeliness is "not testable" (None), not a trivial 1.0
+    assert sc["timeliness"] is None and sc["not_testable"] == ["timeliness"] and sc["details"]["timeliness"]["testable"] is False
     assert sc["consistency"] < 1.0 and sc["validity"] < 1.0 and sc["completeness"] < 1.0
     assert sc["evidence_ids"] and all(ws.evidence.get(e) for e in sc["evidence_ids"])
     assert sc["details"]["consistency"]["top"] and sc["worst_signals"]
