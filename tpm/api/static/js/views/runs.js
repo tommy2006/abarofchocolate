@@ -124,7 +124,14 @@ export async function render(main) {
     const budget = s.time_budget_s || 1200;
     progress.body.append(el('div', { class: 'row between' }, el('span', {}, st(s.state, t('runs.state.' + s.state)), ' ', el('b', { text: s.run_id })), el('span', { class: 'small muted', text: s.source_path || '' })), stages,
       el('div', { class: 'budget' }, el('span', { text: `${t('common.elapsed')} ${fmt.sec(elapsed)}` }), el('span', { class: 'bar' }, el('i', { style: { width: Math.min(100, elapsed / budget * 100) + '%', background: elapsed > budget ? 'var(--fail)' : '' } })), el('span', { text: `${t('common.timeBudget')} ${fmt.sec(budget)}` })));
-    if (s.job && s.job.error) progress.body.append(el('pre', { class: 'notice fail small', style: { whiteSpace: 'pre-wrap' }, text: s.job.error }));
+    // the job error lives in memory only until the server restarts; status.error is the persisted copy
+    const runError = (s.job && s.job.error) || s.error || (s.status && s.status.error);
+    if (runError) progress.body.append(el('pre', { class: 'notice fail small', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' }, text: String(runError).split('
+')[0] + '
+
+' + String(runError).split('
+').slice(1).join('
+') }));
   };
 
   const renderStream = async () => {
