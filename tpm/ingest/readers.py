@@ -5,6 +5,10 @@ transposed detection for headerless numeric matrices), Parquet, Excel (.xlsx/.xl
 JSON (array of records) and JSONL. Everything row-shaped goes through DuckDB (out-of-core) so 15+ GB files
 convert with bounded memory; Excel and transposed matrices go through bounded chunks.
 
+Invariant on every path: a floating-point column of ``dataset.parquet`` holds finite values or NULL. Missing-value
+tokens (NAN_TOKENS) and non-finite values (NaN, +/-inf) are stored as NULL, never as IEEE NaN/inf, which DuckDB
+aggregates would treat as ordinary values (``stddev_samp`` raises on them).
+
 Public functions
     detect_format(path, options=None) -> dict          sniffed format + options + evidence statements
     convert_to_parquet(path, fmt, out_path, settings, progress=None, con=None) -> dict
@@ -50,6 +54,12 @@ def quote_ident(name: str) -> str:
 
 def sql_lit(s: str) -> str:
     return "'" + str(s).replace("'", "''") + "'"
+
+
+def finite_sql(expr: str) -> str:
+    """NULL where a floating-point expression is NaN or +/-inf. dataset.parquet holds finite values or NULL only:
+    DuckDB treats NaN/inf as ordinary values and stddev_samp / var_samp raise 'out of range' on them."""
+    return f"(CASE WHEN isfinite({expr}) THEN {expr} END)"
 
 
 def sanitize_columns(names: list[Any]) -> list[str]:
@@ -387,8 +397,9 @@ def _keep_double_columns(con, sql: str, cols: list[tuple[str, str]], sample_rows
     if not doubles:
         return set()
     parts = []
+    types = dict(cols)
     for c in doubles:
-        q = quote_ident(c)
+        q = finite_sql(quote_ident(c)) if types[c] in ("DOUBLE", "FLOAT") else quote_ident(c)  # NaN sorts above every number
         parts.append(f"max(abs({q})) AS {quote_ident(c + '__max')}, sum(CASE WHEN {q} <> floor({q}) THEN 1 ELSE 0 END) AS {quote_ident(c + '__frac')}")
     row = con.execute(f"SELECT {', '.join(parts)} FROM (SELECT * FROM ({sql}) LIMIT {int(sample_rows)})").fetchone()
     keep = set()
@@ -410,6 +421,8 @@ def _projection(cols: list[tuple[str, str]], new_names: list[str], downcast: boo
     for (c, t), n in zip(cols, new_names):
         q = quote_ident(c)
         tt = t.upper()
+        if tt in ("DOUBLE", "FLOAT"):
+            q = finite_sql(q)  # 'NAN', 'inf', ... parse as non-finite doubles; store them as missing like the nullstr tokens
         if downcast and (tt == "DOUBLE" or tt.startswith("DECIMAL")) and c not in keep_double:
             sel.append(f"CAST({q} AS FLOAT) AS {quote_ident(n)}")
         elif varchar_json and (tt.startswith("STRUCT") or tt.startswith("MAP") or "[]" in tt or tt.startswith("LIST") or tt == "JSON"):
@@ -509,23 +522,26 @@ def _convert_whitespace(con, path: Path, fmt: dict[str, Any], out_path: Path, se
             kinds.append("double" if (mx >= 1e7 or 1e9 <= mx <= 4e12) else "float")
     sel_parts = []
     downcast = settings.ingest.dtype_downcast == "float32"
+    nan_list = ", ".join(sql_lit(t) for t in NAN_TOKENS)
     for j, (n, k) in enumerate(zip(names, kinds)):
-        tok = f"parts[{j + 1}]"
+        # missing-value tokens become NULL in every column, as nullstr does on the delimited path. They must go
+        # before the cast: TRY_CAST('NaN' AS DOUBLE) succeeds and yields an IEEE NaN, not NULL.
+        tok = f"(CASE WHEN parts[{j + 1}] IN ({nan_list}) THEN NULL ELSE parts[{j + 1}] END)"
+        if k == "text":
+            sel_parts.append(f"{tok} AS {quote_ident(n)}")
+            continue
         if decimal == ",":
             tok = f"replace({tok}, ',', '.')"
-        tok = f"nullif({tok}, '')"
-        if k == "text":
-            sel_parts.append(f"parts[{j + 1}] AS {quote_ident(n)}")
-        elif k == "int":
-            sel_parts.append(f"COALESCE(TRY_CAST({tok} AS BIGINT), CAST(TRY_CAST({tok} AS DOUBLE) AS BIGINT)) AS {quote_ident(n)}")
+        num = finite_sql(f"TRY_CAST({tok} AS DOUBLE)")  # also 'NAN', 'inf', '1e999', ...
+        if k == "int":
+            sel_parts.append(f"COALESCE(TRY_CAST({tok} AS BIGINT), TRY_CAST({num} AS BIGINT)) AS {quote_ident(n)}")
         elif k == "double" or not downcast:
-            sel_parts.append(f"TRY_CAST({tok} AS DOUBLE) AS {quote_ident(n)}")
+            sel_parts.append(f"{num} AS {quote_ident(n)}")
         else:
-            sel_parts.append(f"CAST(TRY_CAST({tok} AS DOUBLE) AS FLOAT) AS {quote_ident(n)}")
+            sel_parts.append(f"CAST({num} AS FLOAT) AS {quote_ident(n)}")
     skip = int(fmt.get("skip_lines", 0)) + (1 if fmt.get("has_header") else 0)
     src = f"SELECT regexp_split_to_array(trim(line), '\\s+') AS parts FROM read_csv({sql_lit(path.as_posix())}, delim='\\x01', header=false, columns={{'line': 'VARCHAR'}}, quote='', escape='', skip={skip}) WHERE trim(line) <> ''"
     sel = f"SELECT {', '.join(sel_parts)}, row_number() OVER () - 1 AS __row__ FROM ({src})"
-    # NaN tokens ('NA', '-', ...) fail TRY_CAST and therefore become NULL in numeric columns
     _run_with_progress(lambda: _copy(con, sel, out_path, settings.ingest.parquet_compression), out_path, path.stat().st_size, progress, lo, hi, "converting whitespace-delimited")
     return {"columns": names, "source_types": dict(zip(names, kinds)), "notes": [], "attempt": "whitespace"}
 
@@ -580,6 +596,11 @@ def _write_chunks_parquet(chunks, out_path: Path, settings, downcast: bool = Tru
             df.columns = names
             for c in names:
                 s = df[c]
+                if pd.api.types.is_float_dtype(s):
+                    # finite or missing only: from_pandas below writes NaN as NULL but would keep +/-inf as a value
+                    inf = np.isinf(s.to_numpy(dtype="float64", na_value=np.nan))
+                    if inf.any():
+                        s = df[c] = s.mask(inf)
                 if downcast and pd.api.types.is_float_dtype(s):
                     mx = float(np.nanmax(np.abs(s.to_numpy(dtype="float64")))) if s.notna().any() else 0.0
                     is_int_valued = bool(s.dropna().apply(lambda v: float(v).is_integer()).all()) if len(s.dropna()) and len(s.dropna()) < 200_000 else False

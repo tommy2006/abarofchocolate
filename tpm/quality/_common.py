@@ -54,6 +54,13 @@ def quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def finite_sql(col_sql: str) -> str:
+    """A numeric column, NULL where it holds NaN or +/-inf (any numeric type). DuckDB treats those as ordinary values
+    and stddev_samp / var_samp raise 'out of range' on them. Ingest stores them as NULL already; this keeps aggregates
+    safe on workspaces written before that and on files that are read directly, not through ingest."""
+    return f"(CASE WHEN isfinite(TRY_CAST({col_sql} AS DOUBLE)) THEN {col_sql} END)"
+
+
 def _fp_get(fp: dict[str, Any], *keys: str) -> Optional[float]:
     """Fetch the first present numeric key, looking also inside a nested 'quantiles' dict."""
     for k in keys:
@@ -249,7 +256,7 @@ def global_stats(ws: Any, settings: Any, catalog: list[SignalInfo], force: bool 
             part = need[start : start + 40]
             exprs = []
             for s in part:
-                c = quote_ident(s.column)
+                c = finite_sql(quote_ident(s.column))
                 exprs.append(f"count({c}), min({c}), max({c}), avg({c}), stddev_samp({c}), approx_quantile({c}, [0.01, 0.25, 0.5, 0.75, 0.99])")
             row = con.execute(f"SELECT {', '.join(exprs)} FROM dataset").fetchone()
             for i, s in enumerate(part):

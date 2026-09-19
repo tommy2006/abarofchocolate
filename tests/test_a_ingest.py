@@ -108,6 +108,91 @@ def test_decimal_comma_semicolon_and_nan_tokens(tmp_path, module_settings):
         ws.close()
 
 
+def _non_finite_and_null_counts(ws) -> tuple[dict[str, int], dict[str, int]]:
+    """Per floating-point column of dataset.parquet: how many NaN/inf values and how many NULLs it holds."""
+    con = ws.duckdb()
+    floats = [r[0] for r in con.execute("DESCRIBE dataset").fetchall() if r[1] in ("FLOAT", "DOUBLE")]
+    assert floats
+    q = lambda c: '"' + c.replace('"', '""') + '"'  # noqa: E731
+    bad = con.execute("SELECT " + ", ".join(f"count(*) FILTER (WHERE isnan({q(c)}) OR isinf({q(c)}))" for c in floats) + " FROM dataset").fetchone()
+    nul = con.execute("SELECT " + ", ".join(f"count(*) - count({q(c)})" for c in floats) + " FROM dataset").fetchone()
+    return dict(zip(floats, map(int, bad))), dict(zip(floats, map(int, nul)))
+
+
+def _nan_token_matrix(n: int = 600, seed: int = 5) -> tuple[np.ndarray, list[list[str]]]:
+    """Three float signals and one integer counter as text tokens; missing / non-finite tokens sprinkled in."""
+    rng = np.random.default_rng(seed)
+    x = np.cumsum(rng.normal(0, 0.3, (n, 3)), axis=0) + [50.0, 120.0, 7.0]
+    rows = [[f"{x[i, 0]:.4f}", f"{x[i, 1]:.4f}", f"{x[i, 2]:.4f}", str(1000 + i)] for i in range(n)]
+    for i in range(40, n, 40):
+        rows[i][1] = "NaN"  # the token numpy / pandas / MATLAB write for a missing value
+    for i, tok in ((45, "nan"), (85, "NA"), (125, "inf"), (165, "-inf"), (205, "Infinity"), (245, "NAN"), (285, "1e999")):
+        rows[i][2] = tok
+    for i in range(50, n, 100):
+        rows[i][3] = "NaN"  # a missing value in an integer column
+    return x, rows
+
+
+def test_whitespace_nan_tokens_become_null_not_ieee_nan(tmp_path, module_settings):
+    x, rows = _nan_token_matrix()
+    p = tmp_path / "headerless_nan.dat"
+    p.write_text("\n".join("  ".join(r) for r in rows) + "\n", encoding="utf-8")
+    fmt = detect_format(p)
+    assert fmt["format"] == "whitespace" and fmt["has_header"] is False and fmt["transposed"] is False
+    ws, res = _ingest(module_settings, p, "ing_ws_nan")
+    try:
+        assert res["n_rows"] == len(rows)
+        bad, nul = _non_finite_and_null_counts(ws)
+        assert not any(bad.values()), bad
+        assert nul["col_0"] == 0 and nul["col_1"] == len(range(40, len(rows), 40)) and nul["col_2"] == 7, nul
+        con = ws.duckdb()
+        types = {r[0]: r[1] for r in con.execute("DESCRIBE dataset").fetchall()}
+        assert types["col_3"] == "BIGINT"  # the NaN tokens neither break the integer cast nor turn the column into text
+        assert con.execute("SELECT count(*) - count(col_3) FROM dataset").fetchone()[0] == len(range(50, len(rows), 100))
+        # the aggregates every later stage runs must not raise ('STDDEV_SAMP is out of range' on NaN / inf)
+        sd = con.execute("SELECT stddev_samp(col_0), stddev_samp(col_1), stddev_samp(col_2), var_samp(col_2) FROM dataset").fetchone()
+        assert all(v is not None and np.isfinite(v) for v in sd), sd
+        got = con.execute("SELECT col_1 FROM dataset WHERE col_1 IS NOT NULL ORDER BY __row__ LIMIT 30").df()["col_1"].to_numpy()
+        np.testing.assert_allclose(got, x[:30, 1], rtol=1e-4)
+    finally:
+        ws.close()
+
+
+def test_delimited_and_transposed_store_non_finite_as_null(tmp_path, module_settings):
+    x, rows = _nan_token_matrix()
+    csv_p = tmp_path / "nonfinite.csv"
+    csv_p.write_text("a,b,c,n\n" + "\n".join(",".join(r) for r in rows) + "\n", encoding="utf-8")
+    tr_p = tmp_path / "nonfinite_transposed.dat"
+    tr_p.write_text("\n".join("  ".join(r[j] for r in rows) for j in range(3)) + "\n", encoding="utf-8")
+    assert detect_format(tr_p)["transposed"] is True
+    for run_id, p, cols in (("ing_csv_nonfinite", csv_p, ("a", "b", "c")), ("ing_tr_nonfinite", tr_p, ("col_0", "col_1", "col_2"))):
+        ws, res = _ingest(module_settings, p, run_id)
+        try:
+            assert res["n_rows"] == len(rows), (run_id, res["n_rows"])
+            bad, nul = _non_finite_and_null_counts(ws)
+            assert not any(bad.values()), (run_id, bad)
+            assert [nul[c] for c in cols] == [0, len(range(40, len(rows), 40)), 7], (run_id, nul)
+            sd = ws.duckdb().execute("SELECT " + ", ".join(f"stddev_samp({c})" for c in cols) + " FROM dataset").fetchone()
+            assert all(v is not None and np.isfinite(v) for v in sd), (run_id, sd)
+        finally:
+            ws.close()
+
+
+def test_ingest_dataframe_stores_non_finite_as_null(module_settings):
+    df, _ = make_synthetic(n_groups=4, n_samples=100, seed=3, dq_issues=False)
+    col = df.select_dtypes(include=[np.floating]).columns[0]
+    df.loc[[5, 17], col] = np.nan
+    df.loc[[30, 31], col] = [np.inf, -np.inf]
+    ws = Workspace(run_id="ing_df_nonfinite", settings=module_settings)
+    try:
+        ingest_dataframe(ws, module_settings, df)
+        bad, nul = _non_finite_and_null_counts(ws)
+        assert not any(bad.values()), bad
+        assert nul[col] == 4
+    finally:
+        ws.close()
+
+
 def test_ingest_dataframe_path(module_settings):
     df, truth = make_synthetic(n_groups=4, n_samples=100, seed=3, dq_issues=False)
     ws = Workspace(run_id="ing_df", settings=module_settings)

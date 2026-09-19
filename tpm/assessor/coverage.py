@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from ..quality._common import GROUP_COL, ROW_COL, SignalInfo, global_stats, load_catalog, numeric_signals, quote_ident
+from ..quality._common import GROUP_COL, ROW_COL, SignalInfo, finite_sql, global_stats, load_catalog, numeric_signals, quote_ident
 from ..quality.checks import CHECKABLE_ROLES
 
 MAX_SIGNALS = 300
@@ -41,7 +41,7 @@ def unit_fingerprints(ws: Any, unit: dict[str, Any], sigs: list[SignalInfo]) -> 
     con = ws.duckdb()
     present = {r[0] for r in con.execute("DESCRIBE dataset").fetchall()}
     sigs = [s for s in sigs if s.column in present]
-    aggs = ", ".join(f"avg({quote_ident(s.column)}), stddev_samp({quote_ident(s.column)})" for s in sigs)
+    aggs = ", ".join(f"avg({finite_sql(quote_ident(s.column))}), stddev_samp({finite_sql(quote_ident(s.column))})" for s in sigs)
     q = f"SELECT {unit['expr']} AS u, count(*) AS n, min({quote_ident(ROW_COL)}) AS r0{', ' + aggs if aggs else ''} FROM dataset GROUP BY u ORDER BY r0"
     rows = con.execute(q).fetchall()
     units = [str(r[0]) for r in rows]

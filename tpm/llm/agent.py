@@ -210,7 +210,8 @@ class Toolbox:
         col, alias = self.resolve_column(signal)
         if not col:
             return {"error": f"unknown signal '{signal}'"}
-        q = f'SELECT count("{col}") AS n, avg("{col}") AS mean, stddev_samp("{col}") AS std, min("{col}") AS min, quantile_cont("{col}", 0.05) AS q05, median("{col}") AS median, quantile_cont("{col}", 0.95) AS q95, max("{col}") AS max, count(*) - count("{col}") AS n_null, min(__rn) AS row_start, max(__rn) AS row_end FROM {self._base_sql()}'
+        v = f'(CASE WHEN isfinite(TRY_CAST("{col}" AS DOUBLE)) THEN "{col}" END)'  # stddev_samp raises on NaN / inf; count them as missing
+        q = f"SELECT count({v}) AS n, avg({v}) AS mean, stddev_samp({v}) AS std, min({v}) AS min, quantile_cont({v}, 0.05) AS q05, median({v}) AS median, quantile_cont({v}, 0.95) AS q95, max({v}) AS max, count(*) - count({v}) AS n_null, min(__rn) AS row_start, max(__rn) AS row_end FROM {self._base_sql()}"
         conds, params = [], []
         gcol = self._group_col()
         if group_id is not None and gcol:

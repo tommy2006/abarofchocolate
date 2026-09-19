@@ -270,3 +270,73 @@ def test_pipeline_apply_decision_routes_to_assessor_and_quality(assessed):
     assert out["effect"]["status"] == "active"
     out = apply_decision(ws, settings, HumanDecision(actor_name="ann", role="engineer", action="apply_assessor_action", object_type="assessor", object_id="x", new_value={"action": {"type": "drop_duplicates", "params": {}}}))
     assert out["effect"]["applied"]
+
+
+# ------------------------------------------------------------------------------------------------
+# missing-value tokens and non-finite values (DuckDB: stddev_samp raises 'out of range' on NaN / inf)
+# ------------------------------------------------------------------------------------------------
+def test_pipeline_reaches_assess_on_headerless_whitespace_file_with_nan_tokens(tmp_path):
+    """A headerless whitespace file that writes missing values as the token 'NaN' must give NULLs in
+    dataset.parquet and run through ingest -> profile -> quality -> assess."""
+    from tpm.pipeline import run_pipeline
+    from tpm.workspace import Workspace
+
+    settings = make_settings(tmp_path)
+    df, _ = make_synthetic(n_groups=8, n_samples=200, seed=11, dq_issues=False)
+    num = df.select_dtypes(include=[np.number])
+    toks = num.astype(object).to_numpy()
+    rng = np.random.default_rng(3)
+    floats = [j for j, c in enumerate(num.columns) if np.issubdtype(num[c].dtype, np.floating)]
+    holes = [(int(i), int(j)) for i, j in zip(rng.integers(0, len(num), 60), rng.choice(floats, 60))]
+    for i, j in holes:
+        toks[i, j] = "NaN"
+    p = tmp_path / "headerless_nan.dat"
+    p.write_text("\n".join(" ".join(str(v) for v in row) for row in toks) + "\n", encoding="utf-8")
+    st = run_pipeline(str(p), run_id="nan_tokens", stages=["ingest", "profile", "quality", "assess"], settings=settings, options={"use_llm": False, "no_llm": True, "skip_llm": True, "report_llm": False})
+    states = {s.stage: (s.state, s.message) for s in st.stages}
+    for stage in ("ingest", "profile", "quality", "assess"):
+        assert states[stage][0] == "done", states
+    ws = Workspace(run_id="nan_tokens", settings=settings)
+    try:
+        con = ws.duckdb()
+        fl = [r[0] for r in con.execute("DESCRIBE dataset").fetchall() if r[1] in ("FLOAT", "DOUBLE")]
+        n_bad = con.execute("SELECT " + " + ".join(f'count(*) FILTER (WHERE isnan("{c}") OR isinf("{c}"))' for c in fl) + " FROM dataset").fetchone()[0]
+        n_null = con.execute("SELECT " + " + ".join(f'(count(*) - count("{c}"))' for c in fl) + " FROM dataset").fetchone()[0]
+        assert n_bad == 0 and n_null == len(set(holes))
+        a = ws.read_json("assessor")
+        assert a["coverage"]["n_units"] >= 1 and 0.0 <= a["combined_score"] <= 1.0
+    finally:
+        ws.close()
+
+
+def test_assessor_aggregates_tolerate_non_finite_values(tmp_path):
+    """Defensive: a dataset.parquet written before ingest stored NaN / inf as NULL, and a new file that is read
+    directly, must not break the per-unit mean / std aggregates."""
+    import duckdb
+
+    from tpm.assessor import assess_new_file
+    from tpm.assessor.coverage import regime_coverage
+
+    settings = make_settings(tmp_path)
+    df, truth = make_synthetic(n_groups=8, n_samples=200, seed=2, dq_issues=False)
+    ws = build_workspace(tmp_path, settings, df, truth, run_id="run_nonfinite")
+    ds = ws.path("dataset")
+    dirty = ds.with_name("dirty.parquet")
+    con = duckdb.connect()
+    con.execute(f"COPY (SELECT * REPLACE (CASE WHEN __row__ % 50 = 7 THEN 'nan'::DOUBLE WHEN __row__ % 50 = 9 THEN 'inf'::DOUBLE WHEN __row__ % 50 = 11 THEN '-inf'::DOUBLE ELSE flow_a END AS flow_a) FROM read_parquet('{ds.as_posix()}')) TO '{dirty.as_posix()}' (FORMAT PARQUET)")
+    con.close()
+    dirty.replace(ds)
+    try:
+        assert ws.duckdb().execute("SELECT count(*) FROM dataset WHERE isnan(flow_a) OR isinf(flow_a)").fetchone()[0] == 3 * len(df) // 50
+        cov = regime_coverage(ws, settings)
+        assert cov["n_units"] == 8 and cov["findings"]
+        df2, _ = make_synthetic(n_groups=2, n_samples=200, seed=78, dq_issues=False)
+        new = df2.astype({"flow_a": object})
+        new.loc[::40, "flow_a"] = "nan"
+        new.loc[5::40, "flow_a"] = "inf"
+        p = tmp_path / "more_nonfinite.csv"
+        new.to_csv(p, index=False)
+        nf = assess_new_file(ws, settings, p, time_budget_s=5)
+        assert nf["exists"] and nf["compatible"] and nf["coverage_gain"]["available"], nf
+    finally:
+        ws.close()

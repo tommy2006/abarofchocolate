@@ -24,7 +24,7 @@ from typing import Any, Optional
 import numpy as np
 
 from ..contracts import now_iso
-from ..quality._common import GROUP_COL, ROW_COL, load_catalog, numeric_signals, quote_ident, time_column_in
+from ..quality._common import GROUP_COL, ROW_COL, finite_sql, load_catalog, numeric_signals, quote_ident, time_column_in
 from .coverage import coverage_signals, project_units, regime_coverage, unit_definition
 from .fitness import compare_with_without, learning_curve
 from .scores import CATEGORIES, compute_dq_scores, worst_signals
@@ -522,7 +522,8 @@ def assess_new_file(ws: Any, settings: Any, path: str | Path, time_budget_s: Opt
         for f in feats:
             alias = f.split(":")[0]
             c = mapping.get(alias)
-            aggs.append(f"avg({quote_ident(c)})" if c and f.endswith(":mean") else (f"stddev_samp({quote_ident(c)})" if c else "NULL"))
+            v = finite_sql(quote_ident(c)) if c else None  # the file is read directly, not through ingest: it may hold NaN / inf
+            aggs.append(f"avg({v})" if c and f.endswith(":mean") else (f"stddev_samp({v})" if c else "NULL"))
         rows = con.execute(f"SELECT u, {', '.join(aggs)} FROM (SELECT *, floor((row_number() OVER () - 1) / {int(w)}) AS u FROM {view}) GROUP BY u ORDER BY u").fetchall()
         X = np.array([[float(v) if v is not None else np.nan for v in r[1:]] for r in rows], dtype="float64") if rows else np.zeros((0, len(feats)))
         if X.shape[0]:

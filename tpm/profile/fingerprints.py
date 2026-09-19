@@ -60,7 +60,7 @@ def compute_global_stats(ws, settings, signal_cols: list[str], progress: Progres
         parts = []
         for c in chunk:
             q = quote_ident(c)
-            expr = f"(CASE WHEN isnan({q}) THEN NULL ELSE {q} END)" if types.get(c) in FLOAT_TYPES else q
+            expr = f"(CASE WHEN isfinite({q}) THEN {q} END)" if types.get(c) in FLOAT_TYPES else q  # stddev_samp raises on NaN and on +/-inf
             qfn = "quantile_cont" if exact else "approx_quantile"
             parts.append(
                 f"count({expr}), avg({expr}), stddev_samp({expr}), min({expr}), max({expr}), {qfn}({expr}, {qlist}), skewness({expr}), kurtosis({expr}), approx_count_distinct({expr}), "
