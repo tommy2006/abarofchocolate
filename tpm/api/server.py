@@ -895,7 +895,17 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         untrusted = [t for t in items if not t.get("trusted", True)]
         worst = min(items, key=lambda t: t.get("trust_score", 1.0)) if items else None
         # run-level verdict in plain words (round 6, quality_summary.json): the UI must not call the data fine while checks fail
-        summary = state.ws(run_id).read_json("quality_summary.json", None)
+        ws_q = state.ws(run_id)
+        summary = ws_q.read_json("quality_summary.json", None)
+        # rules approved after the stage add checks: recompute rather than repeat numbers the check table contradicts
+        if isinstance(summary, dict) and summary.get("n_checks") is not None:
+            try:
+                if int(summary["n_checks"]) != len(ws_q.checks()):
+                    fn = _lazy("tpm.quality:refresh_quality_summary")
+                    if fn is not None:
+                        summary = fn(ws_q)
+            except Exception:
+                pass
         return {"available": ok, "items": items, "n": len(items), "n_untrusted": len(untrusted), "untrusted": untrusted, "worst": worst, "overall": (sum(t.get("trust_score", 0) for t in items) / len(items)) if items else None, "summary": summary}
 
     @app.get("/api/runs/{run_id}/rules")

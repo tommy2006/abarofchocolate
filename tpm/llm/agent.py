@@ -384,12 +384,27 @@ class Toolbox:
                 out["dataset"] = {"rows": getattr(sch, "n_rows", None), "signals": len(getattr(sch, "signal_columns", []) or []), "groups": getattr(sch, "n_groups", None)}
         except Exception:
             pass
+        try:    # what the sensors are: the Understanding page counts the same roles
+            sigs = ws.read_json("signals.json", []) or []
+            sigs = sigs if isinstance(sigs, list) else (sigs.get("signals") or [])
+            roles: dict[str, int] = {}
+            for x in sigs:
+                roles[str(x.get("structural_role"))] = roles.get(str(x.get("structural_role")), 0) + 1
+            act = [str(x.get("id")) for x in sigs if x.get("structural_role") == "actuator_like"]
+            out["signals"] = {"total": len(sigs), "by_role": roles, "valves_or_controller_outputs": act,
+                              "clusters": len({x.get("cluster_id") for x in sigs if x.get("cluster_id")}),
+                              "note": "actuator_like = a valve or controller output (manipulated), continuous_measured / held_sampled = measurements"}
+        except Exception:
+            pass
         try:
             flags = ws.flags()
             kinds: dict[str, int] = {}
             for f in flags:
                 kinds[str(f.kind)] = kinds.get(str(f.kind), 0) + 1
-            out["flags"] = {"total": len(flags), "by_kind": kinds}
+            groups = {f.group_id for f in flags if f.group_id}
+            out["flags"] = {"total": len(flags), "by_kind": kinds, "groups_with_findings": len(groups),
+                            "groups_in_file": (out.get("dataset") or {}).get("groups"),
+                            "note": "a group is one run / batch of the file; a finding covers a stretch of rows, so there are fewer groups than flags"}
         except Exception:
             pass
         try:
@@ -428,6 +443,27 @@ class Toolbox:
             tr = ws.trust()
             bad = [t for t in tr if not t.trusted]
             out["batches"] = {"total": len(tr), "untrusted": len(bad)}
+        except Exception:
+            pass
+        try:    # what left this machine, from the run's own egress ledger (the Data flow page reads the same file)
+            led = ws.read_jsonl("egress_ledger") if ws.exists("egress_ledger") else []
+            demo = sum(1 for r in led if str(r.get("guard_result") or "").startswith("demo_"))
+            sent = [r for r in led if r.get("route") == "external" and r.get("guard_result") == "allowed" and r.get("ok", True) and not str(r.get("guard_result") or "").startswith("demo_")]
+            out["data_flow"] = {"profile": getattr(self.settings, "profile", None), "model_calls": len(led),
+                                "local_calls": sum(1 for r in led if r.get("route") == "local"),
+                                "sent_to_external_model": len(sent), "bytes_sent": sum(int(r.get("payload_bytes") or 0) for r in sent),
+                                "blocked_by_the_guard": sum(1 for r in led if r.get("guard_result") == "blocked"),
+                                "guard_demonstration_records": demo,
+                                "note": "demonstration records are shown, never sent; raw rows never leave in any profile"}
+        except Exception:
+            pass
+        try:    # what the assessor concluded (the Assessor page shows the same)
+            a_ = ws.read_json("assessor.json", None)
+            if isinstance(a_, dict):
+                recs = [str((r or {}).get("text") or r)[:200] for r in (a_.get("recommendations") or [])[:3]]
+                out["assessor"] = {k: a_.get(k) for k in ("verdict", "combined", "statement", "more_data") if a_.get(k) is not None}
+                if recs:
+                    out["assessor"]["top_recommendations"] = recs
         except Exception:
             pass
         for art, key, keep in (("quality_summary.json", "quality_verdict", ("verdict", "statement", "n_fail", "n_warn", "n_not_testable", "top_problem")),

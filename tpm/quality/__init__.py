@@ -22,7 +22,7 @@ from .checks import _quality_context, run_checks_for_batch
 from .rules import add_rules_from_file, apply_override, compile_rule, load_rules_file, parse_rule_text, run_active_rules, run_rule, run_rules_on_frame
 from .trust import dominant_problem, run_summary, trust_verdict
 
-__all__ = ["run_quality", "check_batch", "compile_rule", "apply_override", "define_batches", "trust_verdict", "run_rule", "parse_rule_text", "load_rules_file", "add_rules_from_file", "run_active_rules", "load_batch_frame", "is_problem", "NOT_TESTABLE", "QUALITY_SUMMARY"]
+__all__ = ["run_quality", "refresh_quality_summary", "check_batch", "compile_rule", "apply_override", "define_batches", "trust_verdict", "run_rule", "parse_rule_text", "load_rules_file", "add_rules_from_file", "run_active_rules", "load_batch_frame", "is_problem", "NOT_TESTABLE", "QUALITY_SUMMARY"]
 
 QUALITY_SUMMARY = "quality_summary.json"
 
@@ -43,6 +43,23 @@ def check_batch(ws: Any, settings: Any, batch_df: Any, batch_id: str) -> tuple[l
         ws.rewrite_jsonl("trust", verdicts)
         ws.log.record("system:quality", "trust", "batch", batch_id, {"trusted": verdict.trusted, "trust_score": verdict.trust_score, "untrusted_signals": verdict.untrusted_signals[:20], "recomputed_after_rule_checks": True})
     return checks, verdict
+
+
+def refresh_quality_summary(ws: Any) -> dict[str, Any]:
+    """Recompute quality_summary.json from the checks and trust verdicts the workspace holds now. Rules approved after
+    the stage (the UI, `showcase`, `--rules`) add checks and can fail, so the stored verdict would otherwise quote
+    numbers the check table no longer agrees with."""
+    checks = list(ws.checks())
+    verdicts = list(ws.trust())
+    batches = ws.read_json("batches.json", []) or []
+    bad_ids = {v.batch_id for v in verdicts if not v.trusted}
+    rs = run_summary(verdicts, batches, n_fail=sum(c.status == "fail" for c in checks), n_warn=sum(c.status == "warn" for c in checks),
+                     n_not_testable=sum(c.status == NOT_TESTABLE for c in checks), n_checks=len(checks),
+                     not_testable_categories={c.category for c in checks if c.status == NOT_TESTABLE},
+                     top_problem=dominant_problem([c for c in checks if c.status == "fail"], bad_ids or None))
+    rs.update({"n_grouped": sum(c.check_type in ("frozen_block", "missing_block", "quantization_block") for c in checks), "computed_by": "quality.refresh_quality_summary"})
+    ws.write_json(QUALITY_SUMMARY, rs)
+    return rs
 
 
 def run_quality(ws: Any, settings: Any, ctx: Optional[dict[str, Any]] = None) -> dict[str, Any]:

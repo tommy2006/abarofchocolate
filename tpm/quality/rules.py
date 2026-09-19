@@ -975,8 +975,14 @@ def run_active_rules(ws: Any, settings: Any, batches: list[dict[str, Any]], rule
                 ws.append_jsonl("checks", res)
         del df
     ws.log.record("system:quality", "rules_evaluated", "rules", "rules.json", {"n_rules": len(rules), "n_batches": len(batches), "n_fail": sum(c.status == "fail" for c in out)}, [e for c in out for e in c.evidence_ids][:50])
-    return out
+    if persist and out:
+        try:    # the run-level verdict counts every check, so it is recomputed when rules add or change some
+            from . import refresh_quality_summary
 
+            refresh_quality_summary(ws)
+        except Exception:
+            pass
+    return out
 
 def run_rules_on_frame(ws: Any, settings: Any, df: pd.DataFrame, batch_id: str, rules: Optional[list[Rule]] = None, persist: bool = True) -> list[CheckResult]:
     """Stream path: active rules on an in-memory batch (alias or original column names)."""
