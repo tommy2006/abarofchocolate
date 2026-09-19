@@ -358,13 +358,28 @@ def plain_for(ws, settings, view: str, lang: str = "en", enhance: bool = False) 
             res = complete("report_narrative", payload, purpose=f"plain-language {view} ({lang})", ws=ws, settings=settings, language=lang, max_tokens=900)
             txt = ""
             if res.ok:
-                if isinstance(res.data, dict):
-                    for k in ("text", "summary", "narrative", "content"):
-                        if isinstance(res.data.get(k), str):
-                            txt = res.data[k]
+                d = res.data if isinstance(res.data, dict) else None
+                if d is None and res.text and res.text.strip().startswith("{"):
+                    try:
+                        d = json.loads(res.text)
+                    except Exception:
+                        d = None
+                if isinstance(d, dict):
+                    # report_narrative answers {title, executive_summary, sections:[{heading, body}], uncertainty}
+                    paras: list[str] = []
+                    for k in ("executive_summary", "summary", "text", "narrative", "content"):
+                        if isinstance(d.get(k), str) and d[k].strip():
+                            paras.append(d[k].strip())
                             break
-                    if not txt and isinstance(res.data.get("sections"), list):
-                        txt = "\n\n".join(str(s.get("text", "")) for s in res.data["sections"] if isinstance(s, dict))
+                    for sec in d.get("sections") or []:
+                        if isinstance(sec, dict):
+                            body = str(sec.get("body") or sec.get("text") or "").strip()
+                            if body and body not in paras:
+                                paras.append(body)
+                    unc = d.get("uncertainty")
+                    if isinstance(unc, list) and unc:
+                        paras.append("What remains uncertain: " + " ".join(str(u) for u in unc[:4]))
+                    txt = "\n\n".join(paras)
                 if not txt and res.text and not res.text.strip().startswith("{"):
                     txt = res.text
             if txt.strip():
