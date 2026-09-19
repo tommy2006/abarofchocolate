@@ -48,6 +48,41 @@ def test_doctor_runs(tmp_path):
     r = _run(["doctor"], tmp_path / "ws")
     assert r.returncode in (0, 1), r.stderr
     assert "doctor" in r.stdout and "Python" in r.stdout and "problem(s)" in r.stdout
+    assert "report e-mail not configured" in r.stdout  # the test environment never sees the developer's .env
+
+
+def test_doctor_checks_the_mail_settings(monkeypatch):
+    import socket
+
+    from tpm.cli import _check_email
+    from tpm.config import load_settings
+
+    s = load_settings()
+    msgs: list[tuple[str, str]] = []
+    ok = lambda m: msgs.append(("ok", m))  # noqa: E731
+    warn = lambda m, fix="": msgs.append(("warn", m))  # noqa: E731
+    _check_email(s, ok, warn)
+    assert len(msgs) == 1 and msgs[0][0] == "warn" and "not configured" in msgs[0][1]
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)  # never accept()ed: the probes stay queued, so the queue must hold all of them (Windows refuses otherwise)
+    port = srv.getsockname()[1]
+    try:
+        monkeypatch.setenv("TPM_SMTP_HOST", "127.0.0.1")
+        monkeypatch.setenv("TPM_SMTP_PORT", str(port))
+        msgs.clear()
+        _check_email(s, ok, warn)
+        assert [k for k, _ in msgs] == ["warn", "ok"] and "sender" in msgs[0][1] and "reachable" in msgs[1][1]
+        monkeypatch.setenv("TPM_SMTP_FROM", "onboarding@resend.dev")
+        msgs.clear()
+        _check_email(s, ok, warn)
+        assert msgs == [("ok", f"report e-mail: 127.0.0.1:{port} reachable, sender onboarding@resend.dev")]
+    finally:
+        srv.close()
+    monkeypatch.setenv("TPM_SMTP_PORT", str(port))  # nothing listens there any more
+    msgs.clear()
+    _check_email(s, ok, warn)
+    assert msgs[-1][0] == "warn" and "not reachable" in msgs[-1][1]
 
 
 def test_models_runs(tmp_path):

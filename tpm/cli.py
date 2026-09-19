@@ -4,7 +4,7 @@
     python -m tpm serve [--host 127.0.0.1] [--port 8000] [--open]
     python -m tpm replay <run_id> [--speed 10] [--max-batches N]
     python -m tpm report <run_id> [--format html|pdf|pptx|all] [--lang en|fi|sv|all] [--out FILE|DIR] [--no-llm]
-    python -m tpm email <run_id> --to a@b.c [--lang en] [--pdf]
+    python -m tpm email <run_id> --to a@b.c [--lang en] [--pdf] [--pptx]
     python -m tpm export <run_id> [--out DIR]
     python -m tpm verify-log <run_id>
     python -m tpm models | bakeoff | demo | doctor | list
@@ -525,6 +525,27 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return rc
 
 
+def _check_email(settings: Any, ok: Callable[[str], None], warn: Callable[..., None]) -> None:
+    """Mail settings for the report's Send button / `tpm email`: present, a sender set, server reachable. Opens a TCP
+    connection to the configured server and closes it; nothing is sent."""
+    import socket
+
+    s = settings.report.smtp
+    if not os.environ.get(s.host_env, "").strip():
+        warn(f"report e-mail not configured ({s.host_env} is empty); Send by email and `tpm email` will fail", "set the TPM_SMTP_* lines in .env (see .env.example; Resend works over SMTP)")
+        return
+    from .report.email import smtp_config
+
+    cfg = smtp_config(settings)
+    if not os.environ.get(s.from_env, "").strip():
+        warn(f"{s.from_env} is empty, so the sender is '{cfg['from']}'; most providers reject that", f"set {s.from_env} (Resend: onboarding@resend.dev or an address on your verified domain)")
+    try:
+        socket.create_connection((cfg["host"], cfg["port"]), timeout=5).close()
+        ok(f"report e-mail: {cfg['host']}:{cfg['port']} reachable, sender {cfg['from']}")
+    except OSError as e:
+        warn(f"report e-mail: {cfg['host']}:{cfg['port']} not reachable ({e})", "check the network; if it blocks this port use another one the provider offers (Resend: 465 or 2465 with SSL, 587 or 2587 with STARTTLS)")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems = 0
     warnings = 0
@@ -611,6 +632,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         warn(".env missing (defaults are used)", "copy .env.example to .env")
     if settings.active_profile.allow_external and not settings.external_llm.api_key:
         warn(f"profile {settings.profile} allows external calls but {settings.external_llm.api_key_env} is not set", f"add {settings.external_llm.api_key_env}=... to .env or use the no-egress profile")
+    _check_email(settings, ok, warn)
 
     from .pipeline import STAGES, _resolve
 

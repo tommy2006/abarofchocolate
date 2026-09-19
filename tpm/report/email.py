@@ -31,6 +31,21 @@ def smtp_config(settings: Settings) -> dict[str, Any]:
 
 
 _ATTACH_TYPES = {".pdf": ("application", "pdf"), ".pptx": ("application", "vnd.openxmlformats-officedocument.presentationml.presentation")}
+# ports that speak TLS from the first byte (SMTPS); every other port starts in plain text and upgrades with STARTTLS.
+# 2465 is the alternative some providers (e.g. Resend) offer for networks that block 465.
+_IMPLICIT_TLS_PORTS = {465, 2465}
+
+
+def _smtp_error_text(e: Exception) -> str:
+    """The server's own words (e.g. why a recipient was refused) instead of a tuple with a bytes repr."""
+    def _txt(code: Any, msg: Any) -> str:
+        return f"{code} {msg.decode('utf-8', 'replace') if isinstance(msg, bytes) else msg}".strip()
+
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        return "; ".join(f"{rcpt}: {_txt(*resp)}" for rcpt, resp in e.recipients.items())
+    if isinstance(e, smtplib.SMTPResponseException):
+        return _txt(e.smtp_code, e.smtp_error)
+    return str(e)
 
 
 def build_message(ws: Workspace, settings: Settings, to: list[str], lang: str, path: Path, sender: str, subject: Optional[str] = None, extra_attachments: Optional[list[Path]] = None) -> EmailMessage:
@@ -77,12 +92,14 @@ def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str 
             if wanted:
                 extras.append(Path(ensure_export(ws, settings, lang, fmt, force=regenerate)["path"]))
     msg = build_message(ws, settings, recipients, lang, path, cfg["from"], subject, extra_attachments=extras)
-    if cfg["port"] == 465:
-        server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=30)
-    else:
-        server = smtplib.SMTP(cfg["host"], cfg["port"], timeout=30)
+    implicit_tls = cfg["port"] in _IMPLICIT_TLS_PORTS
     try:
-        if cfg["port"] != 465:
+        server = (smtplib.SMTP_SSL if implicit_tls else smtplib.SMTP)(cfg["host"], cfg["port"], timeout=30)
+    except (OSError, smtplib.SMTPException) as e:
+        raise RuntimeError(f"could not reach the mail server {cfg['host']}:{cfg['port']} ({e}). If this network blocks the port, "
+                           "use another one the provider offers (Resend: 465 or 2465 with SSL, 587 or 2587 with STARTTLS)") from e
+    try:
+        if not implicit_tls:
             try:
                 server.starttls()
             except smtplib.SMTPNotSupportedError:
@@ -90,6 +107,8 @@ def email_report(ws: Workspace, settings: Any = None, to: Any = None, lang: str 
         if cfg["user"]:
             server.login(cfg["user"], cfg["password"])
         server.send_message(msg)
+    except smtplib.SMTPException as e:
+        raise RuntimeError(f"not sent, the mail server {cfg['host']} answered: {_smtp_error_text(e)}") from e
     finally:
         try:
             server.quit()

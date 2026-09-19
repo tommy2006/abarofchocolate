@@ -164,9 +164,13 @@ chat, all without network egress.
   - Neither file contains raw rows: both are drawn from the derived artifacts and bucketed aggregates of the report.
 - `python -m tpm export <run_id>` bundles the reports (HTML, PDF, PowerPoint), the decision log (JSONL), the egress
   ledger, the chain verification result and all derived artifacts into `exports/<run_id>_export.zip`.
-- `python -m tpm email <run_id> --to someone@example.org --lang fi [--pdf]` sends the report (`--pdf` attaches the PDF
-  as well). Set in `.env`:
-  `TPM_SMTP_HOST`, `TPM_SMTP_PORT` (587 STARTTLS, 465 SSL), `TPM_SMTP_USER`, `TPM_SMTP_PASSWORD`, `TPM_SMTP_FROM`.
+- `python -m tpm email <run_id> --to someone@example.org --lang fi [--pdf] [--pptx]` sends the HTML report (`--pdf` /
+  `--pptx` attach the PDF / the deck as well). In the UI: Report view → *Send by email*, with *Attach PDF* and *Attach
+  PowerPoint* ticked by default. Set in `.env`:
+  `TPM_SMTP_HOST`, `TPM_SMTP_PORT` (465 / 2465 SSL, 587 / 2587 STARTTLS), `TPM_SMTP_USER`, `TPM_SMTP_PASSWORD`,
+  `TPM_SMTP_FROM`. Resend works as is: host `smtp.resend.com`, user `resend`, password = the Resend API key, sender
+  `onboarding@resend.dev` (which delivers only to the address of your Resend account until you verify a domain).
+  `python -m tpm doctor` checks the settings and that the server is reachable.
 
 ---
 
@@ -182,7 +186,7 @@ chat, all without network egress.
 | Not enough RAM | close other applications; a local 6 GB model plus the pipeline wants ~8 GB free; detection subsamples automatically |
 | A stage shows `failed` | the error is in `workspace/<run_id>/status.json` and the decision log; `python -m tpm run … --continue-on-error` keeps going |
 | Wrong delimiter / header / grouping | `--opt delimiter=; --opt has_header=false --opt group_columns=col1`, or set them on the Runs page |
-| E-mail fails | `TPM_SMTP_HOST` etc. must be in `.env`; `python -m tpm doctor` lists what is missing |
+| E-mail fails | `TPM_SMTP_HOST` etc. must be in `.env`; `python -m tpm doctor` lists what is missing and tests the connection. Resend's "550 You can only send testing emails to your own email address": with `onboarding@resend.dev` send to your Resend account's address, or verify a domain |
 | Anything else | `python -m tpm doctor` |
 
 ---

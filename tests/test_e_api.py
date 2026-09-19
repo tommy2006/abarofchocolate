@@ -206,6 +206,23 @@ def test_report_and_email(client):
     assert client.post(f"/api/runs/{RUN}/report/email", json={"to": "nope"}).status_code == 400
 
 
+def test_email_route_passes_the_attachment_choice(client, monkeypatch):
+    import tpm.report
+
+    calls = []
+
+    def fake_email_report(ws, settings, to, lang, **kw):
+        calls.append({"to": to, "lang": lang, **kw})
+        return {"sent": True, "to": [to], "attachments": ["report_fi.html"] + [f"report_fi.{x}" for x in ("pdf", "pptx") if kw.get(f"attach_{x}")]}
+
+    monkeypatch.setattr(tpm.report, "email_report", fake_email_report)
+    r = client.post(f"/api/runs/{RUN}/report/email", json={"to": "me@example.com", "lang": "fi", "attach_pdf": True, "attach_pptx": True})
+    assert r.status_code == 200 and r.json()["result"]["attachments"] == ["report_fi.html", "report_fi.pdf", "report_fi.pptx"]
+    assert calls[-1] == {"to": "me@example.com", "lang": "fi", "attach_pdf": True, "attach_pptx": True}
+    client.post(f"/api/runs/{RUN}/report/email", json={"to": "me@example.com", "lang": "fi"})
+    assert calls[-1]["attach_pdf"] is False and calls[-1]["attach_pptx"] is False  # an old client still gets the HTML only
+
+
 def test_sse_yields_an_event(client):
     with client.stream("GET", f"/api/runs/{RUN}/events", params={"max_events": 1}) as resp:
         assert resp.status_code == 200

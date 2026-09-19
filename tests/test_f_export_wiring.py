@@ -260,6 +260,78 @@ def test_email_can_attach_the_pdf(fake_ws, monkeypatch):
     assert len(list(sent["msg"].iter_attachments())) == 1
 
 
+def _fake_smtp(sent: dict, fail: Exception | None = None):
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            sent.setdefault("connections", []).append((type(self).__name__, host, port))
+
+        def starttls(self):
+            sent["starttls"] = True
+
+        def login(self, u, p):
+            sent["login"] = (u, p)
+
+        def send_message(self, msg):
+            if fail is not None:
+                raise fail
+            sent["msg"] = msg
+
+        def quit(self):
+            pass
+
+    return FakeSMTP
+
+
+def test_email_attaches_pdf_and_deck_over_implicit_tls(fake_ws, monkeypatch):
+    """The Report view's default: HTML + PDF + deck in one message, through an SMTPS port (Resend: 465 or 2465)."""
+    import smtplib
+
+    from tpm.report import email_report
+
+    sent: dict = {}
+    fake = _fake_smtp(sent)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", type("SMTP_SSL", (fake,), {}))
+    monkeypatch.setattr(smtplib, "SMTP", type("SMTP", (fake,), {}))
+    monkeypatch.setenv("TPM_SMTP_HOST", "smtp.resend.com")
+    monkeypatch.setenv("TPM_SMTP_PORT", "2465")
+    monkeypatch.setenv("TPM_SMTP_USER", "resend")
+    monkeypatch.setenv("TPM_SMTP_PASSWORD", "re_test_not_a_key")
+    monkeypatch.setenv("TPM_SMTP_FROM", "onboarding@resend.dev")
+    res = email_report(fake_ws, fake_ws.settings, "me@example.com", "en", attach_pdf=True, attach_pptx=True)
+    assert sent["connections"] == [("SMTP_SSL", "smtp.resend.com", 2465)] and "starttls" not in sent
+    assert sent["login"] == ("resend", "re_test_not_a_key") and sent["msg"]["From"] == "onboarding@resend.dev"
+    atts = list(sent["msg"].iter_attachments())
+    assert [a.get_filename() for a in atts] == ["report_en.html", f"tpm_{fake_ws.run_id}_en.pdf", f"tpm_{fake_ws.run_id}_en.pptx"]
+    assert [a.get_content_type() for a in atts] == ["text/html", "application/pdf", PPTX_TYPE]
+    assert atts[1].get_payload(decode=True)[:5] == b"%PDF-" and atts[2].get_payload(decode=True)[:2] == b"PK"
+    assert res["attachments"] == ["report_en.html", "report_en.pdf", "report_en.pptx"]
+    log = fake_ws.log.entries(action="email")
+    assert log and log[-1].payload["attachments"] == res["attachments"] and "re_test_not_a_key" not in json.dumps(log[-1].payload)
+
+
+def test_email_failure_names_the_mail_servers_reason(fake_ws, monkeypatch):
+    import smtplib
+
+    from tpm.report import email_report
+
+    refused = smtplib.SMTPDataError(550, b"You can only send testing emails to your own email address (owner@example.com).")
+    monkeypatch.setattr(smtplib, "SMTP", _fake_smtp({}, fail=refused))
+    monkeypatch.setenv("TPM_SMTP_HOST", "smtp.resend.com")
+    monkeypatch.setenv("TPM_SMTP_PORT", "587")
+    with pytest.raises(RuntimeError) as ei:
+        email_report(fake_ws, fake_ws.settings, "someone.else@example.com", "en")
+    assert "550 You can only send testing emails to your own email address" in str(ei.value) and "b'" not in str(ei.value)
+
+    def unreachable(*a, **k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", unreachable)
+    monkeypatch.setenv("TPM_SMTP_PORT", "465")
+    with pytest.raises(RuntimeError) as ei:
+        email_report(fake_ws, fake_ws.settings, "me@example.com", "en")
+    assert "smtp.resend.com:465" in str(ei.value) and "2587" in str(ei.value)
+
+
 def test_cli_report_formats(fake_ws, tmp_path):
     env = dict(os.environ)
     env.update({"TPM_WORKSPACE": str(fake_ws.dir.parent), "PYTHONIOENCODING": "utf-8", "TPM_REPORT_LLM": "0"})

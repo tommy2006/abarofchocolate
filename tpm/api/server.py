@@ -1484,10 +1484,10 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         if fn is None:
             return _unavailable("tpm.report:email_report", "Email sending is not available in this build.")
         try:
-            res = fn(ws, state.settings, to, lang, attach_pdf=bool(body.get("attach_pdf")))
+            res = fn(ws, state.settings, to, lang, attach_pdf=bool(body.get("attach_pdf")), attach_pptx=bool(body.get("attach_pptx")))
         except Exception as e:
             raise HTTPException(500, f"email failed: {e}")
-        ws.log.record("human:ui", "report_emailed", "report", lang, {"to": to})
+        ws.log.record("human:ui", "report_emailed", "report", lang, {"to": to, "attachments": (res or {}).get("attachments") if isinstance(res, dict) else None})
         return {"ok": True, "result": _jsonable(res) if res is not None else {}}
 
     # ---------- data flow ----------

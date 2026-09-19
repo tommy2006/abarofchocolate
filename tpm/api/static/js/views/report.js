@@ -60,7 +60,7 @@ export async function render(main) {
   const fmt_bytes = (n) => (fmt.bytes ? fmt.bytes(n) : `${Math.round(n / 1024)} kB`);
   const pdfBtn = exportBtn('pdf', t('rep.downloadPdf'));
   const pptxBtn = exportBtn('pptx', t('rep.downloadPptx'));
-  const to = el('input', { type: 'email', placeholder: 'name@example.com', style: { width: '240px', maxWidth: '100%' } });
+  const to = el('input', { type: 'email', required: true, placeholder: 'name@example.com', style: { width: '240px', maxWidth: '100%' } });
   const status = el('div', { class: 'stack', style: { gap: '6px', marginBottom: '10px' }, role: 'status', 'aria-live': 'polite' });
   const preview = el('iframe', { title: t('rep.preview'), class: 'report-frame' });
   preview.hidden = true;
@@ -134,7 +134,39 @@ export async function render(main) {
   view.append(exportStatus);
   const em = section(t('rep.email'));
   view.append(em.root);
-  em.body.append(el('form', { class: 'row', onSubmit: async (e) => { e.preventDefault(); const r = await runApi('/report/email', { method: 'POST', body: { to: to.value.trim(), lang: sel.value } }); if (r.ok) toast(t('rep.sent', { to: to.value.trim() }), 'ok'); else toast(errText(r), 'fail'); } }, el('label', { class: 'row' }, t('rep.to'), to), el('button', { class: 'btn', type: 'submit' }, t('common.send'))));
+  // the HTML report is always attached; PDF / PowerPoint are generated on the server when missing, so sending can take
+  // a few seconds: the button is disabled meanwhile and the result (attached files or the mail server's answer) stays visible
+  const attPdf = el('input', { type: 'checkbox', checked: true });
+  const attPptx = el('input', { type: 'checkbox', checked: true });
+  const sendBtn = el('button', { class: 'btn', type: 'submit' }, t('common.send'));
+  const emailStatus = el('div', { class: 'small', role: 'status', 'aria-live': 'polite' });
+  const sendEmail = async (e) => {
+    e.preventDefault();
+    const addr = to.value.trim();
+    if (!addr) return;
+    sendBtn.disabled = true; sendBtn.textContent = t('rep.sending');
+    clear(emailStatus); emailStatus.append(el('span', { class: 'spinner', text: '● ' }), t('rep.sendingTo', { to: addr }));
+    const r = await runApi('/report/email', { method: 'POST', body: { to: addr, lang: sel.value, attach_pdf: attPdf.checked, attach_pptx: attPptx.checked } });
+    sendBtn.disabled = false; sendBtn.textContent = t('common.send');
+    if (!view.isConnected) return;
+    clear(emailStatus);
+    if (r.ok) {
+      const files = (r.data && r.data.result && r.data.result.attachments) || [];
+      emailStatus.append(notice(t('rep.sentFiles', { to: addr, files: files.join(', ') }), 'ok'));
+      toast(t('rep.sent', { to: addr }), 'ok');
+    } else {
+      emailStatus.append(notice(`${t('rep.sendFailed')} ${errText(r)}`, 'fail'));
+      toast(t('rep.sendFailed'), 'fail');
+    }
+  };
+  em.body.append(
+    el('form', { class: 'row', onSubmit: sendEmail },
+      el('label', { class: 'row' }, t('rep.to'), to),
+      el('label', { class: 'row' }, attPdf, t('rep.attachPdf')),
+      el('label', { class: 'row' }, attPptx, t('rep.attachPptx')),
+      sendBtn),
+    el('div', { class: 'small muted', text: t('rep.emailHelp') }),
+    emailStatus);
   const pv = section(t('rep.preview'));
   view.append(pv.root);
   pv.body.append(status, preview);

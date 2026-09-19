@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SETTINGS_PATH = ROOT / "config" / "settings.yaml"
 
-load_dotenv(ROOT / ".env", override=False)
+# TPM_NO_DOTENV=1 (set by the test suite) keeps a developer's real keys and mail settings out of the process
+if os.environ.get("TPM_NO_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
+    load_dotenv(ROOT / ".env", override=False)
 
 
 class Profile(BaseModel):
