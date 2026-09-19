@@ -11,6 +11,7 @@ import * as assessor from './js/views/assessor.js';
 import * as log from './js/views/log.js';
 import * as dataflow from './js/views/dataflow.js';
 import * as report from './js/views/report.js';
+import * as live from './js/views/live.js';
 
 export { navigate };
 
@@ -24,6 +25,7 @@ const VIEWS = [
   { id: 'log', num: '6', key: 'nav.log', mod: log, level: 'reviewer' },
   { id: 'dataflow', num: '7', key: 'nav.dataflow', mod: dataflow },
   { id: 'report', num: '8', key: 'nav.report', mod: report },
+  { id: 'live', num: '9', key: 'nav.live', mod: live },
 ];
 let current = null;
 let rendering = false;

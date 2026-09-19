@@ -63,6 +63,7 @@ applies to the UI and to the report.
 | **Data flow** | active profile, what may leave the machine and what never does, the egress ledger of every model call | 8 |
 | **Report** | the self-contained HTML report (EN / FI / SV), e-mail it, export the run as a zip | 7 (adaptability section), all |
 | **Assessor** | how fit the data is for unsupervised monitoring, learning curve, recommended actions (applied only with approval) | bonus |
+| **Live monitor** | a page of its own (needs no run): follows a CSV that keeps growing and re-checks every sensor each analysis cycle (15 min by default); see [Live monitor](#live-monitor) | bonus |
 
 The HTML report (`workspace/<run_id>/report_<lang>.html`) contains all eight expected outputs in one printable
 page: sensor understanding, data-quality checks, drift monitoring with score sparklines, root-cause diagnoses with
@@ -73,6 +74,34 @@ available, a clearly labelled "model-written summary" is added on top.
 A five-minute judging walkthrough is in [docs/JUDGES_GUIDE.md](docs/JUDGES_GUIDE.md).
 
 ---
+
+## Live monitor
+
+The rail's last page, **9 Live monitor**, watches a data file that keeps getting new lines (a plant writing about one row per
+second) and re-analyses it every cycle. It is independent of the run pipeline: no run is needed and it never touches one.
+It has two tabs.
+
+**Monitor** shows the verdict banner, counts, a table of every sensor and a history graph. Each sensor is judged on four
+checks, not one number: *level* (how far the cycle average is from what it learned as normal), *trend* (steadily moving away,
+inside the cycle or over the last three), *noise* (more jumpy or unusually quiet) and *range* (readings outside the min-max
+seen while learning), plus *dead* (value never changes) and *missing*. A broken sensor is reported as a sensor problem,
+separate from a process drift, and a stream that stops or has gaps is reported as "data not trusted".
+
+**Settings** has three parts:
+
+1. **Sensitivity**: how far a sensor may move from normal before it is flagged (watch / alarm, as % of its normal level or
+   in normal spreads, plus noise and range limits). Type the numbers, or press **Let the AI decide**: the local model picks
+   them from a summary of how each sensor behaved while learning, inside safe limits, and explains its choice.
+2. **Simulate with a file**: replay any CSV, even a multi-gigabyte one, at a chosen speed and from a chosen start row. Drop
+   the file on the page or type its full path (no copy is made then). A built-in demo plant needs no file.
+3. **Live data**: paste a link (http / https) to a CSV that grows, or the path of a CSV another program keeps writing. Only
+   the new lines are read.
+
+Any CSV works: every numeric column that is not a time, id or label column is a sensor. The learned baseline needs the first
+cycles to be normal operation. Data control: raw rows stay in `workspace/_live`; the model (local only, through the egress
+ledger path) sees only per-sensor summaries; the only network traffic is downloading from a link you paste, nothing is sent
+out. Settings, the source and a decision log (`log.jsonl`) live in `workspace/_live/`. API: `/api/live/*`; code: `tpm/live/`;
+page: `tpm/api/static/js/views/live.js`.
 
 ## Command line reference
 
@@ -201,6 +230,7 @@ tpm/
   detect/  diagnose/          baseline regime, OOF ensemble, change points, patterns, cascade; diagnosis + critique
   llm/                        router, egress guard, ledger, providers (Ollama / Anthropic), local tool agent
   api/                        FastAPI server + static UI
+  live/                       live sensor monitor: engine (four checks), monitor (sources, loop, AI-chosen sensitivity), /api/live routes
   log/                        hash-chained decision log, exports
   report/                     HTML report (Jinja2, inline SVG), PDF (pdf.py), PowerPoint (pptx_export.py), i18n EN/FI/SV, e-mail
 config/settings.yaml          all tunables and profiles;  config/rules.example.md  example rules
