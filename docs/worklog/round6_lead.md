@@ -43,3 +43,6 @@ columns) through, aliased and rounded but still rows. Records are now rows as so
 own columns, and a sentence with 3 value pairs is a raw row when it also names a row number, a time stamp or a file
 (`tpm/llm/guard.py`, `tests/test_d_guard.py::test_narrow_table_rows_never_leave`). Also fixed: `run --rules` wrote
 uncompiled drafts that the quality stage then duplicated; the diagnose stage writes its log records in bulk.
+The full 6 GB run also caught a bug that no sample reached: a confirmed actuator hypothesis was written with an inference
+status the contract does not have, and the profile stage stopped; fixed, with a test for every branch
+(`tests/test_c_hypothesis_tests.py`).
