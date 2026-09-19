@@ -512,7 +512,7 @@ def check_hypotheses(ws, descriptors: list[SignalDescriptor], relations: dict[st
                 drivers.append((pr["a"], lag, r))
         if followers:
             b, lag, r = followers[0]
-            claim, status, conf = f"hypothesis test: {d.id} as a controller output - confirmed: {b} follows its moves {lag} sample(s) later (r={r:.2f})", "supported", 0.7
+            claim, status, conf = f"hypothesis test: {d.id} as a controller output - confirmed: {b} follows its moves {lag} sample(s) later (r={r:.2f})", "inferred", 0.7
         elif drivers:
             a, lag, r = drivers[0]
             claim, status, conf = f"hypothesis test: {d.id} as a controller output - consistent: it reacts {lag} sample(s) after {a} (r={r:.2f}), as a controller output reacts to the measurement it controls", "inferred", 0.55
