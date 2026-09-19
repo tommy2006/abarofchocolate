@@ -15,7 +15,7 @@ from typing import Any, Optional
 from ..contracts import SignalDescriptor
 from .fingerprints import compute_fingerprints, load_dynamics_sample
 from .relations import compute_relations
-from .roles import ACTOR, MANIPULATED_MIN_SCORE, STAGE, apply_override, heuristic_hypotheses, llm_hypotheses, manipulated_evidence, structural_role  # noqa: F401
+from .roles import ACTOR, MANIPULATED_MIN_SCORE, STAGE, apply_override, heuristic_hypotheses, llm_hypotheses, llm_unit_operations, manipulated_evidence, structural_role, check_hypotheses  # noqa: F401
 
 __all__ = ["run_profile", "apply_override", "write_catalog", "build_understanding"]
 
@@ -244,6 +244,13 @@ def run_profile(ws, settings, ctx: dict[str, Any]) -> dict[str, Any]:
     if domain["hypotheses_enabled"] and not options.get("skip_llm") and budget_left > llm_reserve:
         progress(0.85, "asking the language model for hypotheses (optional)")
         llm_info = llm_hypotheses(ws, settings, descriptors, rel, domain_ll, options.get("domain_hint"))
+        budget_left = float(ctx.get("time_budget_s", settings.time_budget_s)) - (time.time() - float(ctx.get("t_start", t0)))
+        if budget_left > llm_reserve:
+            progress(0.9, "asking the language model to name the process units (optional)")
+            llm_info["unit_operations"] = llm_unit_operations(ws, settings, descriptors, rel, options.get("domain_hint"))
+    if domain["hypotheses_enabled"]:
+        n_tests = check_hypotheses(ws, descriptors, rel)
+        ws.log.record(ACTOR, "hypothesis_tests", "dataset", ws.run_id, {"n_tested": n_tests})
 
     # ---------------- artifacts
     progress(0.95, "writing catalog")

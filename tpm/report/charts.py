@@ -208,3 +208,35 @@ def dataflow_diagram(
 def badge(text: str, kind: str = "muted") -> str:
     color = PALETTE.get(kind, PALETTE["muted"])
     return f'<span class="badge" style="background:{color}">{escape(str(text))}</span>'
+
+
+def heatmap(labels: Sequence[str], matrix: Sequence[Sequence[Optional[float]]], cell: int = 11, title: str = "") -> str:
+    """Signed correlation heatmap (blue negative, red positive, white none). Labels on both axes; readable up to
+    about 60 signals; the value is in each cell's tooltip."""
+    n = len(labels)
+    if n == 0:
+        return ""
+    pad = 46
+    w = pad + n * cell + 8
+    h = pad + n * cell + 26
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-label="{escape(title or "correlation heatmap")}">']
+    fs = max(6, min(10, cell - 2))
+    for i, lab in enumerate(labels):
+        y = pad + i * cell + cell - 2
+        out.append(f'<text x="{pad - 3}" y="{y}" font-size="{fs}" text-anchor="end" fill="{PALETTE["ink"]}">{escape(str(lab))}</text>')
+        x = pad + i * cell + cell - 2
+        out.append(f'<text x="{x}" y="{pad - 4}" font-size="{fs}" text-anchor="start" transform="rotate(-90 {x} {pad - 4})" fill="{PALETTE["ink"]}">{escape(str(lab))}</text>')
+    for i in range(n):
+        for j in range(n):
+            v = matrix[i][j] if i < len(matrix) and j < len(matrix[i]) else None
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                col = "#f3f4f6"
+            else:
+                a = max(-1.0, min(1.0, float(v)))
+                k = int(255 * (1 - abs(a)))
+                col = f"rgb(255,{k},{k})" if a >= 0 else f"rgb({k},{k},255)"
+            out.append(f'<rect x="{pad + j * cell}" y="{pad + i * cell}" width="{cell}" height="{cell}" fill="{col}"><title>{escape(str(labels[i]))} ~ {escape(str(labels[j]))}: {"" if v is None else f"{float(v):.2f}"}</title></rect>')
+    ly = pad + n * cell + 14
+    out.append(f'<text x="{pad}" y="{ly}" font-size="9" fill="{PALETTE["muted"]}">blue = move in opposite directions, red = move together, white = unrelated</text>')
+    out.append("</svg>")
+    return "".join(out)

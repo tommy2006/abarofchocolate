@@ -39,27 +39,47 @@ def cluster_of(inputs) -> dict[str, str]:
     return out
 
 
+def _step_words(a: str, b: str, r: float, rel_lag: Optional[int], delta: Optional[int]) -> str:
+    """Upstream / downstream in words, from the learned lead/lag (normal operation) and the observed order."""
+    learned = (f"{a} is upstream of {b}: in normal operation {b} follows {a} by {rel_lag} sample(s) (r={r:.2f})" if rel_lag and rel_lag > 0
+               else f"{b} is upstream of {a}: in normal operation {a} follows {b} by {-rel_lag} sample(s) (r={r:.2f})" if rel_lag and rel_lag < 0
+               else f"{a} and {b} normally move together (r={r:.2f})")
+    if delta is None:
+        return learned + "; the order in this event could not be measured."
+    return learned + (f"; here {b} moved {delta} sample(s) after {a}." if delta > 0 else f"; here they moved together.")
+
+
 def chain_for_flag(inputs, flag: Flag, window: int) -> list[PropagationStep]:
+    """Each signal (in onset order) is linked to the nearest EARLIER signal it has a learned relation with, so a
+    chain is not broken by an unrelated signal in between; the lag direction becomes an upstream/downstream
+    statement. Steps whose learned lead/lag contradicts the observed order are dropped."""
     ordered = sorted([s for s in flag.signals_ranked if s.lag is not None], key=lambda s: s.lag)
     steps: list[PropagationStep] = []
-    for a, b in zip(ordered[:-1], ordered[1:]):
-        delta = int(b.lag - a.lag)
-        r, rel_lag = _corr_of(inputs, a.signal, b.signal)
-        consistent = None
-        if rel_lag is not None and delta > 0:
-            consistent = (rel_lag > 0 and abs(rel_lag - delta) <= max(2, window // 2)) or (rel_lag == 0 and delta <= max(2, window // 2))
-        expl = f"{a.signal} deviated {delta} sample(s) before {b.signal}" if delta > 0 else f"{a.signal} and {b.signal} deviated together"
-        if abs(r) >= 0.3:
-            expl += f"; learned correlation r={r:.2f}"
-            if consistent is True:
-                expl += f" with a lead/lag of {rel_lag} consistent with the observed order"
-            elif consistent is False:
-                expl += f" (learned lead/lag {rel_lag} does not match the observed {delta})"
-        else:
-            continue  # no learned relation between the two signals: their order alone is not a propagation claim
-        if consistent is False:
-            continue  # the learned lead/lag contradicts the observed order
-        steps.append(PropagationStep(from_signal=a.signal, to_signal=b.signal, lag=delta, strength=round(float(abs(r)), 3), explanation=expl + ".", evidence_ids=list(flag.evidence_ids[:1])))
+    tol = max(2, window // 2)
+    for j in range(1, len(ordered)):
+        b = ordered[j]
+        for a in reversed(ordered[:j]):
+            r, rel_lag = _corr_of(inputs, a.signal, b.signal)
+            if abs(r) < 0.3:
+                continue  # no learned relation: their order alone is not a propagation claim
+            delta = int(b.lag - a.lag)
+            consistent = None
+            if rel_lag is not None and delta > 0:
+                consistent = (rel_lag > 0 and abs(rel_lag - delta) <= tol) or (rel_lag == 0 and delta <= tol)
+            if consistent is False:
+                continue  # the learned lead/lag contradicts the observed order
+            steps.append(PropagationStep(from_signal=a.signal, to_signal=b.signal, lag=delta, strength=round(float(abs(r)), 3), explanation=_step_words(a.signal, b.signal, r, rel_lag, delta), evidence_ids=list(flag.evidence_ids[:1])))
+            break
+    if not steps and len(ordered) < 2:
+        # no measurable order in the event (a contradicted order is not replaced): say what is upstream of what
+        names = [s.signal for s in flag.signals_ranked[:5]]
+        for i, x in enumerate(names):
+            for y in names[i + 1:]:
+                r, rel_lag = _corr_of(inputs, x, y)
+                if abs(r) >= 0.5 and rel_lag:
+                    up, down, lag = (x, y, rel_lag) if rel_lag > 0 else (y, x, -rel_lag)
+                    steps.append(PropagationStep(from_signal=up, to_signal=down, lag=None, strength=round(float(abs(r)), 3), explanation=_step_words(up, down, r, lag, None) + " (learned order, not observed in this event)", evidence_ids=list(flag.evidence_ids[:1])))
+        steps = steps[:3]
     return steps
 
 

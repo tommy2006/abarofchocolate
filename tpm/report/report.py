@@ -399,6 +399,85 @@ def _trust_series(trust: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _diverse(diags: list[dict[str, Any]], sev: dict[int, float]) -> list[dict[str, Any]]:
+    """A varied sample instead of the top-N of one artefact: diagnoses are grouped by (cause, pattern / fault type) and
+    taken round-robin, the most severe of each group first."""
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for d in diags:
+        key = (str(d.get("cause_class") or "unknown"), str(d.get("pattern_id") or d.get("fault_type") or ""))
+        buckets.setdefault(key, []).append(d)
+    for b in buckets.values():
+        b.sort(key=lambda d: (-sev[id(d)], -float(d.get("confidence") or 0)))
+    order = sorted(buckets, key=lambda k: -sev[id(buckets[k][0])])
+    out: list[dict[str, Any]] = []
+    i = 0
+    while len(out) < len(diags):
+        added = False
+        for k in order:
+            if i < len(buckets[k]):
+                out.append(buckets[k][i])
+                added = True
+        if not added:
+            break
+        i += 1
+    return out
+
+
+def _heatmap_ctx(relations: Any, signals: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Correlation heatmap (strongest-related signals, at most 40) and a lead / lag summary in words."""
+    if not isinstance(relations, dict):
+        return None
+    corr = relations.get("corr") or {}
+    pairs = relations.get("pairs") or []
+    if not corr:
+        return None
+    strength: dict[str, float] = {}
+    for pr in pairs:
+        for k in (pr.get("a"), pr.get("b")):
+            if k:
+                strength[k] = strength.get(k, 0.0) + abs(float(pr.get("r") or 0.0))
+    names = [s.get("id") for s in signals if s.get("id") in corr and not s.get("excluded")]
+    names = sorted(names, key=lambda a: -strength.get(a, 0.0))[:40]
+    names.sort()
+    display = {s.get("id"): (s.get("display_name") or s.get("id")) for s in signals}
+    matrix = [[(corr.get(a) or {}).get(b) for b in names] for a in names]
+    lags = []
+    for pr in sorted(pairs, key=lambda p: -abs(float(p.get("r") or 0.0))):
+        lag = int(pr.get("lag") or 0)
+        if lag >= 1 and abs(float(pr.get("r") or 0.0)) >= 0.5:
+            lags.append({"lead": pr.get("a"), "follow": pr.get("b"), "lag": lag, "r": round(float(pr.get("r") or 0.0), 2)})
+        if len(lags) >= 12:
+            break
+    return {"svg": charts.heatmap([display.get(n, n) for n in names], matrix, cell=11 if len(names) > 25 else 14, title="correlation heatmap"), "n": len(names), "lags": lags}
+
+
+def _baseline_ctx(baseline: Any) -> Optional[dict[str, Any]]:
+    """Why this baseline, which others were considered, and what breaks if it is wrong."""
+    if not isinstance(baseline, dict):
+        return None
+    cands = []
+    for c in baseline.get("candidates") or []:
+        if isinstance(c, dict):
+            cands.append({"strategy": c.get("strategy") or c.get("name"), "score": c.get("score"), "fraction": c.get("fraction"), "separation": c.get("separation"), "generalization": c.get("generalization"), "coverage": c.get("coverage")})
+    cands.sort(key=lambda c: -(float(c.get("score") or 0)))
+    chosen = baseline.get("strategy")
+    runner = next((c for c in cands if c.get("strategy") != chosen), None)
+    top = next((c for c in cands if c.get("strategy") == chosen), cands[0] if cands else None)
+    margin = (float(top.get("score") or 0) - float(runner.get("score") or 0)) if (top and runner) else None
+    return {"candidates": cands[:6], "chosen": chosen, "runner_up": runner.get("strategy") if runner else None, "margin": None if margin is None else round(margin, 3), "fraction": baseline.get("selected_fraction_of_sample"), "confidence": baseline.get("confidence")}
+
+
+def _eval_headline(evaluation: Any) -> list[dict[str, Any]]:
+    """Plain numbers per label column: precision, recall, false alarms, detection, confidence calibration."""
+    out = []
+    for col, c in ((evaluation or {}).get("columns") or {}).items():
+        if not isinstance(c, dict) or "row_level" not in c:
+            continue
+        rl, gl = c.get("row_level") or {}, c.get("group_level") or {}
+        out.append({"column": col, "normal": c.get("normal_value"), "precision": rl.get("precision"), "recall": rl.get("recall"), "flagged": rl.get("flagged_fraction"), "false_alarm": gl.get("false_alarm_rate"), "detection": gl.get("detection_rate"), "n_normal": gl.get("n_groups_normal"), "n_abnormal": gl.get("n_groups_abnormal"), "calibration": c.get("confidence_calibration") or []})
+    return out
+
+
 def _group_summary(ws: Workspace, flags: list[dict[str, Any]], schema: Optional[dict[str, Any]]) -> dict[str, Any]:
     """How many groups crossed the alert threshold (group_scores.json of the detect stage; falls back to the flags)."""
     gs = ws.read_json("group_scores.json")
@@ -567,13 +646,13 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     flags_by_kind = [(t.kind(k), n) for k, n in Counter(str(f.get("kind")) for f in sustained).most_common(8)]
     flags_by_cause = [(t.cause(k), n) for k, n in Counter(str(f.get("likely_cause_class")) for f in sustained if f.get("likely_cause_class")).most_common(8)]
     suspicious = _suspicious(ws, point_flags, evidence, explain, t)
-    detect = {"flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
+    detect = {"baseline_why": _baseline_ctx(baseline), "heatmap": _heatmap_ctx(relations, signals), "flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
 
     # ---- diagnoses
     diag_rows = []
     flag_sev = {f.get("id"): float(f.get("severity") or 0) for f in flags}
     diag_sev = {id(d): max([flag_sev.get(i, 0.0) for i in (d.get("flag_ids") or [])] or [0.0]) for d in diags}
-    diags_sorted = sorted(diags, key=lambda d: (-diag_sev[id(d)], -float(d.get("confidence") or 0))) if len(diags) > MAX_DIAGNOSES else diags
+    diags_sorted = _diverse(diags, diag_sev) if len(diags) > MAX_DIAGNOSES else diags
     for i_d, d in enumerate(diags_sorted[:MAX_DIAGNOSES]):
         if i_d >= MAX_DIAG_CARDS:  # compact row: what, where, how sure, and the first whole sentences of the summary
             crit_c = d.get("critique") or None
@@ -653,7 +732,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         for k, v in list(nested.items())[:3]:
             cols = sorted({c for row in v.values() for c in row.keys()})[:8]
             tables.append({"name": k, "cols": cols, "rows": [(gk, [row.get(c) for c in cols]) for gk, row in list(v.items())[:60]]})
-        eval_ctx = {"scalars": _scalars(evaluation), "tables": tables}
+        eval_ctx = {"scalars": _scalars(evaluation), "tables": tables, "headline": _eval_headline(evaluation), "rule": (evaluation or {}).get("event_rule")}
     assess_ctx = None
     if isinstance(assessor, dict) and assessor:
         lc = assessor.get("learning_curve")

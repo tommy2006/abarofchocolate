@@ -121,6 +121,15 @@ def run_evaluation(ws, inputs, store, flags, settings, rule: Optional[dict[str, 
         fp = int((flagged_sorted & (ys == 0)).sum())
         fn = int((~flagged_sorted & (ys == 1)).sum())
         res["row_level"] = {"precision": round(tp / max(1, tp + fp), 4), "recall": round(tp / max(1, tp + fn), 4), "flagged_fraction": round(float(flagged_sorted.mean()), 4) if len(flagged_sorted) else None, "rows_above_row_threshold_fraction": round(float((ss >= 1.0).mean()), 4) if len(ss) else None}
+        # how often an event's confidence was right, on this labelled data (evaluation only; never fed back)
+        abn_groups = {store.groups[int(gs[a_])] for a_, b_ in zip(starts, ends) if ys[a_:b_].any()}
+        bins = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.85), (0.85, 1.01)]
+        calib = []
+        for lo_, hi_ in bins:
+            fl_ = [f for f in ev_flags if f.kind in ("anomaly", "drift") and lo_ <= float(f.confidence or 0) < hi_]
+            if fl_:
+                calib.append({"confidence": f"{lo_:.0%}-{min(hi_, 1.0):.0%}", "n_events": len(fl_), "share_in_abnormal_groups": round(sum(1 for f in fl_ if f.group_id in abn_groups) / len(fl_), 4)})
+        res["confidence_calibration"] = calib
         res["group_level"] = {"n_groups_abnormal": len(det), "detection_rate": round(float(np.mean(det)), 4) if det else None, "n_groups_normal": len(fa), "false_alarm_rate": round(float(np.mean(fa)), 4) if fa else None, "median_detection_delay_rows": (None if not delays else float(np.median(delays))), "delay_note": "delay is measured from the first labelled-abnormal row of the group; when labels are group-level (abnormal from row 0) it reflects time-to-first-flag, not true onset delay"}
         # patterns vs label classes (group level)
         if n_distinct >= 2:

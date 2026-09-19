@@ -78,6 +78,8 @@ details summary { cursor: pointer; color: var(--primary); }
   a { color: inherit; text-decoration: none; }
   details { display:block; } details summary { display:none; }
 }
+details > summary { cursor: pointer; }
+@media print { details > *:not(summary) { display: block; } }
 </style>
 </head>
 <body>
@@ -314,6 +316,15 @@ details summary { cursor: pointer; color: var(--primary); }
       <div class="kv">{% for k, v in detect.baseline_items %}<div>{{ k }}</div><div>{{ v|num if v is number else v }}</div>{% endfor %}</div>
       {% if detect.baseline_assumptions %}<ul class="tight">{% for a in detect.baseline_assumptions %}<li>{{ a }}</li>{% endfor %}</ul>{% endif %}
       {% else %}<p class="na">{{ t('not_available') }}</p>{% endif %}
+      {% set bw = detect.baseline_why %}
+      {% if bw and bw.candidates %}
+      <h4>{{ t('baseline_why') }}</h4>
+      <p class="stmt">{{ t('baseline_why_text', chosen=bw.chosen, runner=bw.runner_up or '-', margin=(bw.margin if bw.margin is not none else '-'), fraction=(bw.fraction|pct if bw.fraction is not none else '-')) }}</p>
+      <table><tr><th>{{ t('baseline_candidate') }}</th><th>{{ t('score') }}</th><th>{{ t('baseline_share') }}</th><th>{{ t('baseline_separation') }}</th><th>{{ t('baseline_generalization') }}</th></tr>
+      {% for c in bw.candidates %}<tr{% if c.strategy == bw.chosen %} class="hl"{% endif %}><td class="mono">{{ c.strategy }}</td><td class="conf">{{ c.score|num }}</td><td class="conf">{{ c.fraction|pct if c.fraction is not none else '' }}</td><td class="conf">{{ c.separation|num }}</td><td class="conf">{{ c.generalization|num }}</td></tr>{% endfor %}
+      </table>
+      <p class="small">{{ t('baseline_breaks') }}</p>
+      {% endif %}
     </div>
     <div>
       <h3>{{ t('s3_detectors') }}</h3>
@@ -348,6 +359,13 @@ details summary { cursor: pointer; color: var(--primary); }
   {% else %}<p class="na">{{ t('s3_no_flags') }}</p>{% endif %}
 
   <h3>{{ t('s3_patterns') }}</h3>
+  {% if detect.heatmap %}
+  <h3>{{ t('heatmap_title') }}</h3>
+  <p class="intro">{{ t('heatmap_intro', n=detect.heatmap.n) }}</p>
+  <div class="chart">{{ detect.heatmap.svg|safe }}</div>
+  {% if detect.heatmap.lags %}<h4>{{ t('lag_summary') }}</h4>
+  <ul class="tight">{% for l in detect.heatmap.lags %}<li>{{ t('lag_line', lead=l.lead, follow=l.follow, lag=l.lag, r=l.r) }}</li>{% endfor %}</ul>{% endif %}
+  {% endif %}
   {% if detect.patterns %}
   <table><tr><th>{{ t('pattern') }}</th><th>{{ t('pattern_name') }}</th><th>{{ t('n_events') }}</th><th>{{ t('groups_affected') }}</th><th>{{ t('confidence') }}</th><th>{{ t('classifier_reliability') }}</th><th>{{ t('signature') }}</th><th>{{ t('message') }}</th></tr>
   {% for p in detect.patterns %}<tr><td class="mono">{{ p.id }}</td><td>{{ p.name_label }}</td><td class="conf">{{ p.n_events }}</td><td class="mono">{{ (p.groups_affected or [])|join(', ')|short(80) }}</td><td class="conf">{{ p.confidence|pct }}</td><td class="conf">{{ p.classifier_reliability|pct if p.classifier_reliability is not none else t('na_short') }}</td><td class="mono small">{{ p.signature_text }}</td><td>{{ p.description }}</td></tr>{% endfor %}
@@ -382,8 +400,10 @@ details summary { cursor: pointer; color: var(--primary); }
         {% endif %}
       </div>
       <div>
-        <b>{{ t('steps') }}</b>
+        {% if d.cause_detail and d.cause_detail.spread %}<p class="stmt"><b>{{ t('spread_headline', n=d.cause_detail.spread.n_signals_for_half, top=d.cause_detail.spread.top_share|pct) }}</b></p>{% endif %}
+        <details><summary><b>{{ t('steps') }}</b> ({{ (d.steps or [])|length }})</summary>
         {% if d.steps %}<ol class="steps">{% for s in d.steps %}<li>{{ s }}</li>{% endfor %}</ol>{% else %}<p class="na">{{ t('not_available') }}</p>{% endif %}
+        </details>
         {% if d.uncertainty %}<b>{{ t('uncertainty') }}</b><ul class="tight">{% for u in d.uncertainty %}<li>{{ u }}</li>{% endfor %}</ul>{% endif %}
         {% if d.assumptions %}<b>{{ t('assumptions') }}</b><ul class="tight">{% for u in d.assumptions %}<li>{{ u }}</li>{% endfor %}</ul>{% endif %}
         {% if d.ev %}<b>{{ t('evidence') }}</b><ul class="tight">{% for e in d.ev %}<li>{% if e.plain %}{{ e.plain }}<span class="tech">{{ e.technical }}{% if e.id %} <span class="mono">[{{ e.id }}]</span>{% endif %}</span>{% else %}{{ e.technical }}{% if e.id %} <span class="small mono">[{{ e.id }}]</span>{% endif %}{% endif %}</li>{% endfor %}</ul>{% endif %}
@@ -509,6 +529,13 @@ details summary { cursor: pointer; color: var(--primary); }
   <h2>{{ t('section_eval') }}</h2>
   {% if evaluation %}
   <p class="intro">{{ t('eval_intro') }}</p>
+  {% if evaluation.rule and evaluation.rule.method %}<p class="stmt">{{ t('eval_rule') }}: {{ evaluation.rule.method }}</p>{% endif %}
+  {% for h in evaluation.headline %}
+  <p class="stmt"><b>{{ h.column }}</b>: {{ t('eval_headline', precision=(h.precision|pct if h.precision is not none else '-'), recall=(h.recall|pct if h.recall is not none else '-'), false_alarm=(h.false_alarm|pct if h.false_alarm is not none else '-'), n_normal=h.n_normal or 0, detection=(h.detection|pct if h.detection is not none else '-'), n_abnormal=h.n_abnormal or 0) }}</p>
+  {% if h.calibration %}<table><tr><th>{{ t('eval_conf_bin') }}</th><th>{{ t('eval_conf_n') }}</th><th>{{ t('eval_conf_right') }}</th></tr>
+  {% for c in h.calibration %}<tr><td>{{ c.confidence }}</td><td class="conf">{{ c.n_events }}</td><td class="conf">{{ c.share_in_abnormal_groups|pct }}</td></tr>{% endfor %}</table>
+  <p class="small">{{ t('eval_conf_note') }}</p>{% endif %}
+  {% endfor %}
   <div class="kv">{% for k, v in evaluation.scalars %}<div>{{ k }}</div><div class="conf">{{ v|num if v is number else v }}</div>{% endfor %}</div>
   {% for tb in evaluation.tables %}
   <h4>{{ tb.name }}</h4>

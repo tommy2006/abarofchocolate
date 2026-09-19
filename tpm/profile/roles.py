@@ -215,7 +215,8 @@ def heuristic_hypotheses(d: SignalDescriptor, relations: dict[str, Any]) -> list
             out.append({"kind": "instrument", "value": "pressure / level-like (intermediate dynamics)", "confidence": 0.2, "reasoning": f"noise level {noise:.2f}, autocorrelation {ac1:.2f}"})
     if d.cluster_id:
         members = relations.get("clusters", {}).get(d.cluster_id, [])
-        out.append({"kind": "unit_operation", "value": f"shared unit operation of cluster {d.cluster_id}", "confidence": min(0.35, 0.15 + 0.05 * len(members)), "reasoning": f"moves with {', '.join(m for m in members if m != d.id)[:120]}"})
+        others = [m for m in members if m != d.id]
+        out.append({"kind": "unit_operation", "value": f"one process unit or control loop together with {', '.join(others[:4])}{' and others' if len(others) > 4 else ''} (cluster {d.cluster_id}; not named yet)", "confidence": min(0.35, 0.15 + 0.05 * len(members)), "reasoning": f"these {len(members)} signals move together; the code does not guess what the unit is - a language model may propose a name with its evidence"})
     for h in out:
         h["confidence"] = min(HYPOTHESIS_CAP, h["confidence"])
         h["source"] = "code"
@@ -408,3 +409,110 @@ def apply_override(ws, settings, decision) -> dict[str, Any]:
     write_catalog(ws, descriptors)
     ws.log.record(ACTOR, "signal_override_applied", "signal", target.id, {"actor": f"human:{decision.actor_name}({decision.role})", "changed": changed, "note": decision.note, "inference": hinf.id})
     return {"updated": True, "signal": target.id, "changed": changed}
+
+
+UNIT_OPERATIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clusters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "cluster": {"type": "string"},
+                    "unit_operation": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "would_disprove": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["cluster", "unit_operation", "evidence", "would_disprove", "confidence"],
+            },
+        }
+    },
+    "required": ["clusters"],
+}
+
+
+def unit_operations_payload(descriptors: list[SignalDescriptor], relations: dict[str, Any], hint: Optional[str] = None) -> dict[str, Any]:
+    by_id = {d.id: d for d in descriptors}
+    clusters = []
+    for cid, members in (relations.get("clusters") or {}).items():
+        mem = [m for m in members if m in by_id and not by_id[m].excluded][:12]
+        if len(mem) < 2:
+            continue
+        inside = [{k: p.get(k) for k in ("a", "b", "r", "lag")} for p in relations.get("pairs") or [] if p.get("a") in mem and p.get("b") in mem][:15]
+        clusters.append({"cluster_id": cid, "signals": [{"signal": m, "structural_role": by_id[m].structural_role, "heuristic_instrument": by_id[m].instrument_hypothesis, "fingerprint": _llm_fingerprint(by_id[m].fingerprint, _FP_KEYS_COMPACT)} for m in mem], "relations": inside})
+    return {"domain_hint": hint, "clusters": clusters[:12],
+            "instructions": "Each cluster is a group of anonymised signals (S01..) that move together. For each cluster propose the process unit it most likely belongs to (for example reactor, separator, stripper, compressor, feed system, cooling, utility, or 'cannot tell'), the evidence from the structure above that supports it (roles, ranges, lead/lag), what observation would disprove it, and a confidence in [0, 0.6]. Say 'cannot tell' when the structure does not support a name."}
+
+
+def llm_unit_operations(ws, settings, descriptors: list[SignalDescriptor], relations: dict[str, Any], hint: Optional[str] = None) -> dict[str, Any]:
+    """One model call for all clusters; every accepted answer becomes an 'unit operation hypothesis' inference on the
+    cluster's signals, carrying its evidence and its falsifier. Never raises."""
+    from ..llm import complete
+
+    payload = unit_operations_payload(descriptors, relations, hint)
+    if not payload["clusters"]:
+        return {"ok": False, "n_accepted": 0, "reason": "no clusters"}
+    try:
+        res = complete("sensor_hypotheses", payload, purpose="name the process unit of each cluster, with evidence and a falsifier", ws=ws, settings=settings, schema=UNIT_OPERATIONS_SCHEMA, max_tokens=1500)
+    except Exception as e:
+        return {"ok": False, "n_accepted": 0, "error": str(e)}
+    if not res.ok or not isinstance(res.data, dict):
+        return {"ok": False, "n_accepted": 0, "source": res.source, "error": res.error}
+    by_id = {d.id: d for d in descriptors}
+    members = relations.get("clusters") or {}
+    n = 0
+    for it in res.data.get("clusters") or []:
+        if not isinstance(it, dict):
+            continue
+        cid = str(it.get("cluster") or "").strip()
+        unit = str(it.get("unit_operation") or "").strip()[:60]
+        if cid not in members or not unit or unit.lower().startswith("cannot"):
+            continue
+        conf = max(0.05, min(LLM_HYPOTHESIS_CAP, float(it.get("confidence") or 0.3)))
+        why = str(it.get("evidence") or "")[:300]
+        disprove = str(it.get("would_disprove") or "")[:200]
+        for m in members[cid]:
+            d = by_id.get(m)
+            if d is None or d.excluded:
+                continue
+            inf = ws.inferences.add(m, f"unit operation hypothesis: {unit} (cluster {cid})", status="uncertain", confidence=round(conf, 3), evidence_ids=d.evidence_ids[:2], reasoning=f"{why} Would be disproved by: {disprove}", source=res.source or "llm", stage=STAGE, alternatives=["cannot tell from the data alone"])
+            d.inference_ids.append(inf.id)
+            if conf > d.unit_operation_confidence:
+                d.unit_operation_hypothesis, d.unit_operation_confidence = f"{unit} (cluster {cid})", round(conf, 3)
+        n += 1
+    ws.log.record(ACTOR, "unit_operations", "dataset", ws.run_id, {"n_clusters_named": n, "source": res.source})
+    return {"ok": True, "n_accepted": n, "source": res.source}
+
+
+def check_hypotheses(ws, descriptors: list[SignalDescriptor], relations: dict[str, Any]) -> int:
+    """Check hypotheses against what the data can show: a signal taken for a controller output / valve must drive a
+    measured signal (it moves first) or react to one the way a controller does (it moves after, with a lag). The
+    result is a separate inference: confirmed, consistent or not confirmed - never silently kept."""
+    by_id = {d.id: d for d in descriptors}
+    n = 0
+    for d in descriptors:
+        if d.excluded or d.structural_role != "actuator_like":
+            continue
+        followers, drivers = [], []
+        for pr in relations.get("pairs") or []:
+            r, lag = float(pr.get("r") or 0.0), int(pr.get("lag") or 0)
+            if abs(r) < 0.5:
+                continue
+            if pr.get("a") == d.id and lag >= 1 and by_id.get(pr.get("b")) is not None and by_id[pr["b"]].structural_role != "actuator_like":
+                followers.append((pr["b"], lag, r))
+            elif pr.get("b") == d.id and lag >= 1:
+                drivers.append((pr["a"], lag, r))
+        if followers:
+            b, lag, r = followers[0]
+            claim, status, conf = f"hypothesis test: {d.id} as a controller output - confirmed: {b} follows its moves {lag} sample(s) later (r={r:.2f})", "supported", 0.7
+        elif drivers:
+            a, lag, r = drivers[0]
+            claim, status, conf = f"hypothesis test: {d.id} as a controller output - consistent: it reacts {lag} sample(s) after {a} (r={r:.2f}), as a controller output reacts to the measurement it controls", "inferred", 0.55
+        else:
+            claim, status, conf = f"hypothesis test: {d.id} as a controller output - not confirmed: no measured signal follows its moves and it follows none; it may be a measured percentage", "uncertain", 0.3
+        inf = ws.inferences.add(d.id, claim, status=status, confidence=conf, evidence_ids=d.evidence_ids[:2], reasoning="lead/lag from the relations measured on the sample (relations.json)", source="code", stage=STAGE, alternatives=["a measured percentage"])
+        d.inference_ids.append(inf.id)
+        n += 1
+    return n
