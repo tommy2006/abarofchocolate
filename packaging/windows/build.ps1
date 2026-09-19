@@ -31,6 +31,7 @@ try {
         $env:TPM_DATA_DIR = Join-Path $work 'smoke_data'
         if (Test-Path $env:TPM_DATA_DIR) { Remove-Item $env:TPM_DATA_DIR -Recurse -Force }
         & (Join-Path $appDir 'NorrinTPM-cli.exe') doctor
+        if ($LASTEXITCODE -ne 0) { throw 'doctor of the frozen app failed (e.g. the known failure types are missing from the build)' }
         & (Join-Path $appDir 'NorrinTPM-cli.exe') run (Join-Path $appDir '_internal\samples\demo_process.csv') --run-id smoke --no-llm
         if ($LASTEXITCODE -ne 0) { throw 'the frozen app failed to analyse the demo sample' }
         Remove-Item Env:TPM_DATA_DIR

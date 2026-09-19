@@ -354,38 +354,6 @@ export function strongestEdges(pairs, { cap = 60, minR = 0.5 } = {}) {
   return (pairs || []).filter((p) => p && p.a && p.b && p.a !== p.b && isFinite(Number(p.r)) && Math.abs(Number(p.r)) >= minR)
     .sort((x, y) => Math.abs(y.r) - Math.abs(x.r)).filter((p) => { const key = [p.a, p.b].sort().join('|'); if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, cap);
 }
-/** nodes: [{id, label, kind, cluster, hover}], edges from strongestEdges(); lag > 0 means a moves first, b follows. */
-export function drawNetwork(node, nodes, edges, { height = 520, onClick, kindLabel = (kd) => kd } = {}) {
-  const k = tokens();
-  const linked = new Set(edges.flatMap((e) => [e.a, e.b]));
-  const shown = nodes.filter((nd) => linked.has(nd.id));
-  const ids = new Set(shown.map((nd) => nd.id));
-  edges = edges.filter((e) => ids.has(e.a) && ids.has(e.b));
-  const pos = networkLayout(shown, edges.map((e) => ({ a: e.a, b: e.b, w: Math.abs(e.r) })));
-  const traces = [];
-  for (const e of edges) {
-    const p = pos[e.a], q = pos[e.b];
-    traces.push({ type: 'scatter', mode: 'lines', x: [p.x, q.x], y: [p.y, q.y], line: { width: 1 + 5 * Math.max(0, Math.abs(e.r) - 0.4), color: e.r < 0 ? k.fail : k.ink3 }, opacity: 0.55, hoverinfo: 'skip', showlegend: false });
-  }
-  // hover target in the middle of each line
-  traces.push({ type: 'scatter', mode: 'markers', x: edges.map((e) => (pos[e.a].x + pos[e.b].x) / 2), y: edges.map((e) => (pos[e.a].y + pos[e.b].y) / 2), marker: { size: 10, color: 'rgba(0,0,0,0)' }, showlegend: false,
-    text: edges.map((e) => `${e.a} ↔ ${e.b}: ${e.r < 0 ? vt('und.net.opposite') : vt('und.net.together')} (r ${Number(e.r).toFixed(2)})${e.lag ? '<br>' + (e.lag > 0 ? e.b : e.a) + ' ' + vt('und.net.lag', { n: Math.abs(e.lag) }) : ''}`), hovertemplate: '%{text}<extra></extra>' });
-  for (const kd of SENSOR_KINDS.filter((x) => shown.some((nd) => nd.kind === x))) {
-    const arr = shown.filter((nd) => nd.kind === kd);
-    traces.push({ type: 'scatter', mode: 'markers+text', name: kindLabel(kd), x: arr.map((nd) => pos[nd.id].x), y: arr.map((nd) => pos[nd.id].y), text: arr.map((nd) => nd.label || nd.id), textposition: 'top center', textfont: { size: 10.5, color: k.ink2 }, customdata: arr.map((nd) => nd.id),
-      hovertext: arr.map((nd) => nd.hover || nd.id), hovertemplate: '%{hovertext}<extra></extra>', marker: { size: 15, color: sensorKindColor(kd), line: { width: 1.5, color: k.bg } } });
-  }
-  const annotations = edges.filter((e) => e.lag).map((e) => {
-    const from = e.lag > 0 ? pos[e.a] : pos[e.b], to = e.lag > 0 ? pos[e.b] : pos[e.a];
-    return { x: from.x + (to.x - from.x) * 0.82, y: from.y + (to.y - from.y) * 0.82, ax: from.x + (to.x - from.x) * 0.6, ay: from.y + (to.y - from.y) * 0.6, xref: 'x', yref: 'y', axref: 'x', ayref: 'y', showarrow: true, arrowhead: 2, arrowsize: 1.4, arrowwidth: 1.4, arrowcolor: k.ink2, text: `+${Math.abs(e.lag)}`, font: { size: 9.5, color: k.ink2 }, opacity: 0.9 };
-  });
-  const ax = { visible: false, range: [-1.18, 1.18] };
-  // colours only: the counts of each kind are on the kind filter of the sensor cards (the network leaves out sensors without a strong link)
-  htmlLegend(node, SENSOR_KINDS.filter((x) => shown.some((nd) => nd.kind === x)).map((kd) => ({ label: kindLabel(kd), color: sensorKindColor(kd), round: true })));
-  const p = plot(node, traces, { height, margin: { l: 8, r: 8, t: 8, b: 8 }, hovermode: 'closest', showlegend: false, xaxis: ax, yaxis: ax, annotations });
-  if (onClick && p && p.then) p.then(() => { if (node.on) node.on('plotly_click', (ev) => { const pt = ev.points && ev.points.find((x) => typeof x.customdata === 'string'); if (pt) onClick(pt.customdata); }); });
-  return { shown: shown.length, promise: p };
-}
 
 /* ---------------------------------------------------------------- A2 additions (quality + diagnoses): the batches x checks
    grid, stacked bars and the next-step buttons of an item brief. Built on the block above; nothing above changed. */

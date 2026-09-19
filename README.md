@@ -95,8 +95,8 @@ why it is faulty in plain words, then concrete steps to fix it.
 | # | Page | What it shows | Challenge output |
 |---|---|---|---|
 | 0 | **Runs** | drop a file (any size, with a progress screen), watch the stages run, the last analyses | - |
-| 1 | **Understanding** | what each sensor probably measures (pressure, flow, temperature ...), how sure the app is and why, as cards you can accept or correct; a **network diagram of how the sensors move together** (who leads, who follows); rename a sensor ("S44" -> "possibly broken") | 1 |
-| 2 | **Data quality** | a **map of where the faulty data is** (batches x kinds of check), the worst pieces as Problem -> Reason -> What to do, **which checks ran on each batch** (pass / warn / fail), and what the **% score means in plain words**; operating rules typed in plain language become extra checks | 2 |
+| 1 | **Understanding** | what each sensor probably measures (pressure, flow, temperature ...), how sure the app is and why, as cards you can accept or correct; a **network diagram of how the sensors move together** (who leads, who follows): drag sensors apart, pan and zoom, and click a line to read in plain words what the link means; rename a sensor ("S44" -> "possibly broken") | 1 |
+| 2 | **Data quality** | a **map of where the faulty data is** (batches x kinds of check), the worst pieces as Problem -> Reason -> What to do, **which checks ran on each batch** (pass / warn / fail), and what the **% score means in plain words** (a grade of how far a batch can be trusted, not a share of lost data); operating rules typed in plain language become extra checks | 2 |
 | 3 | **Monitor** | a timeline diagram of unusual behaviour, the sensors involved most often, the strongest events with their explanation and next steps, the list of suspicious single readings ("a glitch or a manipulation; the data alone can't tell") | 3 |
 | 4 | **Diagnoses** | findings by likely cause (diagram), each as Problem -> Reason -> What to do, with confidence, the step-by-step reasoning and the critique that challenged it; accept / question / override on every finding | 4, 5 |
 | 5 | **Assessor** | ask in plain words whether more or less data would help; learning curve and recommended actions | bonus |
@@ -106,16 +106,17 @@ why it is faulty in plain words, then concrete steps to fix it.
 
 **Three modes**, each with its own colour scheme across the whole app (pick it with your name in the top bar):
 
-- **Basic** (blue): by far the least on screen - the summary, the next steps, one diagram and the top problems.
-  No lists, no tables.
-- **Operator** (green): the everyday view, with the diagrams, and all detail behind "Show technical analyses".
+- **Basic** (blue): by far the least on screen - the summary, the next steps and one short Problem -> Reason ->
+  What to do strip per page; no lists, no tables, and no status lamps in the top bar.
+- **Operator** (teal): the everyday view, with the diagrams, and all detail behind "Show technical analyses".
 - **Engineer** (violet): everything, including the decision log, hash-chain verification, the egress ledger and the
   overrides audit.
 
-**Text size**: the **A-** and **A+** buttons in the top bar make everything smaller or larger; boxes and charts
-rearrange themselves. **Chat** (the *Ask* button, or *Ask why* on any item): several chats per analysis, each with
+**Text size**: the **A-** and **A+** buttons in the top bar make everything smaller or larger; boxes rearrange
+themselves and the charts are redrawn at the new size, so hovering and clicking stay exact. **Chat** (the *Ask* button, or *Ask why* on any item): several chats per analysis, each with
 its own context; picking something new to ask about replaces the old context; clear the context, clear a chat's
-history, start a new chat, and **Stop** an answer that is still being written.
+history, start a new chat, and **Stop** an answer that is still being written (Stop ends the model's work at once,
+not just the waiting).
 
 The HTML report (`workspace/<run_id>/report_<lang>.html`) contains all eight expected outputs in one printable
 page: sensor understanding, data-quality checks, drift monitoring with score sparklines, root-cause diagnoses with
@@ -160,8 +161,10 @@ charts) -> **Cause** (the matching failure type and how sure, or "no known type 
 **Suggestion** (what to check or do). Add your own failure types by dropping a YAML file of the same shape into
 `workspace/_live/signatures/`. The failure list never goes to a language model.
 
-To see it: on page 7 press **Demo: a known failure type** (sensors named like the Tennessee Eastman plant; after the
-learning cycles they drift like Fault 1) or replay any file with **Inject a known failure type** in Simulate.
+To see it: in **Engineer** mode, on page 7, press **Demo: a known failure type** (sensors named like the Tennessee
+Eastman plant; after the learning cycles they drift like Fault 1) or replay any file with **Inject a known failure
+type** in Simulate. The card then walks from *Early warning: drifting towards Fault 1* to a *Fault 1* alarm; if you
+are on another page, a message appears in the corner and a dot marks **7 Live monitor** in the left bar.
 
 Any CSV works: every numeric column that is not a time, id or label column is a sensor. The learned baseline needs the first
 cycles to be normal operation. Data control: raw rows stay in `workspace/_live`; the model (local only, through the egress

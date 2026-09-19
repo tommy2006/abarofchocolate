@@ -16,10 +16,10 @@ const GRID_KINDS = 14;
 const CATEGORIES = ['completeness', 'validity', 'consistency', 'timeliness', 'rule'];
 // the kinds of checks behind each question (mirrors tpm/quality/checks.py CATEGORY_OF; a test keeps the two in step)
 const KINDS_OF = {
-  completeness: ['missing', 'dropout', 'empty_rows'],
-  validity: ['out_of_range', 'impossible_value', 'unit_shift', 'quantization_change', 'local_spike'],
-  consistency: ['duplicate_rows', 'duplicate_key', 'stuck', 'saturation', 'sign_violation', 'relation_break'],
-  timeliness: ['gap', 'out_of_order', 'duplicate_timestamp', 'irregular_sampling', 'stale'],
+  completeness: ['missing', 'dropout', 'empty_rows', 'missing_block'],
+  validity: ['out_of_range', 'impossible_value', 'unit_shift', 'quantization_change', 'local_spike', 'quantization_block', 'plausibility'],
+  consistency: ['duplicate_rows', 'duplicate_key', 'stuck', 'saturation', 'sign_violation', 'relation_break', 'frozen_block'],
+  timeliness: ['gap', 'out_of_order', 'duplicate_timestamp', 'irregular_sampling', 'stale', 'timeliness_not_testable'],
 };
 // problems of the whole batch rather than of a sensor (mirrors tpm/quality/trust.py BATCH_LEVEL)
 const BATCH_LEVEL = new Set(['duplicate_rows', 'duplicate_key', 'gap', 'out_of_order', 'duplicate_timestamp', 'irregular_sampling', 'empty_rows']);
