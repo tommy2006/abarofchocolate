@@ -66,6 +66,10 @@ config key or a clearly bounded module so it can be flipped without a rewrite.
 - **Chat may use the external model in hybrid**, because the chat model only ever sees sanitised aggregates (no SQL
   tool, no min/max, bucket means over >= 30 rows).
 - **eu-hosted refuses the first-party Anthropic endpoint** (it has no EU processing).
+- **eu-hosted = Mistral Large 3 on Verda in Finland** (2026-09-19): the organisers' OpenAI-compatible endpoint on
+  Verda serverless GPUs (Finnish company, Finnish data centres), key in `TPM_EU_API_KEY`. EU-owned and EU-hosted, unlike
+  Claude on Bedrock / Vertex EU regions (EU-hosted, US-owned), which stay possible through configuration. Only hosts on
+  `profiles.eu-hosted.eu_hosts` are accepted.
 - **No fixed local model.** The app uses the chosen model, else the configured default, else the best installed
   model that fits the machine; models and Ollama itself can be downloaded from the app.
 - **Summary first.** Every page and every explanation starts with a short plain summary and next steps; all

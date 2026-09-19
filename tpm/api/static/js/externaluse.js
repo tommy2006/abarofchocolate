@@ -13,7 +13,16 @@ const CHOICES = [
   { id: 'claude-sonnet-5', label: 'Sonnet 5', hint: 'flow.ext.sonnetHint' },
   { id: 'claude-opus-5', label: 'Opus 5', hint: 'flow.ext.opusHint' },
 ];
-export function modelLabel(id) { const c = CHOICES.find((x) => x.id === id); return c ? c.label : String(id || ''); }
+/** Short name of a model id: the picker's label, else a hub id shortened before its size ("mistralai/Mistral-Large-3-675B-…" -> "Mistral Large 3"). */
+export function modelLabel(id) {
+  const c = CHOICES.find((x) => x.id === id);
+  if (c) return c.label;
+  const s = String(id || '');
+  if (!s.includes('/')) return s;
+  const words = s.split('/').pop().split(/[-_]/).filter(Boolean);
+  const cut = words.findIndex((w) => /^\d+(\.\d+)?[BM]$/i.test(w));
+  return (cut > 0 ? words.slice(0, cut) : words).join(' ');
+}
 
 // ---------------------------------------------------------------- facts (pure: checked under node)
 /** 2140 -> "2.1", 31200 -> "31": seconds of one model call, short enough for a tile; null when not measured */

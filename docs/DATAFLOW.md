@@ -32,7 +32,7 @@ The same diagram is drawn (inline SVG) in section 8 of every report, with the li
 
 | | `no-egress` (default) | `hybrid` | `eu-hosted` |
 |---|---|---|---|
-| network model calls | **none** | Anthropic (`external_llm.model`) | same routing, endpoint = `external_llm.base_url` |
+| network model calls | **none** | Anthropic (`external_llm.model`) | Mistral Large 3 on Verda in Finland (`profiles.eu-hosted.external_llm`, see section 5) |
 | guard | strict | non-strict | strict |
 | `column_roles` (sample rows + stats) | local | local | local |
 | `sensor_hypotheses` (signal catalog + relation summary) | local | external | external |
@@ -105,9 +105,21 @@ JSONL file); `tpm.llm.ledger.summary(ws)` and `data_flow_statement(ws, settings,
 | Want | Change |
 |---|---|
 | another local model | `local_llm.model` in settings.yaml or `TPM_LOCAL_MODEL=qwen3:8b`; `python -m tpm models` shows what is pulled; `python -m tpm bakeoff` compares candidates |
-| Ollama on another host | `OLLAMA_HOST=http://host:11434` |
+| Ollama on another host | `OLLAMA_HOST=http://host:11434` - only a host inside the operator environment: the local route sends full payloads and is not guarded |
 | external model | `external_llm.model` or `TPM_EXTERNAL_MODEL`; key in `ANTHROPIC_API_KEY` |
-| EU-hosted endpoint | `TPM_PROFILE=eu-hosted`, `TPM_EXTERNAL_BASE_URL=https://…` |
+| EU-hosted model | `TPM_PROFILE=eu-hosted` (or the Data-flow page) and `TPM_EU_API_KEY=…` in `.env`; endpoint and model are already in `profiles.eu-hosted.external_llm` |
+| another EU service | `TPM_EU_BASE_URL`, `TPM_EU_MODEL`, `TPM_EU_PROVIDER` (`openai-compatible` or `anthropic`); its host must be on `profiles.eu-hosted.eu_hosts` |
+
+**The EU-hosted model.** `eu-hosted` sends the guarded payloads to **Mistral Large 3**
+(`mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4`, a European open-weight model), which the hackathon organisers run
+on **Verda** serverless GPU containers (Verda, formerly DataCrunch, is a Finnish GPU cloud with its data centres in
+Finland) at `https://containers.datacrunch.io/data-sovereignty-mistral-large-3/v1`, an OpenAI-compatible endpoint.
+Only the API key goes with each request, as a Bearer token; no workspace or organisation header. The profile refuses
+any host that is not on `profiles.eu-hosted.eu_hosts` (Verda, Mistral's EU endpoint `api.eu.mistral.ai`, Claude on
+Amazon Bedrock in Stockholm or Ireland), the first-party Anthropic API (it has no EU-only processing), and Bedrock
+cross-region model ids that may run outside the EU (`global.`, `us.`, ...). Every ledger record of an eu-hosted call
+names the host (`provider = "openai-compatible @ containers.datacrunch.io"`), and the data-flow statement names the
+operator and the location. The guard and its invariant are the same as in hybrid, in strict mode.
 | stricter guard | `guard.*` values, or `profiles.<name>.guard_strict: true` |
 | no model at all | nothing to do: every narrative has a template version; `--no-llm` skips model calls entirely |
 

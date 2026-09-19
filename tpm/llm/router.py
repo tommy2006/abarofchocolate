@@ -1,7 +1,7 @@
 """Router: the only module that talks to a model. Route per task from the active profile:
 
     external -> route usable? (allowed model, endpoint, API key) -> egress guard (sanitise + invariant)
-             -> run budget -> AnthropicProvider
+             -> run budget -> external provider (AnthropicProvider, or OpenAICompatProvider for the eu-hosted endpoint)
              on block / no budget / failure -> local
     local    -> OllamaProvider.pick_model() -> chat (JSON schema enforced, one repair round)
              on failure -> template (LLMResult ok=False)
@@ -22,7 +22,7 @@ from ..contracts import EgressRecord, LLMResult
 from . import guard as guard_mod
 from . import ledger as ledger_mod
 from . import prompts as prompts_mod
-from .providers import AnthropicProvider, OllamaProvider, ProviderError, extract_json, validate_schema
+from .providers import OllamaProvider, ProviderError, external_provider, extract_json, validate_schema
 
 PREVIEW_CHARS = 500
 EXTERNAL_MODEL_CHOICES = ["claude-sonnet-5", "claude-opus-5"]  # what the UI offers; any id still has to pass model_allowed
@@ -159,12 +159,12 @@ def _chat_with_repair(provider: Any, messages: list[dict[str, str]], schema: Opt
 # ----------------------------------------------------------------------------------------------
 
 
-def _external_unavailable(settings: Settings, task: Optional[str], ext: Optional[AnthropicProvider] = None) -> Optional[str]:
+def _external_unavailable(settings: Settings, task: Optional[str], ext: Any = None) -> Optional[str]:
     """Why the external route cannot be used right now (None = usable): profile, blocked model, EU endpoint, API key."""
     why = settings.external_block_reason(task)
     if why:
         return why
-    ext = ext or AnthropicProvider(settings)
+    ext = ext or external_provider(settings)
     if not ext.is_available():
         return f"no API key in env {settings.external_llm.api_key_env}"
     return None
@@ -244,9 +244,9 @@ def complete(
     # ---------------- external ----------------
     if route == "external" and prof.allow_external:
         came_from_external = True
-        ext = AnthropicProvider(settings)
+        ext = external_provider(settings)
         ext_model = settings.external_model_for(task)
-        provider_name = settings.external_llm.provider
+        provider_name = settings.external_llm.provider_label
         why_not = _external_unavailable(settings, task, ext)
         if why_not:
             _record(ws, task=task, purpose=purpose, route="external", provider=provider_name, model=ext_model, payload=payload, artifact_types=artifact_types, guard_result="unavailable", guard_reason=why_not, ok=False, error=why_not[:500])
@@ -431,9 +431,9 @@ def agent_chat(
     if settings.route_for(task) != "external":
         return local_chat(messages, **local_kwargs)
     prof = settings.active_profile
-    ext = AnthropicProvider(settings)
+    ext = external_provider(settings)
     ext_model = settings.external_model_for(task)
-    provider_name = settings.external_llm.provider
+    provider_name = settings.external_llm.provider_label
     types = artifact_types or ["chat"]
 
     def refuse(guard_result: str, reason: str, payload: Any, sanitizer: Optional[dict[str, Any]] = None) -> LLMResult:
@@ -493,7 +493,7 @@ def available(settings: Any = None) -> dict[str, Any]:
     local = OllamaProvider(settings)
     up = local.is_available()
     picked = local.pick_model() if up else None
-    ext = AnthropicProvider(settings)
+    ext = external_provider(settings)
     models = [settings.external_llm.model] + [m for m in (settings.external_llm.model_by_task or {}).values() if m]
     blocked = next((why for ok, why in (settings.external_llm.model_allowed(m) for m in models) if not ok), None)
     unavailable = _external_unavailable(settings, None, ext)  # profile, default model, endpoint, key; a blocked model_by_task entry only stops that task
@@ -519,6 +519,9 @@ def available(settings: Any = None) -> dict[str, Any]:
         "external_model_blocked_reason": blocked,
         "external_unavailable_reason": unavailable,
         "external_base_url": settings.external_llm.base_url,
+        "external_provider": settings.external_llm.provider,
+        "external_operator": settings.external_llm.operator,
+        "external_location": settings.external_llm.location,
         "routing": {t: settings.route_for(t) for t in prompts_mod.TASKS},
         "mode": "llm-external+local" if (external and up and picked) else ("llm-local" if (up and picked) else ("llm-external" if external else "template")),
     }

@@ -1102,10 +1102,12 @@ def explain(settings: Settings, strict: Optional[bool] = None, language: str = "
         head = (f"Profile '{settings.profile}': nothing leaves this machine. All language-model work runs on the local "
                 f"model ({settings.local_llm.model}) or on code templates. No network model is ever called.")
     else:
+        ext = settings.external_llm
         head = (f"Profile '{settings.profile}': your raw data stays on this machine. Only summaries that the app computed "
-                f"itself may be sent to the external model {settings.external_llm.model} ({settings.external_llm.provider}"
-                + (f", endpoint {settings.external_llm.base_url}" if settings.external_llm.base_url else "") + "), and only after the egress guard has cleaned and checked them.")
-        why_not = settings.external_block_reason()
+                f"itself may be sent to the external model {ext.model} ({ext.provider}"
+                + (f", endpoint {ext.base_url}" if ext.base_url else "") + (f", run by {ext.operator}" if ext.operator else "")
+                + (f", located in {ext.location}" if ext.location else "") + "), and only after the egress guard has cleaned and checked them.")
+        why_not = settings.external_block_reason() or (None if ext.api_key else f"no API key in env {ext.api_key_env}")
         if why_not:
             head += f" Right now the external model is NOT used: {why_not}."
     aliasing = _aliasing_on(cfg, bool(strict))

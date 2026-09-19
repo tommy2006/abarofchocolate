@@ -1,5 +1,6 @@
 """Nothing raw leaves: every externally routed model task of a finished run is exercised in the hybrid and the eu-hosted
-profile with AnthropicProvider.chat replaced by a recorder, and every captured message is scanned for raw data.
+profile with the external provider's chat (AnthropicProvider in hybrid, OpenAICompatProvider in eu-hosted) replaced by
+a recorder, and every captured message is scanned for raw data.
 
 The run is a real pipeline pass over the shared synthetic generator, with distinctive column names, category / label
 values, timestamps and file name, so that a hit in an outgoing message cannot be a coincidence. Asserted:
@@ -26,7 +27,7 @@ if str(ROOT) not in sys.path:
 from tests.fixtures.synth import make_synthetic  # noqa: E402
 from tpm.config import load_settings  # noqa: E402
 from tpm.llm import ledger  # noqa: E402
-from tpm.llm.providers import AnthropicProvider, OllamaProvider, ProviderError  # noqa: E402
+from tpm.llm.providers import AnthropicProvider, OllamaProvider, OpenAICompatProvider, ProviderError  # noqa: E402
 from tpm.workspace import Workspace  # noqa: E402
 
 RENAME = {
@@ -145,22 +146,25 @@ def test_external_tasks_are_sent_and_carry_no_raw_data(monkeypatch, finished_run
     root = tmp / f"copy_{profile}"
     shutil.copytree(src_ws.dir, root / "egress_run", ignore=shutil.ignore_patterns("decision_log.sqlite*", "duck_tmp"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-key")
+    monkeypatch.setenv("TPM_EU_API_KEY", "eu-fake-key")
     settings = load_settings(profile=profile)
     settings.workspace_dir = str(root)
     if profile == "eu-hosted":
         settings.external_llm.base_url = "http://127.0.0.1:9/eu"  # a closed local port: nothing could leave even without the stub
+        settings.active_profile.eu_hosts.append("127.0.0.1")
     ws = Workspace("egress_run", settings=settings, root=root)
     sent: list[dict] = []
 
     def capture(self, messages, schema=None, max_tokens=None, model=None):
-        sent.append({"model": model or self.cfg.model, "messages": messages})
+        sent.append({"model": model or self.cfg.model, "messages": messages, "provider": type(self).__name__})
         raise ProviderError("captured, not sent")
 
     def no_client(self):
         raise AssertionError("the network client must never be built in this test")
 
-    monkeypatch.setattr(AnthropicProvider, "chat", capture)
-    monkeypatch.setattr(AnthropicProvider, "_client", no_client)
+    for cls in (AnthropicProvider, OpenAICompatProvider):  # hybrid sends through the first, eu-hosted through the second
+        monkeypatch.setattr(cls, "chat", capture)
+        monkeypatch.setattr(cls, "_client", no_client)
     monkeypatch.setattr(OllamaProvider, "is_available", lambda self: False)
     monkeypatch.setattr(OllamaProvider, "list_models", lambda self: [])
 
@@ -172,7 +176,8 @@ def test_external_tasks_are_sent_and_carry_no_raw_data(monkeypatch, finished_run
     assert not blocked, f"external tasks were stopped before sending: {blocked}"
     assert {r.task for r in ext} == EXTERNAL_TASKS, "every external task must reach the provider"
     assert len(sent) == len(ext) >= 12
-    assert all(s["model"] == "claude-sonnet-5" for s in sent)
+    assert all(s["model"] == settings.external_llm.model for s in sent)
+    assert {s["provider"] for s in sent} == {"OpenAICompatProvider" if profile == "eu-hosted" else "AnthropicProvider"}
 
     by_dec = _raw_numbers(df)
     problems = []

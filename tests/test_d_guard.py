@@ -290,7 +290,10 @@ def test_explain_mentions_thresholds(settings):
     txt2 = guard.explain(load_settings(profile="no-egress"))
     assert "nothing leaves" in txt2.lower()
     txt3 = guard.explain(load_settings(profile="eu-hosted"))
-    assert "NOT used" in txt3 and "base_url" in txt3
+    assert "NOT used" in txt3 and "TPM_EU_API_KEY" in txt3 and "containers.datacrunch.io" in txt3 and "Finland (EU)" in txt3
+    no_eu = load_settings(profile="eu-hosted")
+    no_eu.external_llm.base_url = None
+    assert "base_url" in guard.explain(no_eu)
 
 
 def test_narrow_table_rows_never_leave(demo_ws, settings):

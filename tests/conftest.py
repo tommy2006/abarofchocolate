@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 # Set before tpm.config is imported; inherited by the CLI subprocesses the tests start.
 os.environ["TPM_NO_DOTENV"] = "1"
 _REAL_WORLD_ENV = ("ANTHROPIC_API_KEY", "TPM_PROFILE", "TPM_EXTERNAL_BASE_URL", "TPM_EXTERNAL_MODEL",
+                   "TPM_EU_API_KEY", "TPM_EU_BASE_URL", "TPM_EU_MODEL", "TPM_EU_PROVIDER",
                    "TPM_SMTP_HOST", "TPM_SMTP_PORT", "TPM_SMTP_USER", "TPM_SMTP_PASSWORD", "TPM_SMTP_FROM")
 
 

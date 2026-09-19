@@ -1,6 +1,7 @@
 # Trustworthy Process Monitor settings. Every team decision that may change later is a key here.
 # Environment overrides: TPM_PROFILE, TPM_LOCAL_MODEL, TPM_EXTERNAL_MODEL, ANTHROPIC_API_KEY, OLLAMA_HOST,
-# TPM_WORKSPACE, TPM_TIME_BUDGET_S. Secrets live in .env (never here).
+# TPM_EU_API_KEY / TPM_EU_BASE_URL / TPM_EU_MODEL / TPM_EU_PROVIDER (eu-hosted profile), TPM_WORKSPACE,
+# TPM_TIME_BUDGET_S. Secrets live in .env (never here).
 
 profile: no-egress            # default: nothing leaves the machine
 
@@ -32,10 +33,26 @@ profiles:
       assessor_chat: external
       report_narrative: external
   eu-hosted:
-    description: Same routing as hybrid but the external endpoint is an EU-hosted deployment (set external_llm.base_url).
+    description: Same routing as hybrid, but the external model runs in the EU - Mistral Large 3 on the hackathon's Verda GPU containers in Finland (key in TPM_EU_API_KEY).
     allow_external: true
     guard_strict: true
-    require_custom_endpoint: true     # unavailable until external_llm.base_url points at a non-anthropic.com host
+    require_custom_endpoint: true     # never the first-party Anthropic API (it has no EU-only processing) ...
+    eu_hosts:                         # ... and only these services, which run the model in the EU
+      - containers.datacrunch.io      # Verda (formerly DataCrunch), Finnish GPU cloud: serverless containers
+      - containers.verda.com
+      - api.eu.mistral.ai             # Mistral AI, EU regional endpoint
+      - bedrock-mantle.eu-north-1.api.aws   # Claude on Amazon Bedrock, in-region Stockholm (provider: anthropic)
+      - bedrock-mantle.eu-west-1.api.aws    # ... in-region Ireland
+    external_llm:                     # these keys replace the external_llm ones below while eu-hosted is active
+      provider: openai-compatible     # POST {base_url}/chat/completions, key as Bearer token
+      base_url: https://containers.datacrunch.io/data-sovereignty-mistral-large-3/v1
+      model: mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4
+      api_key_env: TPM_EU_API_KEY
+      allowed_model_patterns: [mistral]
+      operator: the hackathon organisers (Verda serverless containers)
+      location: Finland (EU)
+      timeout_s: 120                  # a 675B model shared by all teams: answers take longer
+      max_parallel: 3
     routing:
       column_roles: local
       sensor_hypotheses: external

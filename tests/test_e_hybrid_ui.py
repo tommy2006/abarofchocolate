@@ -208,8 +208,10 @@ def test_profile_switching_still_works_next_to_the_model(served):
     d = client.get(f"/api/runs/{RUN}/llm/usage").json()
     assert d["allow_external"] is True and d["external_unavailable_reason"].startswith("no API key"), "hybrid without a key: allowed, not usable"
     r = client.put("/api/settings", json={"profile": "eu-hosted", "external_llm": {"model": "claude-opus-5"}})
-    assert r.status_code == 200 and r.json()["profile"] == "eu-hosted" and r.json()["external_model"] == "claude-opus-5"
-    assert "EU-hosted endpoint" in client.get("/api/llm/status").json()["external_unavailable_reason"]
+    # eu-hosted brings its own endpoint and model (Mistral Large 3 on Verda); the Claude choice is kept for hybrid
+    assert r.status_code == 200 and r.json()["profile"] == "eu-hosted" and r.json()["external_model"].startswith("mistralai/")
+    status = client.get("/api/llm/status").json()
+    assert status["external_unavailable_reason"] == "no API key in env TPM_EU_API_KEY" and "containers.datacrunch.io" in status["external_base_url"]
     assert client.put("/api/settings", json={"profile": "bogus"}).status_code == 400
     r = client.put("/api/settings", json={"profile": "no-egress", "external_model": "claude-sonnet-5"})
     assert r.status_code == 200 and r.json()["allow_external"] is False

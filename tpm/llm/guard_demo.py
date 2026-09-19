@@ -331,7 +331,7 @@ def run_demo(ws: Any, settings: Settings, profile: Optional[str] = None, send: b
     sch = _schema(ws)
     headers = _headers(sch)
     task, payload, about = real_payload(ws)
-    provider, model = s.external_llm.provider, s.external_model_for(task)
+    provider, model = s.external_llm.provider_label, s.external_model_for(task)
 
     # 1. the real payload
     g = guard_mod.check(payload, s, strict=strict, ws=ws)

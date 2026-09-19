@@ -129,8 +129,11 @@ record batch" through the identical pipeline.
   numbers rounded) and a deliberately unsafe message made of raw rows, which is blocked. Nothing is sent.
 - *Who wrote the explanations* (Data flow and Diagnoses pages, report section 8) says how many explanations a
   model wrote and why the rest use the evidence template.
-- The model layer is swapped by configuration only: `local_llm.model` (Ollama), `external_llm.model` /
-  `external_llm.base_url` (EU-hosted endpoint), profile routing per task.
+- The model layer is swapped by configuration only: `local_llm.model` (Ollama), `external_llm.model` (Claude in
+  hybrid), the **eu-hosted** profile (Mistral Large 3 on the hackathon's Verda GPU containers in Finland, key in
+  `TPM_EU_API_KEY`; any other EU service through `TPM_EU_BASE_URL` / `TPM_EU_MODEL`, if its host is on
+  `profiles.eu-hosted.eu_hosts`), profile routing per task. Switching the profile on the Data flow page is the
+  whole toggle: no-egress (nothing leaves) → hybrid (Claude) → eu-hosted (Mistral in Finland).
 
 ## Bonus items and where to find them
 

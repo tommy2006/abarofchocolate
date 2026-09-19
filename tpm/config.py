@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import os
+from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SETTINGS_PATH = ROOT / "config" / "settings.yaml"
@@ -30,6 +32,10 @@ class Profile(BaseModel):
     allow_external: bool = False
     guard_strict: bool = True
     require_custom_endpoint: bool = False  # eu-hosted: the external route needs external_llm.base_url (not anthropic.com)
+    # eu-hosted: host names (fnmatch patterns) of services that run the model in the EU; any other host is refused
+    eu_hosts: list[str] = Field(default_factory=list)
+    # external_llm keys this profile replaces while it is active (eu-hosted brings its own endpoint, model and key)
+    external_llm: dict[str, Any] = Field(default_factory=dict)
     routing: dict[str, str] = Field(default_factory=dict)
 
 
@@ -54,10 +60,14 @@ class LocalLLMConfig(BaseModel):
 
 # Model families that may never be used as the external model, whatever the config says (30-day data retention).
 ALWAYS_BLOCKED_MODEL_PATTERNS = ("fable", "mythos")
+# external_llm.provider values: the Anthropic Messages API (Anthropic, Bedrock) or an OpenAI-compatible endpoint
+EXTERNAL_PROVIDERS = ("anthropic", "openai-compatible")
+# Bedrock cross-region inference profiles that may run the model outside the EU (an "eu." profile stays in the EU)
+NON_EU_MODEL_PREFIXES = ("global.", "us.", "us-gov.", "apac.", "au.", "jp.", "ca.")
 
 
 class ExternalLLMConfig(BaseModel):
-    provider: str = "anthropic"
+    provider: str = "anthropic"  # anthropic | openai-compatible
     model: str = "claude-sonnet-5"
     model_by_task: dict[str, str] = Field(default_factory=dict)  # optional, e.g. {critique: claude-opus-5}
     allowed_model_patterns: list[str] = Field(default_factory=lambda: ["sonnet", "opus"])
@@ -73,6 +83,9 @@ class ExternalLLMConfig(BaseModel):
     max_output_tokens_per_run: int = 120_000
     max_parallel: int = 6  # concurrent external calls
     max_narratives_per_run: int = 12  # diagnoses that get narrative + critique when the route is external
+    temperature: Optional[float] = None  # openai-compatible only (None = 0.2); Anthropic models keep their default
+    operator: str = ""  # who runs the endpoint, for the data-flow statement (e.g. "the hackathon organisers on Verda")
+    location: str = ""  # where the model runs, for the data-flow statement (e.g. "Finland (EU)")
 
     workspace_id_env: str = "ANTHROPIC_WORKSPACE_ID"  # only for API keys that are not tied to one workspace
 
@@ -99,13 +112,24 @@ class ExternalLLMConfig(BaseModel):
             return False, f"model '{model}' is not in the allowed families ({', '.join(allowed)})"
         return True, "ok"
 
+    @property
+    def host(self) -> str:
+        """Host name of base_url, lower-case ("" without a base_url)."""
+        if not self.base_url:
+            return ""
+        return (urlparse(self.base_url if "//" in self.base_url else "//" + self.base_url).hostname or "").lower()
+
+    @property
+    def provider_label(self) -> str:
+        """Provider name for the egress ledger: with a custom endpoint its host is part of it, so every recorded call
+        says where it went ("openai-compatible @ containers.datacrunch.io")."""
+        return f"{self.provider} @ {self.host}" if self.host else self.provider
+
     def endpoint_is_first_party(self) -> bool:
         """True when calls go to Anthropic's own API (no base_url, or an anthropic.com host)."""
         if not self.base_url:
             return True
-        from urllib.parse import urlparse
-
-        host = (urlparse(self.base_url if "//" in self.base_url else "//" + self.base_url).hostname or "").lower()
+        host = self.host
         return host == "anthropic.com" or host.endswith(".anthropic.com")
 
 
@@ -214,6 +238,27 @@ class Settings(BaseModel):
     time_budget_s: int = 1200
     settings_path: Optional[str] = None
 
+    # external_llm as the file (and the TPM_EXTERNAL_* variables) set it, before the active profile's overrides
+    _external_llm_base: Optional[ExternalLLMConfig] = PrivateAttr(default=None)
+
+    def model_post_init(self, __context: Any) -> None:
+        self._apply_profile_llm()
+
+    def _apply_profile_llm(self) -> None:
+        """external_llm = the file's external_llm with the active profile's `external_llm` keys on top. eu-hosted brings
+        its own endpoint, model and key variable this way, while hybrid keeps the file's values."""
+        if self._external_llm_base is None:
+            self._external_llm_base = self.external_llm.model_copy(deep=True)
+        over = dict(self.active_profile.external_llm or {})
+        base = self._external_llm_base
+        self.external_llm = ExternalLLMConfig(**{**base.model_dump(), **over}) if over else base.model_copy(deep=True)
+
+    @property
+    def base_external_llm(self) -> ExternalLLMConfig:
+        """external_llm as settings.yaml's top-level block has it (what the UI's model choice writes), without the active
+        profile's overrides."""
+        return self._external_llm_base or self.external_llm
+
     @property
     def active_profile(self) -> Profile:
         return self.profiles.get(self.profile, Profile())
@@ -237,12 +282,25 @@ class Settings(BaseModel):
         prof = self.active_profile
         if not prof.allow_external:
             return f"profile '{self.profile}' does not allow external models"
-        ok, why = self.external_llm.model_allowed(self.external_model_for(task))
+        cfg = self.external_llm
+        if str(cfg.provider or "").strip().lower() not in EXTERNAL_PROVIDERS:
+            return f"external_llm.provider '{cfg.provider}' is unknown (use one of: {', '.join(EXTERNAL_PROVIDERS)})"
+        model = self.external_model_for(task)
+        ok, why = cfg.model_allowed(model)
         if not ok:
             return why
-        if (prof.require_custom_endpoint or self.profile == "eu-hosted") and self.external_llm.endpoint_is_first_party():
-            return ("profile 'eu-hosted' needs external_llm.base_url set to an EU-hosted endpoint: the first-party Anthropic API "
-                    "has no EU-only processing")
+        if prof.require_custom_endpoint or self.profile == "eu-hosted":
+            if cfg.endpoint_is_first_party():
+                return ("profile 'eu-hosted' needs external_llm.base_url set to an EU-hosted endpoint: the first-party Anthropic API "
+                        "has no EU-only processing")
+            # only services known to run the model in the EU; worded without "endpoint" so the UI shows these words
+            if prof.eu_hosts and not any(fnmatch(cfg.host, str(p).strip().lower()) for p in prof.eu_hosts if p):
+                return (f"profile '{self.profile}' refuses {cfg.host}: it is not on the list of EU-hosted services "
+                        f"(profiles.{self.profile}.eu_hosts)")
+            prefix = next((p for p in NON_EU_MODEL_PREFIXES if model.strip().lower().startswith(p)), None)
+            if prefix:
+                return (f"model id '{model}' is a cross-region profile ('{prefix}') that may run outside the EU; use an in-region "
+                        f"or an 'eu.' model id")
         return None
 
     @property
@@ -252,8 +310,9 @@ class Settings(BaseModel):
 
     def with_profile(self, profile: str) -> "Settings":
         s = self.model_copy(deep=True)
-        if profile in s.profiles:
+        if profile in s.profiles and profile != s.profile:
             s.profile = profile
+            s._apply_profile_llm()
         return s
 
 
@@ -271,6 +330,13 @@ def _apply_env(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("external_llm", {})["model"] = os.environ["TPM_EXTERNAL_MODEL"]
     if os.environ.get("TPM_EXTERNAL_BASE_URL"):
         data.setdefault("external_llm", {})["base_url"] = os.environ["TPM_EXTERNAL_BASE_URL"]
+    # the eu-hosted profile's own endpoint (its key variable is profiles.eu-hosted.external_llm.api_key_env, TPM_EU_API_KEY)
+    eu = {k: os.environ[v].strip() for k, v in (("base_url", "TPM_EU_BASE_URL"), ("model", "TPM_EU_MODEL"), ("provider", "TPM_EU_PROVIDER"))
+          if os.environ.get(v, "").strip()}
+    if eu:
+        profiles = data["profiles"] = data.get("profiles") or {}
+        eu_prof = profiles["eu-hosted"] = profiles.get("eu-hosted") or {}
+        eu_prof["external_llm"] = {**(eu_prof.get("external_llm") or {}), **eu}
     if os.environ.get("TPM_WORKSPACE"):
         data["workspace_dir"] = os.environ["TPM_WORKSPACE"]
     if os.environ.get("TPM_TIME_BUDGET_S"):

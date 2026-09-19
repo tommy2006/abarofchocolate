@@ -1,5 +1,7 @@
-"""Model providers. OllamaProvider (local, httpx), AnthropicProvider (external, anthropic SDK) and
-TemplateProvider (no model). Only tpm.llm.router may instantiate the external provider for real calls.
+"""Model providers. OllamaProvider (local, httpx), AnthropicProvider (external, anthropic SDK), OpenAICompatProvider
+(external, any OpenAI-compatible chat-completions endpoint, httpx) and TemplateProvider (no model).
+external_provider(settings) picks the external one from external_llm.provider. Only tpm.llm.router may instantiate an
+external provider for real calls.
 
 Message format shared by all providers: [{"role": "system"|"user"|"assistant", "content": str}, ...].
 chat() returns (text, parsed_json_or_None, latency_ms) and raises ProviderError on failure.
@@ -410,7 +412,7 @@ class AnthropicProvider:
                 kwargs: dict[str, Any] = {"api_key": self.cfg.api_key, "timeout": float(self.cfg.timeout_s), "max_retries": 1}
                 if self.cfg.base_url:
                     kwargs["base_url"] = self.cfg.base_url
-                if self.cfg.workspace_id:
+                if self.cfg.workspace_id and self.cfg.endpoint_is_first_party():  # Anthropic's own header: never to Bedrock or others
                     kwargs["default_headers"] = {"anthropic-workspace-id": self.cfg.workspace_id}
                 client = anthropic.Anthropic(**kwargs)
                 _EXT_CLIENTS[key] = client
@@ -487,6 +489,162 @@ class AnthropicProvider:
         if schema and parsed is not None and not text:
             text = json.dumps(parsed, ensure_ascii=False)
         return text, parsed, latency
+
+
+# ----------------------------------------------------------------------------------------------
+# OpenAI-compatible endpoint (external): vLLM, Ollama, Mistral, Scaleway, OVHcloud ... behind /chat/completions. The
+# eu-hosted profile uses it for Mistral Large 3, which the hackathon organisers run on Verda GPUs in Finland.
+# ----------------------------------------------------------------------------------------------
+
+
+_OAI_CLIENTS: dict[tuple[str, float], "httpx.Client"] = {}
+_OAI_CLIENTS_LOCK = threading.Lock()
+
+
+class _RequestRefused(ProviderError):
+    """HTTP 4xx other than a rejected key: the request itself was not accepted."""
+
+
+def _short(text: str, n: int = 300) -> str:
+    return " ".join(str(text or "").split())[:n]
+
+
+class OpenAICompatProvider:
+    """External model behind an OpenAI-compatible chat-completions endpoint. The key goes out as a Bearer token and
+    nothing else does: no organisation or workspace header. With a schema the request asks for
+    response_format=json_schema; a server that refuses it gets the same request once more without it (the prompt carries
+    the schema, and the router checks and repairs the JSON)."""
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.cfg = settings.external_llm
+        self._tls = threading.local()
+
+    def is_available(self) -> bool:
+        return bool(self.cfg.api_key) and bool(self.cfg.base_url)
+
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Token usage of this thread's last chat() on this provider: {"input_tokens", "output_tokens"}."""
+        return dict(getattr(self._tls, "usage", None) or {"input_tokens": 0, "output_tokens": 0})
+
+    @last_usage.setter
+    def last_usage(self, usage: Optional[dict[str, int]]) -> None:
+        u = usage or {}
+        self._tls.usage = {"input_tokens": int(u.get("input_tokens") or 0), "output_tokens": int(u.get("output_tokens") or 0)}
+
+    def url(self) -> str:
+        """{base_url}/chat/completions; a base_url that already ends in /chat/completions is used as it is."""
+        base = str(self.cfg.base_url or "").strip().rstrip("/")
+        return base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+    def _client(self) -> "httpx.Client":
+        """One pooled client per (endpoint, timeout): thread-safe, keeps its connections between calls."""
+        key = (self.url(), float(self.cfg.timeout_s))
+        with _OAI_CLIENTS_LOCK:
+            c = _OAI_CLIENTS.get(key)
+            if c is None:
+                c = httpx.Client(timeout=httpx.Timeout(float(self.cfg.timeout_s), connect=10.0))
+                _OAI_CLIENTS[key] = c
+            return c
+
+    def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+        """POST once, plus one retry when the server is busy or unreachable (HTTP 429 / 5xx, connection errors). A read
+        timeout is not retried: the model may still be working, and the caller falls back to the local model."""
+        headers = {"Authorization": f"Bearer {self.cfg.api_key}", "Content-Type": "application/json"}
+        host = self.cfg.host or "the endpoint"
+        last: Optional[ProviderError] = None
+        for attempt in range(2):
+            try:
+                r = self._client().post(self.url(), json=body, headers=headers)
+            except httpx.ReadTimeout:
+                raise TransientError(f"{host} did not answer within {self.cfg.timeout_s} s")
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError, httpx.WriteError) as e:
+                last = TransientError(f"{host} unreachable: {type(e).__name__}")
+            except httpx.HTTPError as e:
+                raise ProviderError(f"{host}: {type(e).__name__}: {_short(str(e))}")
+            else:
+                if r.status_code == 429 or r.status_code >= 500:
+                    last = TransientError(f"{host} HTTP {r.status_code}: {_short(r.text)}")
+                elif r.status_code in (401, 403):
+                    raise ProviderError(f"{host} refused the API key (HTTP {r.status_code}); check {self.cfg.api_key_env}")
+                elif r.status_code >= 400:
+                    raise _RequestRefused(f"{host} HTTP {r.status_code}: {_short(r.text)}")
+                else:
+                    try:
+                        return r.json()
+                    except Exception:
+                        raise ProviderError(f"{host} answered with something that is not JSON: {_short(r.text)}")
+            if attempt == 0:
+                time.sleep(1.0)
+        raise last or ProviderError(f"{host}: request failed")
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        schema: Optional[dict[str, Any]] = None,
+        max_tokens: Optional[int] = None,
+        model: Optional[str] = None,
+    ) -> tuple[str, Optional[Any], int]:
+        self.last_usage = None
+        if not self.cfg.api_key:
+            raise ProviderError(f"no API key in env {self.cfg.api_key_env}")
+        if not self.cfg.base_url:
+            raise ProviderError("external_llm.base_url is not set")
+        model = model or self.cfg.model
+        ok, why = self.cfg.model_allowed(model)
+        if not ok:
+            raise ProviderError(why)
+        system, rest = split_system(messages)
+        rest = normalize_turns(rest)  # Mistral chat templates want user / assistant turns alternating, user first
+        if not rest:
+            raise ProviderError("no user message")
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": ([{"role": "system", "content": system}] if system else []) + rest,
+            "max_tokens": int(max_tokens or self.cfg.max_tokens),
+            "temperature": float(0.2 if self.cfg.temperature is None else self.cfg.temperature),
+        }
+        wrapped = False
+        if schema:
+            json_schema = schema
+            if schema.get("type") != "object":
+                json_schema = {"type": "object", "properties": {"result": schema}, "required": ["result"]}
+                wrapped = True
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "result", "schema": json_schema}}
+        t0 = time.time()
+        try:
+            data = self._post(body)
+        except _RequestRefused:
+            if "response_format" not in body:
+                raise
+            body.pop("response_format")  # the server cannot enforce this schema: ask once more, the prompt carries it
+            wrapped = False
+            data = self._post(body)
+        latency = int((time.time() - t0) * 1000)
+        usage = data.get("usage") or {}
+        self.last_usage = {"input_tokens": usage.get("prompt_tokens") or 0, "output_tokens": usage.get("completion_tokens") or 0}
+        choice = (data.get("choices") or [{}])[0] or {}
+        if choice.get("finish_reason") == "content_filter":
+            raise ProviderError(f"{self.cfg.host}: the answer was withheld by the endpoint's content filter")
+        content = (choice.get("message") or {}).get("content") or ""
+        if isinstance(content, list):  # some servers return content parts
+            content = "".join(str(p.get("text") or "") for p in content if isinstance(p, dict))
+        text = str(content)
+        parsed: Optional[Any] = None
+        if schema:
+            parsed = extract_json(text)
+            if wrapped and isinstance(parsed, dict) and set(parsed) == {"result"}:
+                parsed = parsed["result"]
+        return text, parsed, latency
+
+
+def external_provider(settings: Settings) -> Any:
+    """The provider of the external route: the Anthropic Messages API (Anthropic, Claude on Bedrock) or an
+    OpenAI-compatible endpoint (the eu-hosted Mistral on Verda, vLLM, Scaleway ...), per external_llm.provider."""
+    if str(settings.external_llm.provider or "").strip().lower() == "openai-compatible":
+        return OpenAICompatProvider(settings)
+    return AnthropicProvider(settings)
 
 
 # ----------------------------------------------------------------------------------------------

@@ -211,8 +211,10 @@ def data_flow_statement(ws: Any, settings: Settings, language: str = "en", extra
         note = "" if settings.local_llm.model in used_local else f" (configured model not pulled; fell back to the first available model)"
         lines.append(f"Local model actually used in this run: {used}{note}.")
     if prof.allow_external:
-        ep = settings.external_llm.base_url or "provider default endpoint"
-        lines.append(f"External model: {settings.external_llm.model} via {settings.external_llm.provider} ({ep}).")
+        ext = settings.external_llm
+        ep = ext.base_url or "provider default endpoint"
+        where = "; ".join(x for x in (f"run by {ext.operator}" if ext.operator else "", f"located in {ext.location}" if ext.location else "") if x)
+        lines.append(f"External model: {ext.model} via {ext.provider} ({ep}{'; ' + where if where else ''}).")
     lines.append("")
     if not recs:
         lines.append("No language-model calls have been made in this run. Nothing left the operator environment.")

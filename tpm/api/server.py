@@ -444,7 +444,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             if not isinstance(ext, dict) or set(ext) != {"model"}:
                 raise HTTPException(400, "only external_llm.model can be changed here")
             ext_model = str(ext["model"] or "").strip()
-            ok, why = state.settings.external_llm.model_allowed(ext_model)
+            ok, why = state.settings.base_external_llm.model_allowed(ext_model)  # the top-level model is what gets written
             if not ok:
                 raise HTTPException(400, why)
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}", ext_model):

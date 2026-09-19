@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 
 from tpm.config import load_settings  # noqa: E402
 from tpm.llm import guard, guard_demo, ledger, router  # noqa: E402
-from tpm.llm.providers import AnthropicProvider, OllamaProvider, ProviderError  # noqa: E402
+from tpm.llm.providers import AnthropicProvider, OllamaProvider, OpenAICompatProvider, ProviderError  # noqa: E402
 from tpm.workspace import Workspace  # noqa: E402
 
 FILE_NAME = "te_style_secret_plant.csv"
@@ -93,15 +93,17 @@ def _copy(te_run, name: str, profile: str):
     settings.workspace_dir = str(root)
     if profile == "eu-hosted":
         settings.external_llm.base_url = "https://eu.example-llm.invalid/v1"  # fake EU endpoint; the network client is never built
+        settings.active_profile.eu_hosts.append("eu.example-llm.invalid")
     return Workspace("te_run", settings=settings, root=root), settings, df
 
 
 def _recorder(monkeypatch, sent: list[dict]) -> None:
-    """AnthropicProvider.chat records every message list. Agent steps get a final answer (so a chat turn completes),
-    a diagnosis narrative gets a valid reply (so --send completes), everything else is refused after recording."""
+    """The external provider's chat records every message list (AnthropicProvider in hybrid, OpenAICompatProvider in
+    eu-hosted). Agent steps get a final answer (so a chat turn completes), a diagnosis narrative gets a valid reply (so
+    --send completes), everything else is refused after recording."""
 
     def fake(self, messages, schema=None, max_tokens=None, model=None):
-        sent.append({"model": model or self.cfg.model, "messages": [dict(m) for m in messages], "schema": schema})
+        sent.append({"model": model or self.cfg.model, "messages": [dict(m) for m in messages], "schema": schema, "provider": type(self).__name__})
         props = (schema or {}).get("properties") or {}
         if "action" in props:
             step = {"thought": "done", "action": "final", "answer": "S01 moved before S51; see the flag.", "citations": [], "confidence": 0.5, "suggested_followups": []}
@@ -117,8 +119,10 @@ def _recorder(monkeypatch, sent: list[dict]) -> None:
         raise AssertionError("the network client must never be built in this test")
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-key")
-    monkeypatch.setattr(AnthropicProvider, "chat", fake)
-    monkeypatch.setattr(AnthropicProvider, "_client", no_client)
+    monkeypatch.setenv("TPM_EU_API_KEY", "eu-fake-key")
+    for cls in (AnthropicProvider, OpenAICompatProvider):
+        monkeypatch.setattr(cls, "chat", fake)
+        monkeypatch.setattr(cls, "_client", no_client)
     monkeypatch.setattr(OllamaProvider, "is_available", lambda self: False)
     monkeypatch.setattr(OllamaProvider, "list_models", lambda self: [])
 
@@ -176,6 +180,7 @@ def test_te_headers_never_reach_the_provider(monkeypatch, te_run, profile):
     assert EXTERNAL_TASKS <= {r.task for r in ext}, f"every external task must be attempted: {sorted({r.task for r in ext})}"
     assert not [(r.task, r.guard_reason) for r in ext if r.guard_result not in ("allowed",)], "no external task may be stopped before sending"
     assert len(sent) >= len(EXTERNAL_TASKS)
+    assert {c["provider"] for c in sent} == {"OpenAICompatProvider" if profile == "eu-hosted" else "AnthropicProvider"}, "the recorder sits on the provider the route really uses"
     problems = []
     for i, call in enumerate(sent):
         text = "\n".join(str(m.get("content", "")) for m in call["messages"])

@@ -280,11 +280,21 @@ def test_eu_hosted_needs_a_non_anthropic_endpoint(monkeypatch, ws):
         assert res.source == "template"
         assert router.available(s)["external"] is False and "EU" in router.available(s)["external_unavailable_reason"]
     assert all(r.guard_result in ("unavailable", "fallback") for r in ledger.read(ws))
+    # Claude on Amazon Bedrock in Stockholm is an EU option too: the Anthropic client against a host on eu_hosts
     s = _settings("eu-hosted")
+    s.external_llm.provider, s.external_llm.api_key_env = "anthropic", "ANTHROPIC_API_KEY"
+    s.external_llm.model, s.external_llm.allowed_model_patterns = "anthropic.claude-sonnet-5", ["sonnet"]
     s.external_llm.base_url = "https://bedrock-mantle.eu-north-1.api.aws/anthropic"
     monkeypatch.setattr(AnthropicProvider, "chat", _ext_ok())
     res = router.complete("critique", {"diagnosis": {"id": "DIAG-000001", "summary": "x"}}, purpose="test", ws=ws, settings=s)
     assert res.ok and res.route == "external" and router.available(s)["external"] is True
+    assert ledger.read(ws)[-1].provider == "anthropic @ bedrock-mantle.eu-north-1.api.aws", "the ledger says where the call went"
+    # a US region or a worldwide inference profile is not EU-hosted
+    s.external_llm.base_url = "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+    assert "not on the list of EU-hosted services" in s.external_block_reason()
+    s.external_llm.base_url = "https://bedrock-mantle.eu-north-1.api.aws/anthropic"
+    s.external_llm.model = "global.anthropic.claude-sonnet-5"
+    assert "outside the EU" in s.external_block_reason()
     # hybrid is the first-party profile: no endpoint needed
     assert _settings("hybrid").external_block_reason() is None
 

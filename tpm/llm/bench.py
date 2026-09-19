@@ -135,9 +135,9 @@ def stub_reply(schema: Optional[dict[str, Any]]) -> tuple[str, Any]:
 
 @contextmanager
 def stub_providers() -> Iterator[None]:
-    """Both providers answer after STUB_SLEEP_S with stub_reply(); no network client is built and Ollama is not
+    """Every provider answers after STUB_SLEEP_S with stub_reply(); no network client is built and Ollama is not
     contacted. Class attributes are swapped for the duration of the block and restored afterwards."""
-    from .providers import AnthropicProvider, OllamaProvider
+    from .providers import AnthropicProvider, OllamaProvider, OpenAICompatProvider
 
     def ext_chat(self, messages, schema=None, max_tokens=None, model=None):
         time.sleep(STUB_SLEEP_S)
@@ -155,6 +155,7 @@ def stub_providers() -> Iterator[None]:
 
     swaps = [
         (AnthropicProvider, "chat", ext_chat), (AnthropicProvider, "is_available", lambda self: True), (AnthropicProvider, "_client", no_client),
+        (OpenAICompatProvider, "chat", ext_chat), (OpenAICompatProvider, "is_available", lambda self: True), (OpenAICompatProvider, "_client", no_client),
         (OllamaProvider, "chat", local_chat), (OllamaProvider, "is_available", lambda self: True), (OllamaProvider, "pick_model", lambda self: "stub-local"),
         (OllamaProvider, "list_models", lambda self: ["stub-local"]),
     ]

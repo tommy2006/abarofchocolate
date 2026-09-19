@@ -202,13 +202,13 @@ Rules file: one plain-language rule per line (`#` comments allowed), e.g. `confi
 
 Everything tunable is in `config/settings.yaml`; secrets and machine-specific overrides go in `.env`
 (`TPM_PROFILE`, `TPM_LOCAL_MODEL`, `OLLAMA_HOST`, `TPM_EXTERNAL_MODEL`, `TPM_EXTERNAL_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`,
-`TPM_WORKSPACE`, `TPM_TIME_BUDGET_S`, `TPM_SMTP_*`).
+`TPM_EU_API_KEY` and optionally `TPM_EU_BASE_URL` / `TPM_EU_MODEL` / `TPM_EU_PROVIDER` for eu-hosted, `TPM_WORKSPACE`, `TPM_TIME_BUDGET_S`, `TPM_SMTP_*`).
 
 | Profile | External calls | What may leave the machine |
 |---|---|---|
 | `no-egress` (default) | none | nothing; every model task runs on the local Ollama model or on code templates |
 | `hybrid` | the model tasks that work on derived results (sensor hypotheses, rule compilation, diagnosis narrative, critique, report summary) **and the chat** go to Claude through the **egress guard**; everything that reads raw data stays local | aggregated, rounded and anonymised results only (see below) - never rows, never exact readings |
-| `eu-hosted` | same routing as hybrid, but only against an EU-hosted endpoint (`external_llm.base_url`; the first-party Anthropic API has no EU processing, so an empty or `anthropic.com` address is refused), guard in strict mode | same, plus operator notes are dropped |
+| `eu-hosted` | same routing as hybrid, but the external model runs in the EU: **Mistral Large 3 on the hackathon's Verda GPU containers in Finland** (OpenAI-compatible endpoint in `profiles.eu-hosted.external_llm`, key in `TPM_EU_API_KEY`). Only services on `profiles.eu-hosted.eu_hosts` are accepted (Verda, Mistral's EU endpoint, Claude on Bedrock Stockholm / Ireland); the first-party Anthropic API (no EU processing), US regions and worldwide inference profiles are refused. Guard in strict mode; every call's ledger record names the host it went to | same, plus operator notes are dropped |
 
 **What the hybrid profile sends, and what it never sends.** Every outgoing payload is sanitised and then checked
 against an invariant just before sending; a payload that fails the check is not sent:
@@ -257,7 +257,7 @@ contract of the feature: [docs/HYBRID_SPEC.md](docs/HYBRID_SPEC.md).
 ---|---|---|
 | `no-egress` (default) | none | nothing; every model task runs on the local Ollama model or on code templates |
 | `hybrid` | derived-artifact tasks (sensor hypotheses, rule compilation, diagnosis narrative, critique, report narrative) go to Anthropic through the **egress guard**; raw-data tasks stay local | signal-catalog aggregates, relation summaries, check / flag / diagnosis statements, rule text — never rows |
-| `eu-hosted` | same routing as hybrid against an EU-hosted endpoint (`external_llm.base_url`), guard in strict mode | same, with column names replaced by aliases |
+| `eu-hosted` | same routing as hybrid against Mistral Large 3 on Verda in Finland (`profiles.eu-hosted.external_llm`, key `TPM_EU_API_KEY`), guard in strict mode | same, with column names replaced by aliases |
 
 Switch with `TPM_PROFILE=hybrid`, `--profile hybrid`, or in the UI settings. Every external call is written to the
 egress ledger (what was sent, to which model, why, guard result). Details: [docs/DATAFLOW.md](docs/DATAFLOW.md).

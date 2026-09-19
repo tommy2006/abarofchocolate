@@ -82,6 +82,19 @@ no vocabulary value; no list of more than `max_series_points` numbers; no droppe
   through a new `chat_ex`). Consecutive same-role messages are merged and a leading assistant turn is dropped.
 - `eu-hosted` requires `external_llm.base_url` to be set and not an `anthropic.com` host; otherwise the external
   route is unavailable with a clear reason (the first-party API has no EU processing).
+- (2026-09-19, EU endpoint) A profile may carry `external_llm` keys that replace the top-level ones while it is active
+  (`Settings._apply_profile_llm`, re-applied by `with_profile`; `Settings.base_external_llm` is the top-level block the
+  UI's model choice writes). `eu-hosted` uses this for `provider: openai-compatible`, the organisers' Verda endpoint,
+  `mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4` and `api_key_env: TPM_EU_API_KEY`; `TPM_EU_BASE_URL` /
+  `TPM_EU_MODEL` / `TPM_EU_PROVIDER` override them. `profiles.eu-hosted.eu_hosts` (fnmatch patterns) lists the only
+  hosts it accepts, and Bedrock cross-region ids (`global.`, `us.`, ...) are refused.
+- `OpenAICompatProvider`: POST `{base_url}/chat/completions` with `Authorization: Bearer <key>` only; system message
+  first, turns normalised like Anthropic's; a schema is sent as `response_format: json_schema` (non-object schemas
+  wrapped in `{"result": ...}` and unwrapped), and a 4xx answer to it is retried once without it; HTTP 429 / 5xx and
+  connection errors are retried once, a read timeout is not; usage from `usage.prompt_tokens / completion_tokens`.
+  `providers.external_provider(settings)` picks the class from `external_llm.provider`; the router records
+  `external_llm.provider_label` (`"<provider> @ <host>"` with a custom endpoint) as the ledger's `provider`.
+  `AnthropicProvider` sends `anthropic-workspace-id` only to Anthropic's own API.
 - Ledger (`EgressRecord`): add `input_tokens`, `output_tokens`, `sanitizer` (dict), keep hash/preview. The
   preview stores the SANITISED payload only. `ledger.usage(ws) -> {external_calls, external_ok, input_tokens,
   output_tokens, blocked, budget_left_calls, avg_latency_ms_external, avg_latency_ms_local, by_task:{...}}`.
