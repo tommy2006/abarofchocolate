@@ -22,6 +22,8 @@ _LEAD_RE = re.compile(r"^\s*(?:yes|no|unclear|uncertain)\s*[:.,;!–—-]\s*", r
 _MID_LEAD_RE = re.compile(r"([:.;]\s+)(?:yes|no|unclear|uncertain)\s*:\s*(\S)", re.I)
 # a model sometimes "cites" the payload keys it read from: "... 26 failed (overview, quality)." -> drop those
 _PAYLOAD_CITE_RE = re.compile(r"\s*\((?:\s*(?:overview|quality|report_sections|flags|diagnoses|untrusted_batches|instructions)\s*,?)+\)", re.I)
+# ... and placeholder ids that point at nothing: "(CHK-...)", "(EV-…)"
+_PLACEHOLDER_CITE_RE = re.compile(r"\s*\((?:\s*(?:EV|FLAG|DIAG|CHK|INF|RULE|PATTERN|EGR)-(?:\.{2,}|…|X+|N+)\s*,?)+\)")
 
 
 # ----------------------------------------------------------------------------- cleaning
@@ -216,7 +218,7 @@ def _prose_paragraphs(v: Any, require_end: bool) -> list[str]:
     for p in paragraphs(_as_text(v)):
         if _looks_like_json(p):
             continue
-        p = whole_sentences(_PAYLOAD_CITE_RE.sub("", p), require_end=require_end)
+        p = whole_sentences(_PLACEHOLDER_CITE_RE.sub("", _PAYLOAD_CITE_RE.sub("", p)), require_end=require_end)
         if p:
             out.append(p)
     return out

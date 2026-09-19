@@ -83,6 +83,30 @@ def test_model_summary_is_rendered_as_prose(fake_ws, monkeypatch):
     assert len(calls) == 1 and _llm_block(_html(fake_ws))
 
 
+def test_payload_states_totals_and_regenerate_asks_the_model_again(fake_ws, monkeypatch):
+    calls = []
+    monkeypatch.setattr("tpm.llm.complete", _fake_complete(calls=calls))
+    generate_report(fake_ws, fake_ws.settings, "en", use_llm=True, llm_wait_s=20)
+    payload = calls[0]["payload"]
+    n_flags, n_diags = len(fake_ws.read_jsonl("flags")), len(fake_ws.read_jsonl("diagnoses"))
+    # the lists are a sample (at most 8); the totals are stated so the model cannot mistake one for the other
+    assert payload["report_sections"]["n_flags_total"] == n_flags and payload["report_sections"]["n_diagnoses_total"] == n_diags
+    assert len(payload["flags"]) <= 8 and len(payload["diagnoses"]) <= 8 and "totals" in payload["instructions"]
+    for f in payload["flags"]:
+        assert f["severity"] is None or len(str(f["severity"]).split(".")[-1]) <= 3  # no 16-digit floats for the model to copy
+    # cached: an ordinary view does not ask again; "Regenerate" (force) does
+    assert not ensure_report(fake_ws, fake_ws.settings, "en")["regenerated"] and len(calls) == 1
+    st = ensure_report(fake_ws, fake_ws.settings, "en", force=True)
+    assert st["regenerated"] and st["llm"] == "pending"
+    deadline = time.time() + 20
+    while time.time() < deadline and ensure_report(fake_ws, fake_ws.settings, "en")["llm"] == "pending":
+        time.sleep(0.1)
+    assert len(calls) == 2 and ensure_report(fake_ws, fake_ws.settings, "en")["llm"] == "ready"
+    # placeholder "citations" a model invents are removed, real ids stay
+    n = parse_narrative({"executive_summary": "635 checks ran (CHK-...). See FLAG-000001.", "sections": []})
+    assert n["summary"] == ["635 checks ran. See FLAG-000001."]
+
+
 def test_model_summary_from_text_only_fenced_json(fake_ws, monkeypatch):
     res = LLMResult(text="```json\n" + json.dumps(NARRATIVE, indent=2) + "\n```", data=None, source="llm-local:test-model", ok=True)
     monkeypatch.setattr("tpm.llm.complete", _fake_complete(res))

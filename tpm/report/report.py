@@ -581,7 +581,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     # ---- optional model-written summary
     anchors = {str(f.get("id")) for f in flag_rows} | {str(d.get("id")) for d in diag_rows}
     known_ids = set(evidence) | {str(x.get("id")) for x in flags} | {str(x.get("id")) for x in diags} | {str(x.get("check_id")) for x in checks} | {str(x.get("id")) for x in inferences} | {str(x.get("id")) for x in rules} | {str(x.get("id")) for x in patterns}
-    llm_payload = _narrative_payload(lang, overview, flag_rows, diag_rows, quality)
+    llm_payload = _narrative_payload(lang, overview, flag_rows, diag_rows, quality, n_flags_total=len(flags), n_diagnoses_total=len(diags))
     if narrative is None and use_llm:
         budget = LLM_WAIT_S
         if ctx and ctx.get("t_start") and ctx.get("time_budget_s"):
@@ -606,7 +606,14 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
 _LANGUAGE_NAMES = {"en": "English", "fi": "Finnish (suomi)", "sv": "Swedish (svenska)"}
 
 
-def _narrative_payload(lang: str, overview: list[str], flags: list[dict[str, Any]], diags: list[dict[str, Any]], quality: dict[str, Any]) -> dict[str, Any]:
+def _r3(v: Any) -> Any:
+    try:
+        return round(float(v), 3) if v is not None and not isinstance(v, bool) else v
+    except Exception:
+        return v
+
+
+def _narrative_payload(lang: str, overview: list[str], flags: list[dict[str, Any]], diags: list[dict[str, Any]], quality: dict[str, Any], n_flags_total: Optional[int] = None, n_diagnoses_total: Optional[int] = None) -> dict[str, Any]:
     """Derived artifacts only, under keys the egress guard knows (report_sections / flags / diagnoses / meta)."""
     name = _LANGUAGE_NAMES.get(lang, "English")
     return {
@@ -615,11 +622,12 @@ def _narrative_payload(lang: str, overview: list[str], flags: list[dict[str, Any
             f"Write for a plant operator, in {name}: the headings and every sentence must be in {name}. Keep it short: an executive "
             "summary of 2 to 4 sentences, then at most 4 sections of 2 to 4 sentences each, then at most 3 uncertainty sentences. "
             "Use complete sentences in plain prose: no lists, no markdown and no JSON inside the text fields. Keep every number exactly "
-            "as given and cite only ids that appear in the artifacts."
+            "as given and cite only complete ids that appear in the artifacts (never a placeholder such as CHK-...). The flags and "
+            "diagnoses listed are only the most severe few; the totals are in report_sections, so never present the length of a list as the total."
         ),
-        "report_sections": {"overview": overview[:4], "quality": {k: quality[k] for k in ("n_checks", "n_pass", "n_warn", "n_fail", "n_batches") if k in quality}, "untrusted_batches": quality.get("n_untrusted_total", 0)},
-        "flags": [{"id": f.get("id"), "kind": f.get("kind"), "group_id": f.get("group_id"), "severity": f.get("severity"), "statement": whole_sentences(f.get("statement"), 320) or _short(f.get("statement"), 320), "signals": f.get("signals")} for f in flags[:8]],
-        "diagnoses": [{"id": d.get("id"), "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "confidence": d.get("confidence"), "summary": whole_sentences(d.get("summary"), 320) or _short(d.get("summary"), 320), "verdict": (d.get("critique") or {}).get("verdict")} for d in diags[:8]],
+        "report_sections": {"overview": overview[:4], "quality": {k: quality[k] for k in ("n_checks", "n_pass", "n_warn", "n_fail", "n_batches") if k in quality}, "untrusted_batches": quality.get("n_untrusted_total", 0), "n_flags_total": n_flags_total if n_flags_total is not None else len(flags), "n_diagnoses_total": n_diagnoses_total if n_diagnoses_total is not None else len(diags)},
+        "flags": [{"id": f.get("id"), "kind": f.get("kind"), "group_id": f.get("group_id"), "severity": _r3(f.get("severity")), "statement": whole_sentences(f.get("statement"), 320) or _short(f.get("statement"), 320), "signals": f.get("signals")} for f in flags[:8]],
+        "diagnoses": [{"id": d.get("id"), "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "confidence": _r3(d.get("confidence")), "summary": whole_sentences(d.get("summary"), 320) or _short(d.get("summary"), 320), "verdict": (d.get("critique") or {}).get("verdict")} for d in diags[:8]],
     }
 
 
@@ -933,6 +941,11 @@ def ensure_report(ws: Workspace, settings: Optional[Settings] = None, lang: str 
     t0 = time.time()
     regenerated = False
     with _run_lock(ws):
+        if force and use_llm and ask_model and not _job_running(ws, lang):
+            try:
+                narrative_path(ws, lang).unlink()
+            except OSError:
+                pass
         st = report_status(ws, lang)
         stored = _load_narrative(ws, lang) if use_llm else None
         have = bool(stored and stored.get("status") == "ok")
