@@ -1,6 +1,7 @@
 /* View 6: decision log — filterable hash-chained table, verify chain, export, human decisions audit.
    Object ids and ids inside payloads are links. ?id=FLAG-000001 pre-filters. */
 import { state, t, el, clear, runApi, fmt, chip, section, table, viewHead, needRun, empty, hiddenHint, roleAllows, infStatus, evChips, toast, errText, notice, linkifyRefs, cleanText, refLink } from '../core.js';
+import { summaryCard, techDetails } from '../brief.js';
 
 const TYPE_OF_OBJECT = { flag: 'flag', diagnosis: 'diagnosis', evidence: 'evidence', check: 'check', inference: 'inference', rule: 'rule', pattern: 'pattern', signal: 'signal', batch: 'batch', trust: 'batch', egress: 'egress' };
 function objectRef(objectType, objectId) {
@@ -11,15 +12,19 @@ function objectRef(objectType, objectId) {
 }
 
 export async function render(main, params = {}) {
-  const view = el('div', { class: 'view' });
-  main.append(view);
-  const verifyBtn = el('button', { class: 'btn btn-primary', type: 'button' }, t('log.verify'));
+  // page = title (with Verify / Export), plain summary, then ONE expander with everything this view rendered before
+  const page = el('div', { class: 'view' });
+  main.append(page);
+  const verifyBtn = el('button', { class: 'btn btn-primary', type: 'button', dataset: { briefSection: 'verify' } }, t('log.verify'));
   const exportA = el('a', { class: 'btn', href: state.run ? `/api/runs/${encodeURIComponent(state.run)}/log/export` : '#', download: '' }, t('log.export'));
-  view.append(viewHead('6', t('nav.log'), el('div', { class: 'row' }, verifyBtn, exportA)));
-  if (!state.run) { view.append(needRun()); return view; }
-  view.append(el('p', { class: 'hint', text: t('log.intro') }));
+  page.append(viewHead('6', t('nav.log'), el('div', { class: 'row' }, verifyBtn, exportA)));
+  if (!state.run) { page.append(needRun()); return page; }
+  // the result of "Verify" is a plain sentence: it stays next to the summary, outside the expander
   const verifyOut = el('div');
-  view.append(verifyOut);
+  const tech = techDetails('log');
+  page.append(summaryCard('log'), verifyOut, tech);
+  const view = tech.body;
+  view.append(el('p', { class: 'hint', text: t('log.intro') }));
   verifyBtn.addEventListener('click', async () => {
     verifyBtn.disabled = true; clear(verifyOut); verifyOut.append(el('span', { class: 'dim', text: t('log.verifying') + '…' }));
     const r = await runApi('/log/verify'); verifyBtn.disabled = false; clear(verifyOut);

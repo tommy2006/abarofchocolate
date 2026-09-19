@@ -3,6 +3,7 @@
    answers; the source is always labelled. Every reference in an answer (FLAG-, EV-, S07, B00003...)
    is a link. */
 import { state, t, el, clear, runApi, errText, bus, chip, evChips, evidencePanel, actorName, actorRole, kindChip, store, linkifyRefs, cleanText, refLink } from './core.js';
+import { answerBlock, bt } from './brief.js';
 
 const chat = { open: false, context: null, messages: [], busy: false };
 let drawer, msgsEl, ctxEl, inputEl;
@@ -94,13 +95,28 @@ function citations(ids, key) {
   return box;
 }
 
+const openTech = new Set();
+/** How the answer was put together: which objects of the run were looked up, in order (names and ids, no contents). */
+function toolTrace(steps) {
+  steps = (steps || []).filter((x) => x && (x.tool || x.error));
+  if (!steps.length) return null;
+  const args = (a) => Object.entries(a || {}).map(([k, v]) => `${k} ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(', ');
+  return el('div', { class: 'tooltrace small' }, el('div', { class: 'dim', text: bt('brief.toolTrace', { n: steps.length }) }),
+    el('ol', { class: 'list small' }, steps.slice(0, 24).map((x) => el('li', {}, el('code', { text: x.tool || 'error' }), x.args ? el('span', { class: 'dim' }, ' ', linkifyRefs(args(x.args))) : null, x.thought ? el('span', { class: 'muted', text: ' — ' + String(x.thought).slice(0, 160) }) : null, x.ok === false || x.error ? el('span', { class: 'dim', text: ' ✕' }) : null))));
+}
+
 function renderMsgs() {
   clear(msgsEl);
   if (!chat.messages.length) msgsEl.append(el('div', { class: 'drawer-empty', text: t('chat.empty') }));
   for (const [i, m] of chat.messages.entries()) {
     const text = m.role === 'user' ? String(m.text || '') : cleanText(m.text);
-    const n = el('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'assistant') }, m.role === 'user' ? text : linkifyRefs(text || '–'));
-    if (m.role !== 'user') { n.append(srcLabel(m)); if (m.evidence_ids && m.evidence_ids.length) n.append(citations(m.evidence_ids, `${state.run}:${i}`)); }
+    // a short answer stays as it is; a long one shows its first two sentences; the full answer, the tool trace and the
+    // citations are under "Show technical analyses"
+    const parts = m.role === 'user' ? [text] : answerBlock(text, { technical: [toolTrace(m.tool_trace), m.evidence_ids && m.evidence_ids.length ? citations(m.evidence_ids, `${state.run}:${i}`) : null] });
+    const det = parts.find((x) => x && x.tagName === 'DETAILS');
+    if (det) { const key = `${state.run}:${i}`; if (openTech.has(key)) det.open = true; det.addEventListener('toggle', (e) => { if (e.target !== det) return; if (det.open) openTech.add(key); else openTech.delete(key); }); }   // stays open across re-renders of the list
+    const n = el('div', { class: 'msg ' + (m.role === 'user' ? 'user' : 'assistant') }, parts);
+    if (m.role !== 'user') n.append(srcLabel(m));
     msgsEl.append(n);
     if (m.role !== 'user' && m.followups && m.followups.length && m === chat.messages[chat.messages.length - 1]) {
       msgsEl.append(el('div', { class: 'drawer-quick', style: { padding: '0' } }, m.followups.slice(0, 4).map((q) => el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => send(q) }, q))));
@@ -120,7 +136,7 @@ export async function send(text) {
   const history = chat.messages.slice(-12, -1).map((m) => ({ role: m.role, content: m.text }));
   const r = await runApi('/chat', { method: 'POST', body: { message: text, context: chat.context || {}, history, actor: actorName(), role: actorRole(), language: state.lang } });
   chat.busy = false;
-  if (r.ok) { const a = r.data.answer; chat.messages.push({ role: 'assistant', text: a.message, source: a.source, model: a.model, route: a.route, evidence_ids: a.evidence_ids || [], note: a.note, followups: a.followups || [] }); }
+  if (r.ok) { const a = r.data.answer; chat.messages.push({ role: 'assistant', text: a.message, source: a.source, model: a.model, route: a.route, evidence_ids: a.evidence_ids || [], note: a.note, followups: a.followups || [], tool_trace: a.tool_trace || [] }); }
   else chat.messages.push({ role: 'assistant', text: errText(r), source: 'template' });
   renderMsgs();
 }

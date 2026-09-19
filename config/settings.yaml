@@ -19,30 +19,31 @@ profiles:
       assessor_chat: local
       report_narrative: local
   hybrid:
-    description: Raw-data tasks local; derived-artifact tasks may go to Anthropic through the egress guard.
+    description: Raw-data tasks local; derived-artifact tasks may go to Anthropic through the egress guard (aggregated, rounded, aliased data only).
     allow_external: true
     guard_strict: false
     routing:
-      column_roles: local
+      column_roles: local             # sees raw sample values: never external
       sensor_hypotheses: external
       rule_compile: external
       diagnosis_narrative: external
       critique: external
-      why_chat: local
-      assessor_chat: local
+      why_chat: external              # tool agent in external mode: aggregate-only tools, every result through the guard
+      assessor_chat: external
       report_narrative: external
   eu-hosted:
     description: Same routing as hybrid but the external endpoint is an EU-hosted deployment (set external_llm.base_url).
     allow_external: true
     guard_strict: true
+    require_custom_endpoint: true     # unavailable until external_llm.base_url points at a non-anthropic.com host
     routing:
       column_roles: local
       sensor_hypotheses: external
       rule_compile: external
       diagnosis_narrative: external
       critique: external
-      why_chat: local
-      assessor_chat: local
+      why_chat: external
+      assessor_chat: external
       report_narrative: external
 
 local_llm:
@@ -59,21 +60,35 @@ local_llm:
 
 external_llm:
   provider: anthropic
-  model: claude-sonnet-5
+  model: claude-sonnet-5            # or claude-opus-5; never a Fable / Mythos model (30-day data retention)
+  model_by_task: {}                 # optional, e.g. {critique: claude-opus-5}
+  allowed_model_patterns: [sonnet, opus]  # a model id must contain one of these ...
+  blocked_model_patterns: [fable, mythos] # ... and none of these (checked on the lower-cased id)
   api_key_env: ANTHROPIC_API_KEY
   base_url: null                    # set to an EU-hosted endpoint for the eu-hosted profile
-  max_tokens: 2048
-  timeout_s: 120
+  max_tokens: 4096                  # output cap per call (thinking tokens count toward it)
+  effort: low                       # low | medium | high | xhigh | max; low is the fastest
+  timeout_s: 60
+  max_calls_per_run: 200            # successful external calls per run workspace (pipeline + chat)
+  max_calls_per_chat_turn: 6
+  max_output_tokens_per_run: 120000
+  max_parallel: 6                   # concurrent external calls
+  max_narratives_per_run: 12        # diagnoses that get narrative + critique when the route is external
 
 guard:
   min_aggregate_n: 30               # aggregates must be computed over >= this many samples
   max_series_points: 20             # no series longer than this leaves the machine
-  max_numeric_values_per_payload: 400
+  max_numeric_values_per_payload: 4000  # a 50-signal catalog carries ~1300 rounded aggregates
   max_payload_bytes: 200000
-  allow_column_names: true          # original headers may leave in non-strict mode
+  allow_column_names: true          # legacy switch; alias_names_external below decides for external profiles
   alias_column_names_in_strict: true
   forbid_categorical_values: true   # no categorical / free-text record values (PII risk)
   forbid_row_like_structures: true
+  external_sig_digits: 3            # every float that leaves is rounded to this many significant digits
+  alias_names_external: true        # original column names never leave, in any external profile
+  drop_keys_external: [min, max, first, last, value, values_at, observed, reading, readings, raw, sample, samples,
+                       rows, points, series, time, timestamp, start_time, end_time, t_start, t_end, source_path,
+                       file, filename, path, evaluation, label, labels]
 
 ingest:
   blind_mode: true                  # infer on aliases S01..Snn; names are weak evidence only

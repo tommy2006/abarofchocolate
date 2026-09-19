@@ -5,17 +5,25 @@ Public functions (see docs/ARCHITECTURE.md):
     diagnose_flags(ws, settings, flags)          -> list[Diagnosis] for the streaming path (appended)
     apply_override(ws, settings, decision)       -> accept/question/override/dismiss a diagnosis; overrides
                                                     are stored as human-labelled examples in human_labels.jsonl
+
+Model use: on the local route one diagnosis after the other gets narrative + critique while the LLM allowance lasts.
+When both tasks route to the external model and that route is usable (hybrid / eu-hosted), all diagnoses are built from
+the templates first and the strongest external_llm.max_narratives_per_run are sent concurrently (docs/HYBRID_SPEC.md 5).
 """
 from __future__ import annotations
 
+import threading
 import time
-from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import Any, Callable, Optional
 
 from ..contracts import Diagnosis, Flag, HumanDecision, PropagationStep
-from .critique import critique_diagnosis
-from .diagnosis import add_llm_narrative, build_diagnosis
+from .critique import cited_evidence, code_checks, critique_diagnosis, objections_payload, parse_objections
+from .diagnosis import add_llm_narrative, apply_narrative, build_diagnosis, merge_narrative, narrative_payload
 
 EVENT_KINDS = ("anomaly", "drift", "cascade")
+EXTERNAL_MISSES_BEFORE_STOP = 2  # replies that did not come from the external model before the concurrent path stops asking
 
 
 def _next_diag_id(ws) -> int:
@@ -61,6 +69,105 @@ def _group_events(flags: list[Flag]) -> list[tuple[str, Optional[str], list[Flag
     return out
 
 
+def _build_event(ws, c: dict[str, Any], diag_id: str, g: str, pid: Optional[str], fl: list[Flag], onset: Optional[Flag]) -> Diagnosis:
+    chain: list[PropagationStep] = []
+    for f in sorted(fl, key=lambda f: -f.score):
+        steps = c["propagation"].get(f.id)
+        if steps:
+            chain = [PropagationStep(**s) for s in steps]
+            break
+    pattern = c["patterns"].get(pid) if pid else None
+    return build_diagnosis(ws, diag_id, g, fl, onset, chain, pattern, c["baseline"], c["detect_meta"], c["schema"], c["human_labels"])
+
+
+def _external_route_ready(ws, settings) -> bool:
+    """Narrative and critique both go to the external model and that route can be used right now (profile, allowed
+    model, endpoint, API key, run budget). Only then are the model calls made concurrently: there is one local model."""
+    try:
+        from ..llm import external_ready
+
+        return all(external_ready(task, ws, settings)[0] for task in ("diagnosis_narrative", "critique"))
+    except Exception:
+        return False
+
+
+def _ask_model(ws, settings, diag: Diagnosis, payload: dict[str, Any], checks: list[dict[str, Any]], evidence: list[dict[str, Any]], language: str, may_start: Callable[[], bool]) -> tuple[Any, Any]:
+    """One worker of the concurrent path: narrative, then critique of ONE diagnosis. Only the model calls happen here.
+    `diag` is the worker's own copy; the registries and the decision-log records of the diagnosis stay on the main thread."""
+    from ..llm import complete
+
+    res_n = res_c = None
+    if may_start():
+        res_n = complete("diagnosis_narrative", payload, purpose=f"explain {diag.id}", ws=ws, settings=settings, language=language)
+        merge_narrative(diag, res_n)  # the critique sees the narrative, as in the sequential path
+    if may_start():
+        res_c = complete("critique", objections_payload(diag, checks, evidence), purpose=f"critique {diag.id}", ws=ws, settings=settings, language=language)
+    return res_n, res_c
+
+
+def _model_replies(ws, settings, diags: list[Diagnosis], flags_by_id: dict[str, Flag], c: dict[str, Any], window: int, language: str, start_within_s: float, wait_s: float) -> dict[str, tuple[Any, Any]]:
+    """(narrative reply, critique reply) per diagnosis id, asked concurrently with external_llm.max_parallel workers. No
+    call starts after start_within_s; calls on the wire may finish until wait_s, later ones are abandoned (their
+    diagnosis stays template-only). A reply that did not come from the external model means the route failed and the
+    call fell back to the single local model: after EXTERNAL_MISSES_BEFORE_STOP of those no further call is started."""
+    if not diags or start_within_s <= 0:
+        return {}
+    t0 = time.time()
+    stop = threading.Event()
+    misses: list[str] = []
+
+    def may_start() -> bool:
+        return not stop.is_set() and time.time() - t0 < start_within_s
+
+    def work(job: tuple[Diagnosis, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]) -> tuple[Any, Any]:
+        out = _ask_model(ws, settings, *job, language, may_start)
+        misses.extend(job[0].id for res in out if res is not None and res.route != "external")
+        if len(misses) >= EXTERNAL_MISSES_BEFORE_STOP:
+            stop.set()
+        return out
+
+    # payloads, code checks and evidence statements are read here, on the main thread
+    jobs = [(d.model_copy(deep=True), narrative_payload(ws, d), code_checks(ws, d, flags_by_id, c["baseline"], c["patterns"], window), cited_evidence(ws, d)) for d in diags]
+    pool = ThreadPoolExecutor(max_workers=max(1, min(int(settings.external_llm.max_parallel), len(jobs))), thread_name_prefix="tpm-diagnose-llm")
+    futures = {job[0].id: pool.submit(work, job) for job in jobs}
+    replies: dict[str, tuple[Any, Any]] = {}
+    for did, fut in futures.items():
+        try:
+            replies[did] = fut.result(timeout=max(0.0, t0 + max(wait_s, start_within_s) - time.time()))
+        except FutureTimeout:
+            stop.set()
+        except Exception:
+            pass
+    pool.shutdown(wait=False, cancel_futures=True)
+    return replies
+
+
+def _diagnose_concurrent(ws, settings, c: dict[str, Any], groups: list[tuple[str, Optional[str], list[Flag], Optional[Flag]]], n: int, flags_by_id: dict[str, Flag], window: int, language: str, t0: float, budget_s: float, llm_budget: float) -> tuple[list[Diagnosis], int, float]:
+    """External route: every diagnosis is built from the templates first, then the strongest
+    external_llm.max_narratives_per_run get narrative + critique from the model concurrently, inside the LLM allowance
+    of the stage. The replies are applied here, in diagnosis order, with the same log records as the sequential path."""
+    built: list[Diagnosis] = []
+    for g, pid, fl, onset in groups:
+        n += 1
+        built.append(_build_event(ws, c, f"DIAG-{n:06d}", g, pid, fl, onset))
+        if time.time() - t0 > budget_s:
+            ws.log.record("system:diagnose", "warning", "dataset", "diagnose", {"note": f"time budget reached after {len(built)} diagnoses; {len(groups) - len(built)} event groups left undiagnosed"})
+            break
+    t1 = time.time()
+    chosen = built[: max(0, int(settings.external_llm.max_narratives_per_run))]
+    replies = _model_replies(ws, settings, chosen, flags_by_id, c, window, language, start_within_s=min(llm_budget, budget_s * 0.7 - (t1 - t0)), wait_s=budget_s - (t1 - t0))
+    llm_seconds = time.time() - t1
+    out: list[Diagnosis] = []
+    for d in built:
+        res_n, res_c = replies.get(d.id, (None, None))
+        if res_n is not None:
+            d = apply_narrative(ws, d, res_n)
+        d = critique_diagnosis(ws, settings, d, flags_by_id, c["baseline"], c["patterns"], window, language, use_llm=False, model_objections=parse_objections(d, res_c) if res_c is not None else None)
+        ws.log.record("system:diagnose", "diagnosis", "diagnosis", d.id, {"group_id": d.group_id, "fault_type": d.fault_type, "cause_class": d.cause_class, "confidence": d.confidence, "verdict": d.critique.verdict if d.critique else None, "flag_ids": d.flag_ids}, d.evidence_ids)
+        out.append(d)
+    return out, sum(1 for r in replies.values() if r[0] is not None), llm_seconds
+
+
 def _diagnose(ws, settings, flags: list[Flag], ctx_opts: dict[str, Any], start_id: int, use_llm: bool = True, budget_s: float = 120.0) -> list[Diagnosis]:
     c = _load_context(ws, settings)
     language = str(ctx_opts.get("language") or getattr(settings.report, "default_language", "en"))
@@ -93,35 +200,35 @@ def _diagnose(ws, settings, flags: list[Flag], ctx_opts: dict[str, Any], start_i
     llm_seconds = 0.0
     llm_budget = budget_s * 0.5  # LLM enhancement is optional: it never takes more than half the budget
     n_llm = 0
-    for g, pid, fl, onset in groups:
-        n += 1
-        chain: list[PropagationStep] = []
-        for f in sorted(fl, key=lambda f: -f.score):
-            steps = c["propagation"].get(f.id)
-            if steps:
-                chain = [PropagationStep(**s) for s in steps]
-                break
-        pattern = c["patterns"].get(pid) if pid else None
-        d = build_diagnosis(ws, f"DIAG-{n:06d}", g, fl, onset, chain, pattern, c["baseline"], c["detect_meta"], c["schema"], c["human_labels"])
-        llm_ok = use_llm and llm_seconds < llm_budget and (time.time() - t0) < budget_s * 0.7
-        if llm_ok:
+    llm_how = ""
+    concurrent = use_llm and _external_route_ready(ws, settings)
+    if concurrent:
+        event_diags, n_llm, llm_seconds = _diagnose_concurrent(ws, settings, c, groups, n, flags_by_id, window, language, t0, budget_s, llm_budget)
+        diags.extend(event_diags)
+        llm_how = f"external model, up to {int(settings.external_llm.max_parallel)} calls at once, at most {int(settings.external_llm.max_narratives_per_run)} diagnoses per run; "
+    else:
+        for g, pid, fl, onset in groups:
+            n += 1
+            d = _build_event(ws, c, f"DIAG-{n:06d}", g, pid, fl, onset)
+            llm_ok = use_llm and llm_seconds < llm_budget and (time.time() - t0) < budget_s * 0.7
+            if llm_ok:
+                t1 = time.time()
+                d = add_llm_narrative(ws, settings, d, language)
+                llm_seconds += time.time() - t1
+                n_llm += 1
             t1 = time.time()
-            d = add_llm_narrative(ws, settings, d, language)
-            llm_seconds += time.time() - t1
-            n_llm += 1
-        t1 = time.time()
-        d = critique_diagnosis(ws, settings, d, flags_by_id, c["baseline"], c["patterns"], window, language, use_llm=llm_ok)
-        if llm_ok:
-            llm_seconds += time.time() - t1
-        ws.log.record("system:diagnose", "diagnosis", "diagnosis", d.id, {"group_id": g, "fault_type": d.fault_type, "cause_class": d.cause_class, "confidence": d.confidence, "verdict": d.critique.verdict if d.critique else None, "flag_ids": d.flag_ids}, d.evidence_ids)
-        diags.append(d)
-        if time.time() - t0 > budget_s:
-            ws.log.record("system:diagnose", "warning", "dataset", "diagnose", {"note": f"time budget reached after {len(diags)} diagnoses; {len(groups) - len(diags)} event groups left undiagnosed"})
-            break
+            d = critique_diagnosis(ws, settings, d, flags_by_id, c["baseline"], c["patterns"], window, language, use_llm=llm_ok)
+            if llm_ok:
+                llm_seconds += time.time() - t1
+            ws.log.record("system:diagnose", "diagnosis", "diagnosis", d.id, {"group_id": g, "fault_type": d.fault_type, "cause_class": d.cause_class, "confidence": d.confidence, "verdict": d.critique.verdict if d.critique else None, "flag_ids": d.flag_ids}, d.evidence_ids)
+            diags.append(d)
+            if time.time() - t0 > budget_s:
+                ws.log.record("system:diagnose", "warning", "dataset", "diagnose", {"note": f"time budget reached after {len(diags)} diagnoses; {len(groups) - len(diags)} event groups left undiagnosed"})
+                break
     if point_diag is not None and not point_first:
         diags.append(point_diag)  # sustained events lead; the isolated readings follow as one aggregate
     if use_llm and n_llm < len(diags):
-        ws.log.record("system:diagnose", "note", "dataset", "diagnose", {"note": f"LLM narrative/critique applied to the {n_llm} strongest of {len(diags)} diagnoses (LLM time {llm_seconds:.0f}s of a {llm_budget:.0f}s allowance); the rest are template-only"})
+        ws.log.record("system:diagnose", "note", "dataset", "diagnose", {"note": f"LLM narrative/critique applied to the {n_llm} strongest of {len(diags)} diagnoses ({llm_how}LLM time {llm_seconds:.0f}s of a {llm_budget:.0f}s allowance); the rest are template-only"})
     return diags
 
 

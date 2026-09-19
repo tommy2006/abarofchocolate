@@ -719,14 +719,15 @@ def parse_rule_text(text: str, signal_catalog: list[SignalInfo], allow_role_name
 
 # ================================================================== compile (template first, LLM optional)
 def catalog_payload(catalog: list[SignalInfo], stats: Optional[dict[str, dict[str, Any]]] = None) -> list[dict[str, Any]]:
-    """Aggregates only: what the rule compiler (local or external) may see about the signals."""
+    """Aggregates only: what the rule compiler (local or external) may see about the signals. The scale of a signal
+    is given by q01 / median / q99; a minimum or maximum is one single reading and is removed by the egress guard."""
     out = []
     for s in catalog:
         if s.excluded:
             continue
         st = (stats or {}).get(s.alias, {})
         fp = s.fingerprint or {}
-        out.append({"id": s.alias, "role": s.role, "instrument": s.instrument, "unit_operation": s.unit_operation, "units": s.units, "min": st.get("min", fp.get("min")), "max": st.get("max", fp.get("max")), "median": st.get("median", fp.get("median"))})
+        out.append({"id": s.alias, "role": s.role, "instrument": s.instrument, "unit_operation": s.unit_operation, "units": s.units, "q01": st.get("q01", fp.get("q01")), "median": st.get("median", fp.get("q50")), "q99": st.get("q99", fp.get("q99"))})
     return out
 
 
@@ -776,7 +777,8 @@ def compile_rule(ws: Any, settings: Any, text: str, author: str = "human", persi
         ev = ws.evidence.add("rule_compile", f"{rid}: template grammar compiled '{text.strip()}' into a {pr.spec['type']} check on {', '.join(rule_signals(pr.spec))}", signals=rule_signals(pr.spec), values={"spec": pr.spec, "confidence": pr.confidence}, computed_by="quality.rules.parse_rule_text")
         ev_ids.append(ev.id)
     else:
-        payload = {"rule_text": text.strip(), "signal_catalog": catalog_payload(catalog, ws.read_json("quality_stats.json", {}).get("stats") if ws.exists("quality_stats.json") else None), "schema": RULE_JSON_SCHEMA, "template_parser_error": pr.error, "candidates": pr.candidates}
+        # the closed rule schema travels through schema= (system prompt), not in the payload: the payload is data for the egress guard
+        payload = {"rule_text": text.strip(), "signal_catalog": catalog_payload(catalog, ws.read_json("quality_stats.json", {}).get("stats") if ws.exists("quality_stats.json") else None), "template_parser_error": pr.error, "candidates": pr.candidates}
         res = None
         try:
             from ..llm import complete

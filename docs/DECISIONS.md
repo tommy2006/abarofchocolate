@@ -56,3 +56,21 @@ config key or a clearly bounded module so it can be flipped without a rewrite.
 | 47–48 | No extra-domain runs. Adaptability shown by an architectural walkthrough plus the schema-agnostic pipeline (a synthetic-records fixture exists for tests only). | `docs/ADAPTABILITY.md` |
 | 49 | Push code to `main` of github.com/tommy2006/abarofchocolate. | git |
 | 50 | Least setup for judges: launcher scripts, no Docker required; app works without Ollama (template mode) and without an API key. | launcher |
+
+## 2026-09-19 (team, round 4): hybrid profile, local models, summary-first UI, Windows app
+
+- **Hybrid = limited, anonymised calls to Claude.** Raw input data never goes to the API; aggregated, rounded
+  (3 significant digits) or anonymised (aliased) derived data may. Models: `claude-sonnet-5` or `claude-opus-5`.
+  **Never Fable / Mythos** (30-day data retention): refused in code, whatever the configuration says. Calls are
+  capped per run and per chat answer; every attempt is in the egress ledger. Contract: `docs/HYBRID_SPEC.md`.
+- **Chat may use the external model in hybrid**, because the chat model only ever sees sanitised aggregates (no SQL
+  tool, no min/max, bucket means over >= 30 rows).
+- **eu-hosted refuses the first-party Anthropic endpoint** (it has no EU processing).
+- **No fixed local model.** The app uses the chosen model, else the configured default, else the best installed
+  model that fits the machine; models and Ollama itself can be downloaded from the app.
+- **Summary first.** Every page and every explanation starts with a short plain summary and next steps; all
+  previous output sits under "Show technical analyses".
+- **Signals can be renamed by a person** ("S44" -> "possibly broken"): a logged decision, shown everywhere as
+  "possibly broken (S44)".
+- **Windows installer** (per user, no admin rights): `docs/WINDOWS_APP.md`.
+

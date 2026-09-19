@@ -66,7 +66,8 @@ def record(ws: Any, rec: EgressRecord) -> EgressRecord:
     if ws is None:
         return rec
     try:
-        ws.append_jsonl("egress_ledger", rec.model_dump())
+        with _lock:  # several threads (complete_many, chat turns) and Workspace objects append to the same file
+            ws.append_jsonl("egress_ledger", rec.model_dump())
     except Exception:
         pass
     try:
@@ -128,6 +129,52 @@ def summary(ws: Any = None, last_n: int = 20) -> dict[str, Any]:
     }
 
 
+def _avg(values: list[int]) -> Optional[int]:
+    return int(sum(values) / len(values)) if values else None
+
+
+def usage(ws: Any = None, settings: Optional[Settings] = None) -> dict[str, Any]:
+    """External-model use of one run, for the budget and the Data-flow view: calls, tokens, blocks, what is left of
+    the per-run call budget, and average latency per route (overall and per task)."""
+    recs = read(ws)
+    if settings is None:
+        settings = getattr(ws, "settings", None)
+    ext = [r for r in recs if r.route == "external"]
+    ext_ok = [r for r in ext if r.ok and r.guard_result == "allowed"]
+    local_ok = [r for r in recs if r.route == "local" and r.ok]
+    by_task: dict[str, dict[str, Any]] = {}
+    for task in sorted({r.task for r in recs}):
+        t_ext = [r for r in ext_ok if r.task == task]
+        t_loc = [r for r in local_ok if r.task == task]
+        by_task[task] = {
+            "external_ok": len(t_ext),
+            "local_ok": len(t_loc),
+            "blocked": len([r for r in ext if r.task == task and r.guard_result == "blocked"]),
+            "input_tokens": int(sum(r.input_tokens for r in t_ext)),
+            "output_tokens": int(sum(r.output_tokens for r in t_ext)),
+            "avg_latency_ms_external": _avg([r.latency_ms for r in t_ext if r.latency_ms is not None]),
+            "avg_latency_ms_local": _avg([r.latency_ms for r in t_loc if r.latency_ms is not None]),
+        }
+    out_tokens = int(sum(r.output_tokens for r in ext))
+    cap_calls = int(settings.external_llm.max_calls_per_run) if settings is not None else None
+    cap_tokens = int(settings.external_llm.max_output_tokens_per_run) if settings is not None else None
+    return {
+        "external_calls": len(ext),
+        "external_ok": len(ext_ok),
+        "input_tokens": int(sum(r.input_tokens for r in ext)),
+        "output_tokens": out_tokens,
+        "blocked": len([r for r in ext if r.guard_result == "blocked"]),
+        "budget_refused": len([r for r in ext if r.guard_result == "budget"]),
+        "max_calls_per_run": cap_calls,
+        "budget_left_calls": max(0, cap_calls - len(ext_ok)) if cap_calls is not None else None,
+        "max_output_tokens_per_run": cap_tokens,
+        "budget_left_output_tokens": max(0, cap_tokens - out_tokens) if cap_tokens is not None else None,
+        "avg_latency_ms_external": _avg([r.latency_ms for r in ext_ok if r.latency_ms is not None]),
+        "avg_latency_ms_local": _avg([r.latency_ms for r in local_ok if r.latency_ms is not None]),
+        "by_task": by_task,
+    }
+
+
 def data_flow_statement(ws: Any, settings: Settings, language: str = "en") -> str:
     """Plain-language 'what left the operator environment, to which model, and why' for the Data-flow record."""
     s = summary(ws, last_n=0)
@@ -155,13 +202,20 @@ def data_flow_statement(ws: Any, settings: Settings, language: str = "en") -> st
         lines.append(
             f"{s['n_external_sent']} payload(s), {s['external_payload_bytes']} bytes in total, were sent to the external model. "
             f"Tasks: {', '.join(f'{k} x{v}' for k, v in tasks.items())}. Artifact types: {', '.join(f'{k} x{v}' for k, v in types.items()) or 'n/a'}. "
-            "Each payload passed the egress guard: derived artifacts only (aliases, aggregates, statements, evidence IDs), no raw rows, no long series, no categorical values."
+            "Each payload passed the egress guard: derived artifacts only (aliases, aggregates, statements, evidence IDs), no raw rows, no long series, no categorical values; "
+            f"numbers rounded to {settings.guard.external_sig_digits} significant digits, dates, column names, file names and single readings removed."
         )
+        tok_in, tok_out = int(sum(r.input_tokens for r in recs if r.route == "external")), int(sum(r.output_tokens for r in recs if r.route == "external"))
+        if tok_in or tok_out:
+            lines.append(f"Tokens reported by the external provider: {tok_in} in, {tok_out} out.")
     else:
         lines.append("No payload was sent to an external model. Nothing left the operator environment.")
     if s["n_blocked"]:
         reasons = Counter(r.guard_reason.split(" at ")[0] for r in recs if r.guard_result == "blocked")
         lines.append(f"The guard blocked {s['n_blocked']} payload(s): " + "; ".join(f"{k} (x{v})" for k, v in reasons.items()) + ". Those tasks were answered locally or by a template.")
+    n_budget = len([r for r in recs if r.guard_result == "budget"])
+    if n_budget:
+        lines.append(f"{n_budget} call(s) were not sent because the external budget of this run was used up (external_llm.max_calls_per_run / max_output_tokens_per_run); they ran locally.")
     if s["n_fallback"]:
         lines.append(f"{s['n_fallback']} call(s) ran on the local model as a fallback after a block or an external failure.")
     if s["n_failed"]:

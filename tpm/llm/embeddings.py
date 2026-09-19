@@ -92,6 +92,12 @@ class LocalIndex:
         self.dir: Optional[Path] = (Path(ws.dir) / "index") if ws is not None else None
 
     # ---- persistence ----
+    def _embedding_model_now(self) -> str:
+        try:
+            return OllamaProvider(self.settings).embedding_model() or self.settings.local_llm.embedding_model
+        except Exception:
+            return self.settings.local_llm.embedding_model
+
     def _signature(self, items: list[dict[str, Any]]) -> str:
         h = hashlib.sha256()
         for it in items:
@@ -111,6 +117,8 @@ class LocalIndex:
             self.method = meta.get("method", "tfidf")
             self.model = meta.get("model", "")
             if self.method == "ollama" and (self.dir / "vectors.npz").exists():
+                if self.model and self.model != self._embedding_model_now():
+                    return False  # built with another embedding model: its vectors do not match new queries
                 self._vecs = np.load(self.dir / "vectors.npz")["vectors"].astype(np.float32)
                 return self._vecs.shape[0] == len(items)
             if self.method == "tfidf":
@@ -171,7 +179,7 @@ class LocalIndex:
                     norms = np.linalg.norm(self._vecs, axis=1, keepdims=True) + 1e-9
                     self._vecs = self._vecs / norms
                     self.method = "ollama"
-                    self.model = self.settings.local_llm.embedding_model
+                    self.model = prov.embedding_model() or self.settings.local_llm.embedding_model
                     used_ollama = self._vecs.shape[0] == len(items)
             except Exception:
                 used_ollama = False
@@ -188,7 +196,7 @@ class LocalIndex:
             return []
         if self.method == "ollama" and self._vecs is not None:
             try:
-                q = OllamaProvider(self.settings).embed([query[:2000]])[0].astype(np.float32)
+                q = OllamaProvider(self.settings).embed([query[:2000]], model=self.model or None)[0].astype(np.float32)  # same model as the index
                 q = q / (np.linalg.norm(q) + 1e-9)
                 scores = self._vecs @ q
             except Exception:

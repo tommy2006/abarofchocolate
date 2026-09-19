@@ -6,6 +6,7 @@
 import { state, t, el, clear, runApi, fmt, conf, sev, chip, kindChip, causeChip, section, table, viewHead, needRun, empty, evidenceButton, evidencePanel, decisionBar, hiddenHint, kv, roleAllows, bus, st, infStatus, unavailableNote, meter, linkifyRefs, cleanText, proseList, refLink, refChips, confWords, sevWords, timesThreshold, addPlainBox, flash, navigate, notice } from '../core.js';
 import { plot, purge, tokens, colorFor } from '../charts.js';
 import { openChat, flagContext, setChatContext } from '../chat.js';
+import { summaryCard, techDetails, techNested, itemBrief, itemBriefLocal, bt } from '../brief.js';
 
 const KINDS = ['anomaly', 'point', 'drift', 'changepoint', 'dq', 'rule', 'cascade'];
 const DIRS = ['up', 'down', 'noisy', 'stuck', 'shifted'];
@@ -46,10 +47,14 @@ async function plotSignalsAround(node, sigs, a, b, { sigIndex = {}, pad } = {}) 
 }
 
 export async function render(main, params = {}) {
-  const view = el('div', { class: 'view' });
-  main.append(view);
-  view.append(viewHead('3', t('nav.monitor')));
-  if (!state.run) { view.append(needRun()); return view; }
+  // page = title, plain summary, then ONE expander ("Show technical analyses") with everything this view rendered before
+  const page = el('div', { class: 'view' });
+  main.append(page);
+  page.append(viewHead('3', t('nav.monitor')));
+  if (!state.run) { page.append(needRun()); return page; }
+  const tech = techDetails('monitor');
+  page.append(summaryCard('monitor'), tech);
+  const view = tech.body;
   await addPlainBox(view, 'monitor');
   const k = tokens();
   view._charts = [];
@@ -57,6 +62,7 @@ export async function render(main, params = {}) {
   const allFlags = fl.ok ? fl.data.items || [] : [];
   const signals = sig.ok ? sig.data.signals || [] : [];
   const sigIndex = Object.fromEntries(signals.map((s, i) => [s.id, i]));
+  const sigName = (id) => { const s = signals.find((x) => x.id === id); const n = s && (s.display_name || s.source_column); return n && n !== id ? `${n} (${id})` : id; };
   const groups = fl.ok ? fl.data.groups || [] : [];
   let selected = null;
   const wanted = params.flag ? allFlags.find((x) => x.id === params.flag) : null;
@@ -89,6 +95,7 @@ export async function render(main, params = {}) {
   if (susData && (susData.n_rows > 0 || pointDominated)) {
     const ss = section(t('sus.title'), { right: el('span', { class: 'small muted', text: susData.n_rows > susData.n_listed ? t('sus.capped', { shown: fmt.int(susData.n_listed), total: fmt.int(susData.n_rows) }) : t('sus.count', { n: fmt.int(susData.n_rows) }) }) });
     ss.root.classList.add('sus');
+    ss.root.dataset.briefSection = 'suspicious';
     (pointDominated ? susTop : susMid).append(ss.root);
     ss.body.append(el('p', { class: 'sus-headline' }, linkifyRefs(cleanText(susData.headline || ''))), el('p', { class: 'sus-wording', role: 'note' }, cleanText(susData.wording || t('sus.wordingShort'))));
     const tblHost = el('div'); const pager = el('div', { class: 'pager' }); const detail = el('div', { class: 'box detail sus-detail', hidden: true });
@@ -112,9 +119,14 @@ export async function render(main, params = {}) {
       const node = el('div', { class: 'chart short' });
       detail.append(el('div', { class: 'row between' }, el('h3', {}, end !== r.row ? t('mon.focusTitle', { a: fmt.int(r.row), b: fmt.int(end) }) : t('mon.focusTitleOne', { a: fmt.int(r.row) }), r.time ? el('span', { class: 'dim small', text: ' ' + fmt.ts(r.time) }) : null),
         el('div', { class: 'row' }, (r.sources || []).map((s) => chip(t('sus.src.' + s) === 'sus.src.' + s ? s : t('sus.src.' + s), SUS_SOURCES[s] || '')), el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => openChat({ ...ctx, autoAsk: t('chat.quick.why') }) }, t('sus.askWhy')))),
-        el('p', { class: 'stmt prose', style: { marginTop: '8px' } }, linkifyRefs(cleanText(r.statement || ''))),
-        el('h4', { class: 'small muted', style: { marginTop: '10px' }, text: t('sus.plotTitle') }), node,
-        el('div', { class: 'row small', style: { marginTop: '8px' } }, (r.flag_ids || []).length ? el('span', {}, t('mon.flags'), ': ', refChips('flag', r.flag_ids, { max: 4 })) : null, (r.check_ids || []).length ? el('span', {}, t('dq.checks'), ': ', refChips('check', r.check_ids, { max: 4 })) : null, evidenceButton(r.evidence_ids || [])));
+        // plain first: what it is (the team's wording), which sensors, what to do; the statement, plot and ids are one click away
+        itemBriefLocal({ verdict: 'attention', headline: bt(end !== r.row ? 'brief.sus.headlineRows' : 'brief.sus.headline'),
+          points: (r.signals || []).slice(0, 3).map((s) => (s.deviation !== null && s.deviation !== undefined ? bt('brief.sus.signal', { name: sigName(s.signal), dir: dirWord(s.direction), x: times(s.deviation) }) : bt('brief.sus.signalNoX', { name: sigName(s.signal), dir: dirWord(s.direction) }))),
+          actions: [{ text: t('sus.askWhy'), onClick: () => openChat({ ...ctx, autoAsk: t('chat.quick.why') }) }, (r.flag_ids || []).length ? { text: bt('brief.sus.decide'), view: 'monitor', ref: r.flag_ids[0] } : null].filter(Boolean) }),
+        techNested(
+          el('p', { class: 'stmt prose', style: { marginTop: '8px' } }, linkifyRefs(cleanText(r.statement || ''))),
+          el('h4', { class: 'small muted', style: { marginTop: '10px' }, text: t('sus.plotTitle') }), node,
+          el('div', { class: 'row small', style: { marginTop: '8px' } }, (r.flag_ids || []).length ? el('span', {}, t('mon.flags'), ': ', refChips('flag', r.flag_ids, { max: 4 })) : null, (r.check_ids || []).length ? el('span', {}, t('dq.checks'), ': ', refChips('check', r.check_ids, { max: 4 })) : null, evidenceButton(r.evidence_ids || []))));
       view._charts.push(node);
       try { detail.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch { /* ignore */ }
       if (sigs.length) await plotSignalsAround(node, sigs, r.row, end, { sigIndex, pad: 60 }); else node.replaceChildren(el('div', { class: 'dim small', text: t('common.notYet') }));
@@ -162,11 +174,13 @@ export async function render(main, params = {}) {
   const contribNode = el('div', { class: 'chart' });
   const scoreSec = section(t('mon.score'), { right: el('span', { class: 'small muted', text: t('mon.clickFlag') }) });
   scoreSec.body.append(el('p', { class: 'small muted', text: t('mon.scoreHelp') }), scoreNode);
+  scoreSec.root.dataset.briefSection = 'timeline';
   view.append(scoreSec.root, susMid);
   const contribSec = section(t('mon.contrib'), { level: 'engineer' });
   contribSec.body.append(contribNode);
   view.append(contribSec.root);
   const flagSec = section(t('mon.flags'));
+  flagSec.root.dataset.briefSection = 'flags';
   view.append(flagSec.root);
   const grid = el('div', { class: 'cols cols-side' });
   const listHost = el('div');
@@ -233,9 +247,15 @@ export async function render(main, params = {}) {
     clear(detail);
     const tt = timesThreshold(f.score, f.threshold);
     detail.append(el('div', { class: 'row between' }, el('h3', {}, t('mon.flagDetail'), ' ', el('span', { class: 'dim', text: f.id })), el('div', { class: 'row' }, kindChip(f.kind), flagCause(f), el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => openChat(flagContext(f)) }, t('common.ask')))));
-    detail.append(el('p', { class: 'stmt prose', style: { marginTop: '8px' } }, linkifyRefs(cleanText(f.statement))));
-    if (f.kind === 'point') detail.append(el('p', { class: 'small muted', text: t('mon.pointNote') }));
-    detail.append(kv([
+    // what happened, where, the likely cause, what to check on site - and the decision - before any technical content
+    const STATUS_OF = { accept: 'accepted', question: 'questioned', override: 'overridden', dismiss: 'dismissed' };
+    detail.append(itemBrief(f.id, { ctx: flagContext(f), decisionsShown: true }), el('div', { class: 'brief-decide' }, decisionBar('flag', f.id, { current: f.human_status, note: f.human_note, overrideFields: [{ key: 'likely_cause_class', label: t('mon.cause'), type: 'select', options: ['process', 'sensor', 'data', 'mixed', 'unknown'], value: f.likely_cause_class }], askContext: flagContext(f), onDone: (action) => { f.human_status = STATUS_OF[action]; renderList(); } })));
+    const nested = techNested();
+    detail.append(nested);
+    const T = nested.body;
+    T.append(el('p', { class: 'stmt prose', style: { marginTop: '8px' } }, linkifyRefs(cleanText(f.statement))));
+    if (f.kind === 'point') T.append(el('p', { class: 'small muted', text: t('mon.pointNote') }));
+    T.append(kv([
       [t('common.severity'), sev(f.severity, { words: true })], [t('common.confidence'), conf(f.confidence, { words: true })],
       [t('common.group'), f.group_id !== null && f.group_id !== undefined ? refLink('group', String(f.group_id)) : null], [t('common.batch'), f.batch_id ? refLink('batch', f.batch_id) : null],
       [t('mon.rows'), `${f.row_start}–${f.row_end}` + (f.time_start ? ` (${fmt.ts(f.time_start)} – ${fmt.ts(f.time_end)})` : '')],
@@ -245,23 +265,22 @@ export async function render(main, params = {}) {
       [t('mon.trustContext'), f.trust_context ? el('span', {}, st(f.trust_context.trusted ? 'trusted' : 'untrusted', `${f.trust_context.trusted ? t('dq.trusted') : t('dq.untrusted')} (${fmt.pct(f.trust_context.trust_score)})`), (f.trust_context.untrusted_signals || []).length ? el('span', {}, ` — ${t('dq.untrustedSignals')}: `, refChips('signal', f.trust_context.untrusted_signals)) : '') : null],
     ]));
     if ((f.signals_ranked || []).length) {
-      detail.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('mon.rankedSignals') }));
-      detail.append(el('div', {}, f.signals_ranked.slice(0, 6).map((s) => el('div', { class: 'meter', title: cleanText(s.explanation || '') }, el('span', {}, refLink('signal', s.signal), ' ', el('span', { class: 'dim small', text: [dirWord(s.direction), s.lag ? `${t('und.lag')} ${s.lag}` : null].filter(Boolean).join(', ') })), el('span', { class: 'bar' }, el('i', { style: { width: Math.min(100, s.contribution * 100) + '%' } })), el('span', { class: 'right', text: fmt.pct(s.contribution) })))));
-      detail.append(el('p', { class: 'small dim', text: t('plain.shareHelp') }));
+      T.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('mon.rankedSignals') }));
+      T.append(el('div', {}, f.signals_ranked.slice(0, 6).map((s) => el('div', { class: 'meter', title: cleanText(s.explanation || '') }, el('span', {}, refLink('signal', s.signal), ' ', el('span', { class: 'dim small', text: [dirWord(s.direction), s.lag ? `${t('und.lag')} ${s.lag}` : null].filter(Boolean).join(', ') })), el('span', { class: 'bar' }, el('i', { style: { width: Math.min(100, s.contribution * 100) + '%' } })), el('span', { class: 'right', text: fmt.pct(s.contribution) })))));
+      T.append(el('p', { class: 'small dim', text: t('plain.shareHelp') }));
       const expl = f.signals_ranked.slice(0, 6).map((s) => cleanText(s.explanation || '')).filter(Boolean);
       const lst = proseList(expl, { cls: 'list small prose' });
-      if (lst) detail.append(lst);
+      if (lst) T.append(lst);
     }
-    detail.append(el('div', { style: { marginTop: '12px' } }, decisionBar('flag', f.id, { current: f.human_status, note: f.human_note, overrideFields: [{ key: 'likely_cause_class', label: t('mon.cause'), type: 'select', options: ['process', 'sensor', 'data', 'mixed', 'unknown'], value: f.likely_cause_class }], askContext: flagContext(f), onDone: (action) => { f.human_status = { accept: 'accepted', question: 'questioned', override: 'overridden', dismiss: 'dismissed' }[action]; renderList(); } })));
     const evBox = evidencePanel(f.evidence_ids || []);
     // raw series behind the flag (local only)
     const sigs = (f.signals_ranked || []).slice(0, 4).map((s) => s.signal);
     let node = null;
     if (sigs.length) {
       node = el('div', { class: 'chart short' });
-      detail.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('mon.rawSeries') }), node);
+      T.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('mon.rawSeries') }), node);
     }
-    detail.append(el('div', { style: { marginTop: '12px' } }, evBox));
+    T.append(el('div', { style: { marginTop: '12px' } }, evBox));
     if (fromChart || wanted === f) flash(detail);
     if (node) {
       const span = f.kind === 'point' ? 40 : Math.max(50, f.row_end - f.row_start);

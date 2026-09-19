@@ -617,3 +617,120 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   .sus-sig { white-space: normal; }
   .sus .tbl td.wrap { min-width: 130px; }
 }
+
+/* ---------- plain summary first, "Show technical analyses" second (js/brief.js) ---------- */
+.brief-card { --bv: var(--info); --bv-soft: var(--info-soft); margin: 0 0 16px; padding: 16px 18px; border: 1px solid var(--line); border-left: 6px solid var(--bv); border-radius: var(--radius); background: var(--bg-2); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.brief-card[data-verdict="ok"], .brief-item[data-verdict="ok"] { --bv: var(--ok); --bv-soft: var(--ok-soft); }
+.brief-card[data-verdict="attention"], .brief-item[data-verdict="attention"] { --bv: var(--warn); --bv-soft: var(--warn-soft); }
+.brief-card[data-verdict="problem"], .brief-item[data-verdict="problem"] { --bv: var(--fail); --bv-soft: var(--fail-soft); }
+.brief-card[data-verdict="pending"], .brief-item[data-verdict="pending"] { --bv: var(--ink-3); --bv-soft: var(--bg-3); }
+.brief-head { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.brief-icon { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 50%; background: var(--bv-soft); color: var(--bv); border: 2px solid var(--bv); font-size: 18px; font-weight: 700; line-height: 1; }
+.brief-headtext { min-width: 0; flex: 1 1 auto; }
+.brief-kicker { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 2px; }
+.brief-kicker .brief-verdict { color: var(--bv); font-weight: 600; }
+.brief-headline { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; color: var(--ink); max-width: 70ch; }
+.brief-points { margin: 12px 0 0 46px; padding: 0 0 0 18px; max-width: 80ch; font-size: 15px; line-height: 1.5; color: var(--ink); }
+.brief-points li { margin: 3px 0; }
+.brief-actions { margin: 14px 0 0 46px; min-width: 0; }
+.brief-todo { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600; color: var(--ink-2); }
+.brief-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.brief-action { text-align: left; max-width: 100%; white-space: normal; font-size: 14px; padding: 8px 14px; }
+.brief-action.ask { border-style: dashed; }
+.brief-action-glyph { flex: 0 0 auto; font-weight: 700; opacity: 0.8; }
+.brief-loading { padding: 4px 0; }
+
+/* one object (diagnosis, alarm, check, batch, suspicious row): the same block, smaller */
+.brief-item { --bv: var(--info); --bv-soft: var(--info-soft); margin: 10px 0; padding: 10px 12px; border-left: 4px solid var(--bv); border-radius: 0 var(--radius) var(--radius) 0; background: var(--bg-3); min-width: 0; overflow-wrap: anywhere; }
+.brief-item .brief-icon { width: 24px; height: 24px; font-size: 13px; border-width: 1.5px; background: var(--bg-2); }
+.brief-item .brief-head { gap: 9px; }
+.brief-item .brief-headline { font-size: 15.5px; font-weight: 600; }
+.brief-item .brief-points { margin: 6px 0 0 33px; padding-left: 16px; font-size: 14px; }
+.brief-item .brief-actions { margin: 8px 0 0 33px; }
+.brief-item .brief-action { font-size: 13px; padding: 5px 10px; }
+.brief-decide { margin: 8px 0 4px; min-width: 0; }
+.brief-decide .decisions { flex-wrap: wrap; }
+
+/* the most important findings of a page, with their decision buttons, above the expander */
+.brief-top { margin: 0 0 16px; min-width: 0; }
+.brief-top:empty { display: none; }
+.brief-top-title { margin: 0 0 4px; font-size: 16px; }
+.brief-top-help { margin: 0 0 8px; max-width: 86ch; }
+.brief-top-item { margin: 0 0 10px; padding: 10px 14px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); min-width: 0; }
+.brief-top-item .brief-item { margin: 6px 0 8px; }
+.brief-top-name { overflow-wrap: anywhere; }
+.overview-host { margin-bottom: 18px; min-width: 0; }
+.overview-host:empty { display: none; }
+
+/* the expander: a full-width bar that looks clickable, with a caret that turns */
+details.tech-details { margin: 0 0 18px; min-width: 0; max-width: 100%; }
+details.tech-details > summary.tech-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 11px 14px; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--bg-3); color: var(--ink); font-weight: 600; font-size: 14.5px; cursor: pointer; list-style: none; user-select: none; min-width: 0; }
+details.tech-details > summary.tech-summary::-webkit-details-marker { display: none; }
+details.tech-details > summary.tech-summary:hover { border-color: var(--accent); background: var(--bg-2); }
+details.tech-details > summary.tech-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tech-caret { flex: 0 0 auto; width: 0; height: 0; border-style: solid; border-width: 5px 0 5px 8px; border-color: transparent transparent transparent var(--accent); transition: transform 0.15s ease; }
+details.tech-details[open] > summary .tech-caret { transform: rotate(90deg); }
+.tech-label { color: var(--accent); }
+.tech-hint { font-weight: 400; font-size: 12.5px; color: var(--ink-3); min-width: 0; overflow-wrap: anywhere; }
+details.tech-details[open] > summary .tech-hint { display: none; }
+details.tech-details > .tech-body { padding-top: 16px; min-width: 0; max-width: 100%; }
+details.tech-details[open] > summary.tech-summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+
+details.tech-details.nested { margin: 8px 0 4px; }
+details.tech-details.nested > summary.tech-summary { display: inline-flex; padding: 5px 10px; font-size: 13px; font-weight: 500; background: transparent; border-color: var(--line); }
+details.tech-details.nested > .tech-body { padding: 10px 0 0 12px; margin-left: 4px; border-left: 2px solid var(--line); }
+details.tech-details.nested[open] > summary.tech-summary { border-radius: var(--radius); }
+details.tech-details.nested.inline { margin: 2px 0 0; }
+details.tech-details.nested.inline > summary.tech-summary { padding: 1px 6px; font-size: 12px; border-color: transparent; color: var(--ink-3); }
+details.tech-details.nested.inline > summary .tech-label { color: var(--ink-3); font-weight: 400; }
+details.tech-details.nested.inline > summary .tech-caret { border-width: 4px 0 4px 6px; border-left-color: var(--ink-3); }
+details.tech-details.nested.inline > .tech-body { padding: 4px 0 2px 8px; font-size: 13px; }
+.ck-plain { overflow-wrap: anywhere; }
+.ck-detail { margin-top: 12px; }
+
+/* answers (chat, assessor): the lead sentences, then the expander */
+.msg .answer-lead, .msg .answer-full { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg details.tech-details.nested > summary.tech-summary { font-size: 12px; padding: 3px 8px; }
+.msg details.tech-details.nested > .tech-body { white-space: normal; }
+.tooltrace { margin: 0 0 8px; }
+.tooltrace code { font-size: 12px; }
+
+@media (max-width: 600px) {
+  .brief-card { padding: 12px; border-left-width: 5px; }
+  .brief-headline { font-size: 17px; }
+  .brief-icon { width: 28px; height: 28px; font-size: 15px; }
+  .brief-points, .brief-actions { margin-left: 0; }
+  .brief-item .brief-points, .brief-item .brief-actions { margin-left: 0; }
+  .brief-btns { flex-direction: column; align-items: stretch; }
+  .brief-action { width: 100%; }
+  details.tech-details > summary.tech-summary { padding: 10px; }
+  details.tech-details.nested > .tech-body { padding-left: 8px; margin-left: 0; }
+}
+
+/* ================= data flow: "External model use" card (hybrid / eu-hosted profiles, js/externaluse.js) ================= */
+.sec.extuse { margin: 16px 0; padding: 16px 18px; border: 1px solid var(--line); border-left: 6px solid var(--ok); border-radius: 0 var(--radius) var(--radius) 0; background: var(--bg-2); min-width: 0; }
+.sec.extuse[data-mode="on"] { border-left-color: var(--warn); }
+.sec.extuse[data-mode="unusable"] { border-left-color: var(--ink-3); }
+.extuse .sec-head .chip { white-space: normal; }
+.extuse-lead { max-width: 92ch; min-width: 0; }
+.extuse-lead p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.extuse-first { font-size: 16.5px; font-weight: 500; line-height: 1.45; }
+.extuse-more { color: var(--ink-2); font-size: 13.5px; }
+.extuse-lead .notice { margin: 0 0 8px; overflow-wrap: anywhere; }
+.extuse-h { margin: 16px 0 8px; font-size: 13.5px; font-weight: 500; color: var(--ink-2); }
+.extuse-note { margin: 8px 0 0; max-width: 92ch; overflow-wrap: anywhere; }
+.extuse .profile:disabled { opacity: 0.55; cursor: not-allowed; }
+.extuse .profile .name .dim { font-weight: 400; overflow-wrap: anywhere; }
+.extuse-numbers { min-width: 0; margin-top: 16px; }
+.extuse-numbers:empty { display: none; }
+.extuse-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 10px; min-width: 0; }
+.extuse-stat { display: grid; gap: 2px; align-content: start; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-3); }
+.extuse-stat b { font-size: 20px; font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
+.extuse-stat span { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.extuse-stat .sub { color: var(--ink-3); }
+.extuse .tbl-wrap { max-width: 100%; }
+@media (max-width: 600px) {
+  .sec.extuse { padding: 12px; border-left-width: 5px; }
+  .extuse-first { font-size: 15.5px; }
+  .extuse-stat b { font-size: 18px; }
+}

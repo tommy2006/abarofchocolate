@@ -82,21 +82,34 @@ def template_objections(diag: Diagnosis, checks: list[dict[str, Any]]) -> list[s
     return out[:6]
 
 
-def llm_objections(ws, settings, diag: Diagnosis, checks: list[dict[str, Any]], language: str = "en") -> tuple[list[str], str]:
-    try:
-        from ..llm import complete
-    except Exception:
-        return [], "template"
+def cited_evidence(ws, diag: Diagnosis) -> list[dict[str, Any]]:
     evidence = []
     for eid in diag.evidence_ids[:12]:
         ev = ws.evidence.get(eid)
         if ev is not None:
             evidence.append({"id": ev.id, "statement": ev.statement})
-    payload = {"diagnosis": diag.model_dump(exclude={"critique"}), "checks": checks, "evidence": evidence, "instruction": "Act as a devil's advocate. List the strongest objections to this diagnosis. Every objection must cite at least one evidence id from the list."}
+    return evidence
+
+
+def objections_payload(diag: Diagnosis, checks: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"diagnosis": diag.model_dump(exclude={"critique"}), "checks": checks, "evidence": evidence, "instructions": "Act as a devil's advocate. List the strongest objections to this diagnosis. Every objection must cite at least one evidence id from the list."}
+
+
+def llm_objections(ws, settings, diag: Diagnosis, checks: list[dict[str, Any]], language: str = "en") -> tuple[list[str], str]:
+    try:
+        from ..llm import complete
+    except Exception:
+        return [], "template"
+    payload = objections_payload(diag, checks, cited_evidence(ws, diag))
     try:
         res = complete("critique", payload, purpose=f"critique {diag.id}", ws=ws, settings=settings, language=language)
     except Exception:
         return [], "template"
+    return parse_objections(diag, res)
+
+
+def parse_objections(diag: Diagnosis, res: Any) -> tuple[list[str], str]:
+    """(objections, source) from a critique reply; only objections that cite evidence of this diagnosis are kept."""
     if res is None or not res.ok:
         return [], "template"
     objs: list[str] = []
@@ -131,12 +144,14 @@ def llm_objections(ws, settings, diag: Diagnosis, checks: list[dict[str, Any]], 
     return objs[:6], res.source
 
 
-def critique_diagnosis(ws, settings, diag: Diagnosis, flags_by_id: dict[str, Any], baseline: dict[str, Any], patterns_by_id: dict[str, dict[str, Any]], window: int, language: str = "en", use_llm: bool = True) -> Diagnosis:
+def critique_diagnosis(ws, settings, diag: Diagnosis, flags_by_id: dict[str, Any], baseline: dict[str, Any], patterns_by_id: dict[str, dict[str, Any]], window: int, language: str = "en", use_llm: bool = True, model_objections: Optional[tuple[list[str], str]] = None) -> Diagnosis:
+    """model_objections: (objections, source) already obtained from the model (the concurrent external path asks the
+    model in a worker and applies the answer here); given, no model call is made."""
     checks = code_checks(ws, diag, flags_by_id, baseline, patterns_by_id, window)
     objections = template_objections(diag, checks)
     source = "template"
-    if use_llm:
-        llm_objs, src = llm_objections(ws, settings, diag, checks, language)
+    if use_llm or model_objections is not None:
+        llm_objs, src = model_objections if model_objections is not None else llm_objections(ws, settings, diag, checks, language)
         if llm_objs:
             objections = [f"[{src}] {o}" for o in llm_objs] + objections
             source = f"{src}+template"

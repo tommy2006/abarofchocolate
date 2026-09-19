@@ -125,6 +125,22 @@ def split_system(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, st
     return "\n\n".join(sys_parts), rest
 
 
+def normalize_turns(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Anthropic turn rules: the first turn is the user's and roles alternate. A leading assistant turn is dropped,
+    consecutive turns of one role are merged, empty turns are skipped."""
+    out: list[dict[str, str]] = []
+    for m in messages:
+        role = "assistant" if m.get("role") == "assistant" else "user"
+        content = str(m.get("content") or "")
+        if not content.strip() or (not out and role == "assistant"):
+            continue
+        if out and out[-1]["role"] == role:
+            out[-1]["content"] += "\n\n" + content
+        else:
+            out.append({"role": role, "content": content})
+    return out
+
+
 # ----------------------------------------------------------------------------------------------
 # Ollama
 # ----------------------------------------------------------------------------------------------
@@ -209,7 +225,8 @@ class OllamaProvider:
         return out
 
     def pick_model(self) -> Optional[str]:
-        """Configured model if pulled, else the first pulled fallback, else None."""
+        """Configured model if pulled, else the first pulled fallback, else (local_llm.auto_select) the best installed
+        chat model for this machine, else None. The app does not depend on one particular model being present."""
         pulled = self.list_models()
         if not pulled:
             return None
@@ -217,18 +234,50 @@ class OllamaProvider:
             for p in pulled:
                 if _same_model(p, cand):
                     return p
-        return None
+        return self._auto_choice("chat", pulled)
+
+    def embedding_model(self) -> Optional[str]:
+        """Configured embedding model if pulled, else any installed embedding model (auto_select), else None."""
+        pulled = self.list_models()
+        for p in pulled:
+            if _same_model(p, self.cfg.embedding_model):
+                return p
+        return self._auto_choice("embedding", pulled)
+
+    _auto_cache: dict[tuple, dict[str, Any]] = {}
+
+    def _auto_choice(self, kind: str, pulled: list[str]) -> Optional[str]:
+        """tpm.llm.models ranks what is installed (kind, size, this machine's memory); cached per set of models."""
+        if not getattr(self.cfg, "auto_select", True) or not pulled:
+            return None
+        key = (self.base_url, self.cfg.model, self.cfg.embedding_model, tuple(sorted(pulled)))
+        chosen = OllamaProvider._auto_cache.get(key)
+        if chosen is None:
+            try:
+                from . import models as models_mod
+
+                chosen = models_mod.choose(self.settings)
+            except Exception:
+                chosen = {}
+            OllamaProvider._auto_cache[key] = chosen
+        name = chosen.get(kind)
+        return name if name in pulled else None
 
     def missing_models(self) -> list[str]:
-        pulled = self.list_models()
-        wanted = self.candidate_models() + [self.cfg.embedding_model]
-        return [w for w in wanted if not any(_same_model(p, w) for p in pulled)]
+        """What still has to be pulled for full function: nothing, as long as some chat model and some embedding
+        model are installed; otherwise the configured defaults."""
+        missing = []
+        if self.pick_model() is None:
+            missing.append(self.cfg.model)
+        if self.embedding_model() is None:
+            missing.append(self.cfg.embedding_model)
+        return missing
 
     def pull_commands(self) -> list[str]:
         return [f"ollama pull {m}" for m in self.missing_models()]
 
     def has_embedding_model(self) -> bool:
-        return self.has_model(self.cfg.embedding_model)
+        return self.embedding_model() is not None
 
     # ---- chat ----
     def chat(
@@ -289,7 +338,7 @@ class OllamaProvider:
 
     # ---- embeddings ----
     def embed(self, texts: list[str], model: Optional[str] = None) -> np.ndarray:
-        model = model or self.cfg.embedding_model
+        model = model or self.embedding_model() or self.cfg.embedding_model
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
         try:
@@ -322,25 +371,50 @@ def _same_model(pulled: str, wanted: str) -> bool:
 # ----------------------------------------------------------------------------------------------
 
 
+_EXT_CLIENTS: dict[tuple[Any, ...], Any] = {}
+_EXT_CLIENTS_LOCK = threading.Lock()
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
 class AnthropicProvider:
     TOOL_NAME = "emit_result"
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.cfg = settings.external_llm
+        self._tls = threading.local()
 
     def is_available(self) -> bool:
         return bool(self.cfg.api_key)
 
+    @property
+    def last_usage(self) -> dict[str, int]:
+        """Token usage of this thread's last chat() on this provider: {"input_tokens", "output_tokens"}."""
+        return dict(getattr(self._tls, "usage", None) or {"input_tokens": 0, "output_tokens": 0})
+
+    @last_usage.setter
+    def last_usage(self, usage: Optional[dict[str, int]]) -> None:
+        u = usage or {}
+        self._tls.usage = {"input_tokens": int(u.get("input_tokens") or 0), "output_tokens": int(u.get("output_tokens") or 0)}
+
     def _client(self):
+        """One pooled SDK client per (endpoint, key, timeout): thread-safe, keeps its connections between calls."""
         try:
             import anthropic
         except Exception as e:  # pragma: no cover
             raise ProviderError(f"anthropic SDK not installed: {e}")
-        kwargs: dict[str, Any] = {"api_key": self.cfg.api_key, "timeout": float(self.cfg.timeout_s), "max_retries": 1}
-        if self.cfg.base_url:
-            kwargs["base_url"] = self.cfg.base_url
-        return anthropic.Anthropic(**kwargs)
+        key = (self.cfg.base_url or "", self.cfg.api_key, float(self.cfg.timeout_s), self.cfg.workspace_id or "")
+        with _EXT_CLIENTS_LOCK:
+            client = _EXT_CLIENTS.get(key)
+            if client is None:
+                kwargs: dict[str, Any] = {"api_key": self.cfg.api_key, "timeout": float(self.cfg.timeout_s), "max_retries": 1}
+                if self.cfg.base_url:
+                    kwargs["base_url"] = self.cfg.base_url
+                if self.cfg.workspace_id:
+                    kwargs["default_headers"] = {"anthropic-workspace-id": self.cfg.workspace_id}
+                client = anthropic.Anthropic(**kwargs)
+                _EXT_CLIENTS[key] = client
+            return client
 
     def chat(
         self,
@@ -349,18 +423,26 @@ class AnthropicProvider:
         max_tokens: Optional[int] = None,
         model: Optional[str] = None,
     ) -> tuple[str, Optional[Any], int]:
+        self.last_usage = None
         if not self.is_available():
             raise ProviderError(f"no API key in env {self.cfg.api_key_env}")
+        model = model or self.cfg.model
+        ok, why = self.cfg.model_allowed(model)
+        if not ok:
+            raise ProviderError(why)
         system, rest = split_system(messages)
+        rest = normalize_turns(rest)
         if not rest:
             raise ProviderError("no user message")
         kwargs: dict[str, Any] = {
-            "model": model or self.cfg.model,
+            "model": model,
             "max_tokens": int(max_tokens or self.cfg.max_tokens),
-            "messages": [{"role": m["role"], "content": m["content"]} for m in rest],
+            "messages": rest,
         }
         if system:
             kwargs["system"] = system
+        if str(self.cfg.effort or "").lower() in EFFORT_LEVELS:
+            kwargs["output_config"] = {"effort": str(self.cfg.effort).lower()}  # Sonnet 5 / Opus 5 think by default; low = fastest
         wrapped = False
         if schema:
             tool_schema = schema
@@ -369,6 +451,8 @@ class AnthropicProvider:
                 wrapped = True
             kwargs["tools"] = [{"name": self.TOOL_NAME, "description": "Return the answer as structured JSON.", "input_schema": tool_schema}]
             kwargs["tool_choice"] = {"type": "tool", "name": self.TOOL_NAME}
+            if not self.cfg.endpoint_is_first_party():
+                kwargs["thinking"] = {"type": "disabled"}  # Bedrock-hosted endpoints reject a forced tool call with thinking on
         client = self._client()
         t0 = time.time()
         try:
@@ -377,8 +461,14 @@ class AnthropicProvider:
             name = type(e).__name__
             if name in ("APIConnectionError", "APITimeoutError", "InternalServerError", "RateLimitError"):
                 raise TransientError(f"anthropic {name}: {e}")
+            if "anthropic-workspace-id" in str(e):
+                raise ProviderError(f"the Anthropic API key is not tied to a workspace: add {self.cfg.workspace_id_env}=<workspace id> to .env (Claude Console > Settings > Workspaces), or create the key inside a workspace")
             raise ProviderError(f"anthropic {name}: {e}")
         latency = int((time.time() - t0) * 1000)
+        usage = getattr(resp, "usage", None)
+        self.last_usage = {"input_tokens": getattr(usage, "input_tokens", 0), "output_tokens": getattr(usage, "output_tokens", 0)}
+        if getattr(resp, "stop_reason", None) == "refusal":
+            raise ProviderError("anthropic: the model declined this request (stop_reason=refusal)")
         text_parts: list[str] = []
         parsed: Optional[Any] = None
         for block in getattr(resp, "content", []) or []:

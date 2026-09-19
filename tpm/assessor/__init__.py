@@ -193,7 +193,8 @@ def _llm_answer_text(res: Any) -> str:
 
 
 def ask(ws: Any, settings: Any, question: str, actor: str = "human:unknown", time_budget_s: Optional[float] = None) -> dict[str, Any]:
-    """Chat entry point: parse -> evaluate -> plain-language answer (template, optionally LLM-enhanced locally)."""
+    """Chat entry point: parse -> evaluate -> plain-language answer (template, optionally reworded by the model the
+    profile routes 'assessor_chat' to; an external model only sees what passes the egress guard)."""
     t0 = time.time()
     assessor = ws.read_json("assessor", None) or {}
     action = parse_action(question, ws, settings)
@@ -203,11 +204,12 @@ def ask(ws: Any, settings: Any, question: str, actor: str = "human:unknown", tim
     ev_ids = list((evaluation or {}).get("evidence_ids") or [])
     if not action:
         ev_ids = list((assessor.get("dq_scores") or {}).get("evidence_ids") or [])[:5]
-    if settings.route_for("assessor_chat") == "local":
+    if settings.route_for("assessor_chat") in ("local", "external"):  # external goes through the egress guard, falls back to local
         try:
             from ..llm import complete
 
-            res = complete("assessor_chat", {"question": question, "action": action, "evaluation": {k: v for k, v in (evaluation or {}).items() if k in ("recommendation", "rationale", "expected_effect", "confidence")}, "template_answer": answer, "evidence_ids": ev_ids[:10], "instruction": "Rewrite the template answer for an operator in 2-4 sentences. Keep every number and the recommendation; cite only the given evidence ids."}, purpose="explain assessor evaluation", ws=ws, settings=settings)
+            # "assessment", not "evaluation": the egress guard removes `evaluation` keys (label-based detector scoring)
+            res = complete("assessor_chat", {"question": question, "action": action, "assessment": {k: v for k, v in (evaluation or {}).items() if k in ("recommendation", "rationale", "expected_effect", "confidence")}, "template_answer": answer, "evidence_ids": ev_ids[:10], "instructions": "Rewrite the template answer for an operator in 2-4 sentences. Keep every number and the recommendation; cite only the given evidence ids."}, purpose="explain assessor evaluation", ws=ws, settings=settings)
             llm_text = _llm_answer_text(res)
             if llm_text and len(llm_text) > 20:
                 # never let a model invent evidence: strip ids that are not ours

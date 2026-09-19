@@ -137,10 +137,21 @@ def heuristic_hypotheses(d: SignalDescriptor, relations: dict[str, Any]) -> list
 # --------------------------------------------------------------------------------------------------
 # LLM enhancement
 # --------------------------------------------------------------------------------------------------
-_FP_KEYS = ["mean", "std", "min", "max", "q05", "q50", "q95", "missing_rate", "n_unique", "autocorr_lag1", "autocorr_lag5", "noise_level", "stuck_fraction", "hold_period", "quantization_rel", "dominant_period", "trend_strength", "distribution_shape", "boundedness", "integer_valued"]
+# The range is given as q05 / q95, never min / max: a minimum or maximum is one single reading, and single readings do
+# not leave the machine (the egress guard drops those keys). n_samples tells the guard how many rows stand behind it.
+_FP_KEYS = ["mean", "std", "q05", "q50", "q95", "missing_rate", "n_unique", "autocorr_lag1", "autocorr_lag5", "noise_level", "stuck_fraction", "hold_period", "quantization_rel", "dominant_period", "trend_strength", "distribution_shape", "boundedness", "integer_valued"]
 
 
-_FP_KEYS_COMPACT = ["mean", "std", "min", "max", "autocorr_lag1", "noise_level", "stuck_fraction", "hold_period", "boundedness"]
+_FP_KEYS_COMPACT = ["mean", "std", "q05", "q95", "autocorr_lag1", "noise_level", "stuck_fraction", "hold_period", "boundedness"]
+
+
+def _llm_fingerprint(fp: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    out = {k: fp.get(k) for k in keys if fp.get(k) is not None}
+    if out.get("boundedness") in ("0-100", "0-1"):
+        out["boundedness"] = "range_" + out["boundedness"].replace("-", "_")  # a plain word: "0-100" reads as free text to the guard and was dropped
+    if fp.get("count"):
+        out["n_samples"] = int(fp["count"])
+    return out
 
 
 def build_llm_payload(descriptors: list[SignalDescriptor], relations: dict[str, Any], domain: dict[str, float], hint: Optional[str]) -> dict[str, Any]:
@@ -148,7 +159,7 @@ def build_llm_payload(descriptors: list[SignalDescriptor], relations: dict[str, 
     keys = _FP_KEYS if len(active) <= 25 else _FP_KEYS_COMPACT  # keep the payload inside a small local context window
     sig = []
     for d in active:
-        sig.append({"signal": d.id, "structural_role": d.structural_role, "structural_confidence": round(d.structural_confidence, 2), "fingerprint": {k: d.fingerprint.get(k) for k in keys if d.fingerprint.get(k) is not None}, "heuristic_instrument": d.instrument_hypothesis, "cluster_id": d.cluster_id, "related": d.related_signals[:2 if len(active) > 25 else 4], "evidence_ids": d.evidence_ids[:2]})
+        sig.append({"signal": d.id, "structural_role": d.structural_role, "structural_confidence": round(d.structural_confidence, 2), "fingerprint": _llm_fingerprint(d.fingerprint, keys), "heuristic_instrument": d.instrument_hypothesis, "cluster_id": d.cluster_id, "related": d.related_signals[:2 if len(active) > 25 else 4], "evidence_ids": d.evidence_ids[:2]})
     return {
         "domain_likelihood": domain,
         "domain_hint": hint,
@@ -286,7 +297,9 @@ def apply_override(ws, settings, decision) -> dict[str, Any]:
         target.excluded_reason = "operator" if target.excluded else None
         changed["excluded"] = target.excluded
     if "display_name" in nv or "name" in nv:
-        name = str(nv.get("display_name") or nv.get("name") or "").strip()[:80] or None
+        from ..naming import clean_name
+
+        name = clean_name(nv.get("display_name") or nv.get("name")) or None  # one line, no control characters
         target.display_name = name
         changed["display_name"] = name
     if "display_unit" in nv or "unit" in nv:

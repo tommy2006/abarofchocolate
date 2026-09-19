@@ -76,9 +76,9 @@ def _rewrite_profile_line(settings_path: Optional[Path], profile: str) -> bool:
     """Replace the top-level ``profile:`` line of settings.yaml in place (keeps comments). False if not found."""
     import re
 
-    from ..config import DEFAULT_SETTINGS_PATH
+    from ..config import _settings_path
 
-    p = Path(settings_path) if settings_path else DEFAULT_SETTINGS_PATH
+    p = Path(settings_path) if settings_path else _settings_path()
     if not p.exists():
         return False
     text = p.read_text(encoding="utf-8")
@@ -87,6 +87,115 @@ def _rewrite_profile_line(settings_path: Optional[Path], profile: str) -> bool:
         return False
     p.write_text(new, encoding="utf-8")
     return True
+
+
+def _rewrite_external_model_line(settings_path: Optional[Path], model: str) -> bool:
+    """Replace ``model:`` inside the top-level ``external_llm:`` block of settings.yaml in place (keeps comments).
+    False if the block or the line is not found, or the id would need YAML quoting."""
+    from ..config import _settings_path
+
+    p = Path(settings_path) if settings_path else _settings_path()
+    if not p.exists() or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model):
+        return False
+    text = p.read_text(encoding="utf-8")
+    block = re.search(r"(?m)^external_llm:[ \t]*(?:#.*)?\n((?:[ \t]+.*\n?|[ \t]*\n)*)", text)
+    if not block:
+        return False
+    new, n = re.subn(r"(?m)^([ \t]+model:[ \t]*)[^\s#]+", lambda m: m.group(1) + model, block.group(1), count=1)
+    if n != 1:
+        return False
+    p.write_text(text[: block.start(1)] + new + text[block.end(1):], encoding="utf-8")
+    return True
+
+
+def _sanitizer_totals(ledger: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the egress guard changed in the payloads it cleared for the external model (sent, or failed on the wire),
+    summed over a run's ledger: three plain totals for the Data-flow view plus the guard's own counters (`detail`).
+    Blocked and budget-refused payloads never left and are not counted."""
+    detail: dict[str, int] = {}
+    sent = [r for r in ledger if r.get("route") == "external" and r.get("guard_result") == "allowed"]
+    for r in sent:
+        for k, v in (r.get("sanitizer") or {}).items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "vocabulary_size":
+                detail[k] = detail.get(k, 0) + int(v)
+    total = lambda *keys: int(sum(detail.get(k, 0) for k in keys))  # noqa: E731
+    return {
+        "payloads": len(sent),
+        "numbers_rounded": total("floats_rounded", "numbers_in_strings_rounded"),
+        "names_aliased": total("names_aliased"),
+        "values_withheld": total("values_redacted", "times_redacted", "files_redacted", "keys_dropped", "fields_dropped", "items_dropped", "human_notes_dropped"),
+        "detail": detail,
+    }
+
+
+def _external_model_state(s: Settings) -> dict[str, Any]:
+    """Which external models the UI may offer, and why the external route cannot be used right now (None = usable).
+    Same answers as tpm.llm.available(), without probing the local model server."""
+    try:
+        from ..llm.router import EXTERNAL_MODEL_CHOICES as choices
+    except Exception:
+        choices = ["claude-sonnet-5", "claude-opus-5"]
+    cfg = s.external_llm
+    configured = [cfg.model] + [m for m in (cfg.model_by_task or {}).values() if m]
+    blocked = next((why for ok, why in (cfg.model_allowed(m) for m in configured) if not ok), None)
+    unavailable = s.external_block_reason()
+    if unavailable is None and not cfg.api_key:
+        unavailable = f"no API key in env {cfg.api_key_env}"
+    return {
+        "external_models_allowed": [m for m in choices if cfg.model_allowed(m)[0]],
+        "external_model_blocked_reason": blocked,
+        "external_unavailable_reason": unavailable,
+    }
+
+
+def _external_caps(s: Settings) -> dict[str, Any]:
+    """The limits on external-model use from the settings (per run, per chat turn, concurrency)."""
+    return {k: getattr(s.external_llm, k) for k in ("max_calls_per_run", "max_calls_per_chat_turn", "max_output_tokens_per_run", "max_parallel", "max_narratives_per_run", "timeout_s")}
+
+
+def _benchmark_rows(data: Any) -> list[dict[str, Any]]:
+    """Rows of the latency table from llm_benchmark.json (`tpm bench-llm`): one per task with the average seconds
+    per call on the local and on the external route. Tolerant about the file's exact shape; [] when it has none."""
+
+    def seconds(side: Any) -> Optional[float]:
+        if isinstance(side, (int, float)) and not isinstance(side, bool):
+            return round(float(side) / 1000.0, 2)  # a bare number is milliseconds, like the ledger's latency_ms
+        if not isinstance(side, dict):
+            return None
+        for key, div in (("avg_latency_ms", 1000.0), ("mean_latency_ms", 1000.0), ("avg_ms", 1000.0), ("mean_ms", 1000.0), ("latency_ms", 1000.0), ("avg_s", 1.0), ("mean_s", 1.0), ("seconds", 1.0)):
+            v = side.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return round(float(v) / div, 2)
+        return None
+
+    tasks = data.get("tasks") if isinstance(data, dict) else None
+    if isinstance(tasks, dict):
+        tasks = [dict(v, task=k) for k, v in tasks.items() if isinstance(v, dict)]
+    if isinstance(tasks, list) and any(isinstance(t, dict) and t.get("route") in ("local", "external") for t in tasks):
+        # tpm.llm.bench writes one row per task AND route ({task, route, n, ok, mean_s, ...}): fold them per task
+        folded: dict[str, dict[str, Any]] = {}
+        for t in tasks:
+            if isinstance(t, dict) and t.get("route") in ("local", "external"):
+                item = folded.setdefault(str(t.get("task") or "?"), {"task": t.get("task"), "n": t.get("n")})
+                item[t["route"]] = t
+                item["n"] = max(int(item.get("n") or 0), int(t.get("n") or 0))
+        tasks = list(folded.values())
+    rows: list[dict[str, Any]] = []
+    for item in tasks if isinstance(tasks, list) else []:
+        if not isinstance(item, dict):
+            continue
+        local_s, external_s = seconds(item.get("local")), seconds(item.get("external"))
+        n_of = lambda side: (item.get(side) or {}).get("ok", (item.get(side) or {}).get("n")) if isinstance(item.get(side), dict) else None  # noqa: E731
+        rows.append({
+            "task": str(item.get("task") or "?"),
+            "n": item.get("n"),
+            "local_s": local_s,
+            "external_s": external_s,
+            "local_ok": n_of("local"),
+            "external_ok": n_of("external"),
+            "speedup": round(local_s / external_s, 1) if local_s and external_s else None,
+        })
+    return rows
 
 
 def _offload(handler):
@@ -299,6 +408,9 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             "external_base_url": s.external_llm.base_url,
             "external_key_configured": bool(s.external_llm.api_key),
             "external_route_exists": bool(prof.allow_external and s.external_llm.api_key),
+            **_external_model_state(s),
+            "external_caps": _external_caps(s),
+            "external_sig_digits": s.guard.external_sig_digits,
             "external_calls": ext_calls,
             "external_blocked": blocked,
             "languages": s.report.languages,
@@ -319,14 +431,30 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             allowed["profile"] = body["profile"]
         if "local_model" in body and body["local_model"]:
             allowed["local_llm"] = {"model": str(body["local_model"])}
+        if "external_llm" in body or "external_model" in body:
+            # only the model id may be changed here, and only to one the settings allow: never a Fable / Mythos model
+            ext = body["external_llm"] if "external_llm" in body else {"model": body.get("external_model")}
+            if not isinstance(ext, dict) or set(ext) != {"model"}:
+                raise HTTPException(400, "only external_llm.model can be changed here")
+            ext_model = str(ext["model"] or "").strip()
+            ok, why = state.settings.external_llm.model_allowed(ext_model)
+            if not ok:
+                raise HTTPException(400, why)
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}", ext_model):
+                raise HTTPException(400, f"'{ext_model[:60]}' is not a model id")
+            allowed["external_llm"] = {"model": ext_model}
         if not allowed:
-            raise HTTPException(400, "nothing to change (profile, local_model)")
+            raise HTTPException(400, "nothing to change (profile, local_model, external_llm.model)")
         old = state.settings.profile
+        old_ext = state.settings.external_llm.model
         try:
-            if list(allowed) == ["profile"] and _rewrite_profile_line(state.settings_path, allowed["profile"]):
-                pass  # in-place edit keeps the comments of settings.yaml
-            else:
-                save_settings_overrides(allowed, state.settings_path)
+            pending = dict(allowed)  # in-place edits keep the comments of settings.yaml; the rest is merged and rewritten
+            if "profile" in pending and _rewrite_profile_line(state.settings_path, pending["profile"]):
+                pending.pop("profile")
+            if "external_llm" in pending and _rewrite_external_model_line(state.settings_path, pending["external_llm"]["model"]):
+                pending.pop("external_llm")
+            if pending:
+                save_settings_overrides(pending, state.settings_path)
         except Exception as e:
             raise HTTPException(500, f"could not save settings: {e}")
         import os
@@ -335,13 +463,17 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             os.environ["TPM_PROFILE"] = allowed["profile"]
         if "local_llm" in allowed and os.environ.get("TPM_LOCAL_MODEL"):
             os.environ["TPM_LOCAL_MODEL"] = allowed["local_llm"]["model"]
+        if "external_llm" in allowed and os.environ.get("TPM_EXTERNAL_MODEL"):
+            os.environ["TPM_EXTERNAL_MODEL"] = allowed["external_llm"]["model"]
         s = state.reload_settings()
         for rid, w in list(state.workspaces.items()):
             try:
                 w.log.record("human:ui(reviewer)", "settings", "settings", "profile", {"from": old, "to": s.profile})
+                if "external_llm" in allowed:
+                    w.log.record("human:ui(reviewer)", "settings", "settings", "external_model", {"from": old_ext, "to": s.external_llm.model})
             except Exception:
                 pass
-        return {"ok": True, "profile": s.profile, "allow_external": s.active_profile.allow_external, "changed": allowed}
+        return {"ok": True, "profile": s.profile, "allow_external": s.active_profile.allow_external, "external_model": s.external_llm.model, "changed": allowed}
 
     # ---------- runs ----------
     def _start_job(run_id: str, source_path: str, options: dict[str, Any], profile: Optional[str]) -> None:
@@ -636,6 +768,27 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         except Exception as e:
             return {"available": False, "error": str(e)[:300]}
         return {"available": bool(d.get("paragraphs")), **d}
+
+    @app.get("/api/runs/{run_id}/brief")
+    def get_brief(run_id: str, view: str = Query("overview"), lang: str = Query("en")) -> dict[str, Any]:
+        """Short jargon-free summary of a view (or of the whole run: view=overview): verdict, one headline, up to
+        three points and clickable next steps. Deterministic templates in en / fi / sv; never calls a model."""
+        from .brief import VIEWS as BRIEF_VIEWS, brief_for
+
+        ws = state.ws(run_id)
+        if view not in BRIEF_VIEWS:
+            raise HTTPException(400, f"unknown view {view!r}; choose one of {list(BRIEF_VIEWS)}")
+        return brief_for(ws, state.settings, view, lang=lang)
+
+    @app.get("/api/runs/{run_id}/brief/item")
+    def get_brief_item(run_id: str, id: str = Query(..., min_length=1, max_length=64), lang: str = Query("en")) -> dict[str, Any]:
+        """The same kind of summary for one object: DIAG- / FLAG- / CHK- / EV- / INF- / RULE- / PATTERN- ids, batch ids."""
+        from .brief import brief_item
+
+        item = brief_item(state.ws(run_id), state.settings, id, lang=lang)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"{id} was not found in run {run_id}")
+        return item
 
     @app.get("/api/runs/{run_id}/understanding")
     def get_understanding(run_id: str) -> dict[str, Any]:
@@ -1152,7 +1305,7 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
                 answer["note"] = f"model call failed ({e}); template answer shown"
         else:
             answer = fallback.template_chat_answer(ws, state.settings, message, context, language)
-        entry = {"ts": now_iso(), "role": "assistant", "actor": answer.get("source", "template"), "message": answer.get("text", ""), "source": answer.get("source", "template"), "route": answer.get("route", "none"), "model": answer.get("model", ""), "evidence_ids": answer.get("evidence_ids", []), "context": context, "note": answer.get("note"), "followups": answer.get("followups") or [], "confidence": answer.get("confidence")}
+        entry = {"ts": now_iso(), "role": "assistant", "actor": answer.get("source", "template"), "message": answer.get("text", ""), "source": answer.get("source", "template"), "route": answer.get("route", "none"), "model": answer.get("model", ""), "evidence_ids": answer.get("evidence_ids", []), "context": context, "note": answer.get("note"), "followups": answer.get("followups") or [], "confidence": answer.get("confidence"), "tool_trace": answer.get("tool_trace") or []}
         if not persisted_by_agent:
             ws.append_jsonl("chat", {"ts": now_iso(), "role": "user", "actor": f"{actor}({role})", "message": message, "context": context})
             ws.append_jsonl("chat", entry)
@@ -1513,6 +1666,57 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             statement = fallback.data_flow_statement(state.settings, summary)
         return {"available": ws.exists("egress_ledger"), "ledger": ledger, "n": len(ledger), "summary": summary, "statement": statement, "profile": state.settings.profile, "allow_external": state.settings.active_profile.allow_external, "guard_strict": state.settings.active_profile.guard_strict, "external_key_configured": bool(state.settings.external_llm.api_key), "local_model": state.settings.local_llm.model, "external_model": state.settings.external_llm.model, "external_base_url": state.settings.external_llm.base_url}
 
+    @app.get("/api/runs/{run_id}/llm/usage")
+    def get_llm_usage(run_id: str) -> dict[str, Any]:
+        """External-model use of one run for the Data-flow view: calls and tokens against the run's budget, average
+        latency per route (tpm.llm.ledger.usage), the caps from the settings, what the egress guard changed in the
+        payloads that were sent, and the latency table of `tpm bench-llm` when llm_benchmark.json exists."""
+        ws = state.ws(run_id)
+        s = state.settings
+        ledger = ws.read_jsonl("egress_ledger") if ws.exists("egress_ledger") else []
+        usage: dict[str, Any] = {}
+        fn = _lazy("tpm.llm.ledger:usage")
+        if fn is not None:
+            try:
+                usage = _jsonable(fn(ws, s))
+            except Exception:
+                usage = {}
+        benchmark = None
+        p = ws.dir / "llm_benchmark.json"
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                benchmark = {k: data.get(k) for k in ("created_at", "n", "local_model", "external_model") if isinstance(data, dict)}
+                benchmark["rows"] = _benchmark_rows(data)
+            except Exception:
+                benchmark = None
+        return {
+            "available": ws.exists("egress_ledger"),
+            "profile": s.profile,
+            "allow_external": s.active_profile.allow_external,
+            "external_model": s.external_llm.model,
+            "external_model_by_task": dict(s.external_llm.model_by_task or {}),
+            **_external_model_state(s),
+            "usage": usage,
+            "caps": _external_caps(s),
+            "sanitizer": _sanitizer_totals(ledger),
+            "guard": {"external_sig_digits": s.guard.external_sig_digits, "alias_names_external": s.guard.alias_names_external, "min_aggregate_n": s.guard.min_aggregate_n, "max_series_points": s.guard.max_series_points},
+            "benchmark": benchmark,
+        }
+
+    @app.get("/api/llm/status")
+    def llm_status() -> dict[str, Any]:
+        """Which model routes are reachable right now (tpm.llm.available), always with the external models the
+        settings allow and the reason a configured one is refused."""
+        info: dict[str, Any] = {}
+        fn = _lazy("tpm.llm:available")
+        if fn is not None:
+            try:
+                info = _jsonable(fn(state.settings))
+            except Exception as e:
+                info = {"local": False, "external": False, "error": str(e)}
+        return {**_external_model_state(state.settings), **info, "profile": state.settings.profile, "allow_external": state.settings.active_profile.allow_external}
+
     # ---------- misc ----------
     @app.post("/api/demo", status_code=202)
     @_offload
@@ -1604,6 +1808,14 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         if not p.exists() or p.suffix not in (".json", ".jsonl", ".html", ".md", ".txt"):
             raise HTTPException(404, "artifact not found")
         return FileResponse(str(p), filename=safe)
+
+    # ---------- AI models on this computer (choose, download, install Ollama) ----------
+    from .models_api import register as _register_models
+
+    _register_models(app, state)
+    from .names_api import register as _register_names
+
+    _register_names(app, state)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:

@@ -363,7 +363,7 @@ def plain_for(ws, settings, view: str, lang: str = "en", enhance: bool = False) 
             from ..llm import complete
 
             text = "\n\n".join(base["paragraphs"])
-            payload = {"report_sections": [{"title": view, "text": text}], "instruction": f"Rewrite the text for a person with no data-science background, in {LANG_NAMES.get(lang, 'English')}. Keep every number, percentage and identifier (S07, FLAG-000001, B00003) exactly. Return plain prose paragraphs, no JSON, no headings, no bullet lists."}
+            payload = {"report_sections": [{"title": view, "text": text}], "instructions": f"Rewrite the text for a person with no data-science background, in {LANG_NAMES.get(lang, 'English')}. Keep every number, percentage and identifier (S07, FLAG-000001, B00003) exactly. Return plain prose paragraphs, no JSON, no headings, no bullet lists."}
             t0 = time.time()
             res = complete("report_narrative", payload, purpose=f"plain-language {view} ({lang})", ws=ws, settings=settings, language=lang, max_tokens=900)
             txt = ""

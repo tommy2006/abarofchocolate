@@ -37,6 +37,37 @@ def complete(
         return LLMResult(text="", data=None, source="template", route="none", ok=False, error=str(e))
 
 
+def complete_many(jobs: list[dict[str, Any]], *, ws: Any = None, settings: Any = None, max_parallel: Optional[int] = None, deadline_s: Optional[float] = None) -> list[LLMResult]:
+    """Several complete() jobs at once (a job is the kwargs dict of complete). External jobs run concurrently
+    (external_llm.max_parallel), local ones one after the other. Results in job order; never raises."""
+    try:
+        from .router import complete_many as _many
+
+        return _many(jobs, ws=ws, settings=settings, max_parallel=max_parallel, deadline_s=deadline_s)
+    except Exception as e:
+        return [LLMResult(text="", data=None, source="template", route="none", ok=False, error=str(e)) for _ in jobs]
+
+
+def external_ready(task: str, ws: Any = None, settings: Any = None) -> tuple[bool, str]:
+    """(usable, reason): does the task route to the external model and can a call be made right now?"""
+    try:
+        from .router import external_ready as _ready
+
+        return _ready(task, ws=ws, settings=settings)
+    except Exception as e:
+        return False, str(e)
+
+
+def usage(ws: Any, settings: Any = None) -> dict[str, Any]:
+    """External-model use of a run (calls, tokens, budget left, average latency local vs external, per task)."""
+    try:
+        from .ledger import usage as _usage
+
+        return _usage(ws, settings)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def available(settings: Any = None) -> dict[str, Any]:
     """Which routes are reachable right now (for the UI status bar)."""
     try:

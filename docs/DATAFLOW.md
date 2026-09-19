@@ -106,3 +106,24 @@ JSONL file); `tpm.llm.ledger.summary(ws)` and `data_flow_statement(ws, settings,
   blocked payloads are visible with their reason.
 - `tests/test_d_*` exercise the guard on raw-looking payloads; `tests/test_f_report.py` checks that the report
   renders the ledger and the statement in all three languages.
+
+## Hybrid profile since 2026-09-19: sanitise, verify, then send (or do not send)
+
+The egress guard no longer only decides "allowed / blocked"; it rewrites what would leave and then proves an
+invariant on the result (`tpm/llm/guard.py`: `check`, `verify_invariant`, `sanitize_text`, `verify_texts`):
+
+1. whitelist of artifact types; unknown or raw-looking fields are dropped one by one (field-level fail-closed);
+2. original column names -> aliases `S01..`, also inside sentences, chat questions and rule text;
+3. single raw readings removed at any depth (`min`, `max`, `first`, `last`, `value`, `points`, `series`, `rows`,
+   time stamps, file names, label-based evaluation); limits an operator typed into a rule stay;
+4. every float rounded to 3 significant digits (also decimals inside strings; epoch-sized integers too);
+5. dates, clock times, epoch stamps -> `[time]`; values of the dataset's text / category / label columns ->
+   `[value]` (vocabulary scanned locally, cached in `egress_vocab.json`); file names -> `[file]`;
+6. invariant on the final payload and on the final chat message texts: no float with more than 3 significant
+   digits, no date/time, no original column name, no vocabulary value, no long numeric list, no dropped key.
+   A violation blocks the call and is written to the ledger; the task then runs on the local model.
+
+Tests that keep this true: `tests/test_d_guard.py`, `tests/test_d_egress_no_raw.py` (a real pipeline run with a
+capturing stub provider: nothing captured may contain a raw cell value, an original column name, a label value, a
+data time stamp or the file name), `tests/test_d_hybrid_chat.py` (the same for a multi-step chat turn whose question
+and history are seeded with raw values). "Rounded" means rounded: no random noise is added.

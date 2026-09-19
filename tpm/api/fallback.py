@@ -58,7 +58,9 @@ def normalize_chat_result(res: Any) -> dict[str, Any]:
     source = d.get("source") or "llm"
     route = d.get("route") or ("none" if source == "template" else "external" if source.startswith("llm-external") else "local")
     model = d.get("model") or (source.split(":", 1)[1] if ":" in source else "")
-    return {"text": text, "source": source, "route": route, "model": model, "evidence_ids": list(ev), "ledger_id": d.get("ledger_id"), "data": data or None, "followups": list(d.get("suggested_followups") or []), "confidence": d.get("confidence")}
+    return {"text": text, "source": source, "route": route, "model": model, "evidence_ids": list(ev), "ledger_id": d.get("ledger_id"), "data": data or None, "followups": list(d.get("suggested_followups") or []), "confidence": d.get("confidence"),
+            # which workspace objects the answer looked at (shown under "Show technical analyses"); names and ids only, no contents
+            "tool_trace": [{k: st.get(k) for k in ("step", "tool", "args", "ok", "ms", "thought") if st.get(k) is not None} for st in (d.get("tool_trace") or []) if isinstance(st, dict)][:24]}
 
 
 def _find_ids(text: str) -> list[str]:

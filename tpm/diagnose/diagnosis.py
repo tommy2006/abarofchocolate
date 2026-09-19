@@ -248,23 +248,20 @@ def _clean_prose(x: Any) -> str:
     return str(x).strip()
 
 
-def add_llm_narrative(ws, settings, diag: Diagnosis, language: str = "en") -> Diagnosis:
-    """Optional LLM narrative layered on the template (never replaces the steps). The model answers in JSON
-    ({summary, steps, uncertainty}); only its prose is kept -- raw JSON never reaches the operator."""
-    try:
-        from ..llm import complete
-    except Exception:
-        return diag
+def narrative_payload(ws, diag: Diagnosis) -> dict[str, Any]:
+    """What the model gets for one diagnosis: the diagnosis itself and the statements of the evidence it cites."""
     evidence = []
     for eid in diag.evidence_ids[:12]:
         ev = ws.evidence.get(eid)
         if ev is not None:
             evidence.append({"id": ev.id, "statement": ev.statement, "n_samples": ev.n_samples})
-    payload = {"diagnosis": diag.model_dump(exclude={"critique"}), "evidence": evidence}
-    try:
-        res = complete("diagnosis_narrative", payload, purpose=f"explain {diag.id}", ws=ws, settings=settings, language=language)
-    except Exception:
-        return diag
+    return {"diagnosis": diag.model_dump(exclude={"critique"}), "evidence": evidence}
+
+
+def merge_narrative(diag: Diagnosis, res: Any) -> bool:
+    """Layer the prose of a diagnosis_narrative reply on the template; True when something was added. The model
+    answers in JSON ({summary, steps, uncertainty}); only its prose is kept -- raw JSON never reaches the operator.
+    Touches nothing but `diag`, so a worker thread may call it on its own copy."""
     if res is not None and res.ok and (res.data or (res.text and res.text.strip())):
         data = res.data if isinstance(res.data, dict) else _extract_json(res.text or "")
         model_summary = ""
@@ -278,7 +275,7 @@ def add_llm_narrative(ws, settings, diag: Diagnosis, language: str = "en") -> Di
             txt = (res.text or "").strip()
             model_summary = "" if txt.startswith("{") else txt[:1500]
         if not (model_summary or model_steps):
-            return diag
+            return False
         if model_summary:
             diag.summary = diag.summary + "\n\n" + model_summary[:1500]
         if model_steps:
@@ -287,5 +284,26 @@ def add_llm_narrative(ws, settings, diag: Diagnosis, language: str = "en") -> Di
             if u not in diag.uncertainty:
                 diag.uncertainty.append(u[:300])
         diag.narrative_source = f"{res.source}+template"
+        return True
+    return False
+
+
+def apply_narrative(ws, diag: Diagnosis, res: Any) -> Diagnosis:
+    """merge_narrative plus the decision-log record (main thread only: the log and the registries stay out of workers)."""
+    if merge_narrative(diag, res):
         ws.log.record(f"llm:{res.route}:{res.model}" if res.route in ("local", "external") else "system:diagnose", "narrative", "diagnosis", diag.id, {"source": res.source, "ledger_id": res.ledger_id}, diag.evidence_ids)
     return diag
+
+
+def add_llm_narrative(ws, settings, diag: Diagnosis, language: str = "en") -> Diagnosis:
+    """Optional LLM narrative layered on the template (never replaces the steps)."""
+    try:
+        from ..llm import complete
+    except Exception:
+        return diag
+    payload = narrative_payload(ws, diag)
+    try:
+        res = complete("diagnosis_narrative", payload, purpose=f"explain {diag.id}", ws=ws, settings=settings, language=language)
+    except Exception:
+        return diag
+    return apply_narrative(ws, diag, res)

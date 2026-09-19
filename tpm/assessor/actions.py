@@ -58,7 +58,7 @@ def _canon(aliases: list[str], catalog: list[Any]) -> list[str]:
 
 
 def parse_action(text: str, ws: Any = None, settings: Any = None, use_llm: bool = True) -> Optional[dict[str, Any]]:
-    """Template patterns first; optional local LLM (task 'assessor_chat') when nothing matches."""
+    """Template patterns first; optional LLM (task 'assessor_chat', routed by the profile) when nothing matches."""
     t = " " + re.sub(r"\s+", " ", text.strip().lower()) + " "
     catalog = load_catalog(ws) if ws is not None else []
     sigs = _canon(_sig_list(text), catalog) if catalog else _sig_list(text)
@@ -108,12 +108,12 @@ def parse_action(text: str, ws: Any = None, settings: Any = None, use_llm: bool 
         return normalize_action({"type": "add_more_like", "params": {"n_units": None, "unit": "unit"}, "confidence": 0.7, "source": "template"}, catalog)
     if sigs and re.search(r"\b(?:improve|better|worse|help|quality|useful|matter|important|need)\b", t) and re.search(r"\b(?:is|are|does|do|would|should)\b", t):
         return normalize_action({"type": "drop_signal", "params": {"signals": sigs}, "confidence": 0.5, "source": "template", "note": "interpreted as a question about the value of the signal"}, catalog)
-    # optional local LLM fallback
-    if use_llm and ws is not None and settings is not None and settings.route_for("assessor_chat") == "local":
+    # optional LLM fallback (local model, or the external one behind the egress guard when the profile routes it there)
+    if use_llm and ws is not None and settings is not None and settings.route_for("assessor_chat") in ("local", "external"):
         try:
             from ..llm import complete
 
-            res = complete("assessor_chat", {"question": text, "action_types": ACTION_TYPES, "signal_aliases": [s.alias for s in catalog][:200], "instruction": "Map the question onto ONE structured action or {\"type\": null}."}, purpose="parse assessor question into a structured action", ws=ws, settings=settings, schema=ACTION_SCHEMA)
+            res = complete("assessor_chat", {"question": text, "action_types": ACTION_TYPES, "signal_aliases": [s.alias for s in catalog][:200], "instructions": "Map the question onto ONE structured action or {\"type\": null}."}, purpose="parse assessor question into a structured action", ws=ws, settings=settings, schema=ACTION_SCHEMA)
             if res.ok:
                 data = res.data if isinstance(res.data, dict) else _json_in(res.text)
                 if isinstance(data, dict) and isinstance(data.get("action"), dict):

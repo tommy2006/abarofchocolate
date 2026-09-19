@@ -1,14 +1,20 @@
-"""Local tool-agent for the operator "why" chat and the assessor chat.
+"""Tool-agent for the operator "why" chat and the assessor chat.
 
-Model-agnostic JSON-action loop (no native tool calling): the local model answers with one JSON object per
+Model-agnostic JSON-action loop (no native tool calling): the model answers with one JSON object per
 turn, either {"thought", "action": "<tool>", "args"} or {"thought", "action": "final", "answer", "citations",
 ...}. Every tool runs locally (DuckDB over dataset.parquet, workspace artifacts, the local index) and is
-logged. When no local model is available the chat still answers deterministically from the workspace
+logged. When no model is available the chat still answers deterministically from the workspace
 objects and their evidence, so the UI always gets something useful.
+
+The mode is decided once per turn. Local (default): the local model may look at raw data through the tools.
+External (the task routes external and the route is usable): the model gets no sql tool, stats / series return
+aggregates over enough rows only, the loaded context and every tool result pass the egress guard before they are
+put into a message, and the aliases in the final answer get their local names back on this machine. When the
+external model fails mid-turn the turn is restarted on the local agent, then answered deterministically.
 
     from tpm.llm.agent import chat
     out = chat(ws, settings, "Why was FLAG-000001 raised?", context={"flag_id": "FLAG-000001"})
-    out -> {"answer", "citations", "tool_trace", "source", "suggested_followups", "series", "turn_id"}
+    out -> {"answer", "citations", "tool_trace", "source", "route", "external_calls", "suggested_followups", "series", "turn_id"}
 """
 from __future__ import annotations
 
@@ -21,6 +27,8 @@ from typing import Any, Optional
 
 from ..config import Settings, get_settings
 from ..contracts import now_iso
+from . import guard as guard_mod
+from . import ledger as ledger_mod
 from . import prompts as prompts_mod
 from . import router as router_mod
 from .embeddings import LocalIndex
@@ -28,6 +36,8 @@ from .embeddings import LocalIndex
 SQL_LIMIT = 200
 TOOL_RESULT_CHARS = 4000
 CONTEXT_CHARS = 7000
+EXTERNAL_EXCLUDED_TOOLS = {"sql"}  # a free-form query can return raw rows: never offered to an external model
+EXTERNAL_STATS_KEYS = ["n", "mean", "std", "q05", "median", "q95", "n_null", "row_start", "row_end"]  # no min / max: single readings
 
 TOOL_SPECS: list[dict[str, str]] = [
     {"name": "sql", "args": "query: str", "description": "read-only SELECT over views `dataset` (raw rows incl. __group__) and `scores` (per-row anomaly scores). A LIMIT is enforced. Use aggregates (avg, stddev, quantile_cont, count) rather than pulling rows."},
@@ -45,6 +55,20 @@ TOOL_SPECS: list[dict[str, str]] = [
 _FORBIDDEN_SQL = re.compile(r"\b(insert|update|delete|drop|create|alter|attach|detach|copy|export|import|pragma|install|load|call|set|reset|truncate|merge|grant|vacuum|checkpoint|force)\b", re.I)
 _FILE_SQL = re.compile(r"\b(read_(csv|parquet|json|text|blob)\w*|glob|parquet_scan|csv_scan|sniff_csv|read_ndjson\w*)\s*\(", re.I)
 _ID_RE = re.compile(r"\b(FLAG-\d{3,}|DIAG-\d{3,}|EV-\d{3,}|CHK-\d{3,}|INF-\d{3,}|RULE-\d{2,}|PATTERN-[A-Z0-9]+|S\d{2,4})\b")
+_ALIAS_TOKEN_RE = re.compile(r"\bS\d{2,5}\b")
+
+
+def tool_specs(settings: Settings, external: bool = False) -> list[dict[str, str]]:
+    """Tools offered to the model. An external model gets no sql, and stats / series described as the reductions they are."""
+    if not external:
+        return TOOL_SPECS
+    g = settings.guard
+    text = {
+        "stats": {"description": f"aggregates (n, mean, std, q05, median, q95, n_null) of one signal, optionally restricted to a group and/or a row range; needs at least {g.min_aggregate_n} values."},
+        "series": {"args": "signal: str, row_start: int, row_end: int", "description": f"coarse shape of one signal over a row range: at most {g.max_series_points} bucket means (each over at least {g.min_aggregate_n} rows), also given in standard deviations from the mean of the range."},
+    }
+    return [{**t, **text.get(t["name"], {})} for t in TOOL_SPECS if t["name"] not in EXTERNAL_EXCLUDED_TOOLS]
+
 
 _T = {
     "en": {"flag": "Flag", "diagnosis": "Diagnosis", "signal": "Signal", "batch": "Batch", "evidence": "Evidence", "severity": "severity", "confidence": "confidence", "top_signals": "Signals contributing most", "steps": "Explanation steps", "uncertainty": "Uncertainty", "trust": "Trust verdict", "checks": "Data-quality checks", "related": "Related findings for your question", "nothing": "I could not link your question to a specific flag, diagnosis or signal. Here is what the run contains and the closest findings.", "no_model": "No local language model is available, so this answer was composed by code from the workspace objects and their evidence (source: template).", "contains": "This run contains", "flags": "flags", "diagnoses": "diagnoses", "checks_n": "checks", "signals_n": "signals", "assessor": "Assessor evaluation", "assessor_missing": "The assessor module is not available in this build, so the action could not be evaluated. Nothing was applied.", "rows": "rows"},
@@ -74,20 +98,26 @@ def _dump(obj: Any) -> Any:
     return obj
 
 
+def _finite(col: str) -> str:
+    """SQL expression for a column's finite values: stddev_samp raises on NaN / inf, so they count as missing."""
+    return f'(CASE WHEN isfinite(TRY_CAST("{col}" AS DOUBLE)) THEN "{col}" END)'
+
+
 # ----------------------------------------------------------------------------------------------
 # Toolbox: every tool is local, bounded and logged
 # ----------------------------------------------------------------------------------------------
 
 
 class Toolbox:
-    def __init__(self, ws: Any, settings: Settings, index: Optional[LocalIndex] = None):
+    def __init__(self, ws: Any, settings: Settings, index: Optional[LocalIndex] = None, external: bool = False):
         self.ws = ws
         self.settings = settings
         self._index = index
         self._schema = None
         self._signals: Optional[dict[str, Any]] = None
         self.last_series: Optional[dict[str, Any]] = None
-        self.names = [t["name"] for t in TOOL_SPECS]
+        self.external = bool(external)  # results feed an external model: no sql, aggregates over enough rows only
+        self.names = [t["name"] for t in tool_specs(settings, self.external)]
 
     # ---- helpers ----
     @property
@@ -116,9 +146,26 @@ class Toolbox:
             self._index = LocalIndex(self.ws, self.settings)
         return self._index
 
+    def external_view(self) -> "Toolbox":
+        """The same workspace through the tools an external model may use (shares what is already loaded)."""
+        tb = Toolbox(self.ws, self.settings, self._index, external=True)
+        tb._schema, tb._signals = self._schema, self._signals
+        return tb
+
     def dataset_columns(self) -> list[str]:
         sch = self.schema
         return list(sch.columns) if sch else []
+
+    def _signal_column(self, signal: str) -> tuple[Optional[str], Optional[str]]:
+        """resolve_column for stats / series. For an external model only catalogued signals resolve: label, id and time
+        columns are not summarised for it."""
+        col, alias = self.resolve_column(signal)
+        if self.external and col:
+            sch = self.schema
+            known = set(sch.signal_alias.values()) if sch else set()
+            if not (alias in known or alias in self.signals):
+                return None, None
+        return col, alias
 
     def resolve_column(self, signal: str) -> tuple[Optional[str], Optional[str]]:
         """alias or original name -> (parquet column, alias)."""
@@ -207,10 +254,10 @@ class Toolbox:
     def tool_stats(self, signal: str = "", group_id: Optional[str] = None, row_start: Optional[int] = None, row_end: Optional[int] = None, **_: Any) -> dict[str, Any]:
         if self.ws is None or not self.ws.exists("dataset"):
             return {"error": "no dataset in this workspace"}
-        col, alias = self.resolve_column(signal)
+        col, alias = self._signal_column(signal)
         if not col:
             return {"error": f"unknown signal '{signal}'"}
-        v = f'(CASE WHEN isfinite(TRY_CAST("{col}" AS DOUBLE)) THEN "{col}" END)'  # stddev_samp raises on NaN / inf; count them as missing
+        v = _finite(col)
         q = f"SELECT count({v}) AS n, avg({v}) AS mean, stddev_samp({v}) AS std, min({v}) AS min, quantile_cont({v}, 0.05) AS q05, median({v}) AS median, quantile_cont({v}, 0.95) AS q95, max({v}) AS max, count(*) - count({v}) AS n_null, min(__rn) AS row_start, max(__rn) AS row_end FROM {self._base_sql()}"
         conds, params = [], []
         gcol = self._group_col()
@@ -228,13 +275,20 @@ class Toolbox:
         row = self.ws.duckdb().execute(q, params).fetchone()
         keys = ["n", "mean", "std", "min", "q05", "median", "q95", "max", "n_null", "row_start", "row_end"]
         out = {k: _dump(v) for k, v in zip(keys, row)}
+        if self.external:
+            min_n = int(self.settings.guard.min_aggregate_n)
+            if int(out.get("n") or 0) < min_n:
+                return {"error": f"window too short to summarise: {int(out.get('n') or 0)} values, at least {min_n} are needed"}
+            out = {k: out[k] for k in EXTERNAL_STATS_KEYS}
+            out.update({"signal": alias, "group_id": group_id, "n_samples": out["n"]})
+            return out
         out.update({"signal": alias or signal, "column": col, "group_id": group_id})
         return out
 
     def tool_series(self, signal: str = "", row_start: int = 0, row_end: Optional[int] = None, max_points: int = 400, **_: Any) -> dict[str, Any]:
         if self.ws is None or not self.ws.exists("dataset"):
             return {"error": "no dataset in this workspace"}
-        col, alias = self.resolve_column(signal)
+        col, alias = self._signal_column(signal)
         if not col:
             return {"error": f"unknown signal '{signal}'"}
         con = self.ws.duckdb()
@@ -252,7 +306,34 @@ class Toolbox:
         pts = [[int(r[0]), _dump(r[1]), _dump(r[2]), _dump(r[3])] for r in rows]
         out = {"signal": alias or signal, "column": col, "row_start": a, "row_end": b, "n_raw": n, "bucket": bucket, "columns": ["row", "mean", "min", "max"], "points": pts, "local_only": True}
         self.last_series = out
+        if self.external:
+            return self._coarse_series(col, alias or signal, a, b)  # the full series above is for the UI only
         return {**out, "points": pts if len(pts) <= 60 else pts[:60], "note": f"{len(pts)} points computed; the UI receives the full series, the model sees the first 60"}
+
+    def _coarse_series(self, col: str, alias: str, a: int, b: int) -> dict[str, Any]:
+        """What an external model may see of a series: at most guard.max_series_points bucket means, each over at least
+        guard.min_aggregate_n values, and the same means in standard deviations from the mean of the range (3 significant
+        digits of a level such as 2700 would hide the shape)."""
+        g = self.settings.guard
+        min_n, max_points = max(1, int(g.min_aggregate_n)), max(1, int(g.max_series_points))
+        n = b - a + 1
+        bucket = max(min_n, int(math.ceil(n / max_points)))
+        v = f"CAST({_finite(col)} AS DOUBLE)"
+        q = f"SELECT min(__rn) AS row, avg({v}) AS mean, count({v}) AS n, sum({v}) AS s, sum({v} * {v}) AS ss FROM {self._base_sql()} WHERE __rn BETWEEN ? AND ? GROUP BY (__rn - ?) // ? ORDER BY row"
+        rows = self.ws.duckdb().execute(q, [a, b, a, bucket]).fetchall()
+        kept = [r for r in rows if int(r[2] or 0) >= min_n and r[1] is not None]
+        out: dict[str, Any] = {"signal": alias, "row_start": a, "row_end": b, "n_rows": n, "bucket_rows": bucket}
+        if not kept:
+            return {**out, "note": f"window too short to summarise: a bucket mean needs at least {min_n} values"}
+        out.update({"bucket_row_start": [int(r[0]) for r in kept], "bucket_mean": [_dump(float(r[1])) for r in kept]})
+        # mean and spread of the whole range from the bucket sums: one pass over the rows instead of two
+        n_all = sum(int(r[2] or 0) for r in rows)
+        mean = sum(float(r[3] or 0.0) for r in rows) / n_all
+        var = (sum(float(r[4] or 0.0) for r in rows) - n_all * mean * mean) / max(1, n_all - 1)
+        if var > 1e-12 * max(1.0, mean * mean):  # a constant signal has no spread to scale by (only rounding noise)
+            out["bucket_mean_in_std"] = [_dump((float(r[1]) - mean) / math.sqrt(var)) for r in kept]
+        out["note"] = f"{len(kept)} bucket means of {bucket} rows each" + (f"; {len(rows) - len(kept)} bucket(s) with fewer than {min_n} values left out" if len(rows) > len(kept) else "")
+        return out
 
     def tool_get_flag(self, id: str = "", **_: Any) -> dict[str, Any]:
         for f in self.ws.flags() if self.ws else []:
@@ -421,7 +502,7 @@ def load_context(ws: Any, settings: Settings, context: Optional[dict[str, Any]],
     return out
 
 
-def _context_text(loaded: dict[str, Any]) -> str:
+def _context_compact(loaded: dict[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     if loaded.get("flag"):
         f = loaded["flag"]
@@ -443,8 +524,80 @@ def _context_text(loaded: dict[str, Any]) -> str:
         compact["evidence"] = loaded["evidence"]
     if loaded.get("mentioned"):
         compact["mentioned"] = loaded["mentioned"]
-    text = json.dumps(compact, ensure_ascii=False, default=str)
+    return compact
+
+
+def _context_text(loaded: dict[str, Any]) -> str:
+    text = json.dumps(_context_compact(loaded), ensure_ascii=False, default=str)
     return text[:CONTEXT_CHARS]
+
+
+# ----------------------------------------------------------------------------------------------
+# external mode: what goes into a message passes the egress guard first; names come back locally
+# ----------------------------------------------------------------------------------------------
+
+
+def _guarded(key: str, obj: Any, ws: Any, settings: Settings) -> tuple[Any, Optional[str]]:
+    """One structured object (the loaded context, a tool result) as it may be shown to the external model: the guard's
+    sanitised version and None, or ({"withheld": true, "reason"}, reason) when the guard refuses it, so that the model can
+    continue without it. The reason is the guard's own text: it names paths and rules, never values."""
+    try:
+        g = guard_mod.check({key: _dump(obj)}, settings, ws=ws)
+        if g.allowed and key in g.sanitized_payload:
+            return g.sanitized_payload[key], None
+        reason = guard_mod.sanitize_text(g.reason, settings, ws=ws)[0][:300]
+    except Exception:
+        reason = "the egress guard could not check this result"
+    return {"withheld": True, "reason": reason}, reason
+
+
+def _external_sent(ws: Any) -> int:
+    """Calls of this run that went out to the external model (answered or failed), from the egress ledger."""
+    if ws is None:
+        return 0
+    try:
+        return len([r for r in ledger_mod.read(ws) if r.route == "external" and r.guard_result == "allowed"])
+    except Exception:
+        return 0
+
+
+def alias_labels(tb: Toolbox) -> dict[str, str]:
+    """alias -> the name the operator knows the signal by: the display name they gave it, else the dataset's column
+    name (only when the file had a header)."""
+    sch = tb.schema
+    named = bool(sch.had_header) if sch else True
+    out: dict[str, str] = {}
+    if sch and named:
+        out = {alias: orig for orig, alias in sch.signal_alias.items() if orig and orig != alias}
+    for s in tb.signals.values():
+        if s.display_name:
+            out[s.id] = str(s.display_name)
+        elif named and s.source_column and s.source_column != s.id:
+            out.setdefault(s.id, s.source_column)
+    return out
+
+
+def expand_aliases(text: str, labels: dict[str, str]) -> str:
+    """First mention of each alias gets its local name: "S05" -> "S05 (press_r)". Done on this machine after the external
+    model has answered; the names were never sent."""
+    seen: set[str] = set()
+
+    def repl(m: re.Match) -> str:
+        alias = m.group(0)
+        label = labels.get(alias)
+        if not label or alias in seen:
+            return alias
+        seen.add(alias)
+        return alias if text[m.end():].startswith(f" ({label})") else f"{alias} ({label})"
+
+    return _ALIAS_TOKEN_RE.sub(repl, text or "")
+
+
+def _collapse_aliases(text: str, labels: dict[str, str]) -> str:
+    """Undo expand_aliases in an earlier answer before it goes back to the external model as history."""
+    for alias, label in labels.items():
+        text = text.replace(f"{alias} ({label})", alias)
+    return text
 
 
 # ----------------------------------------------------------------------------------------------
@@ -585,39 +738,72 @@ def _is_placeholder_answer(answer: str) -> bool:
 
 
 def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any], tb: Toolbox, *, task: str = "why_chat", purpose: str = "operator chat", language: str = "en", history: Optional[list[dict[str, str]]] = None, max_steps: Optional[int] = None) -> Optional[dict[str, Any]]:
-    """Returns {"answer","citations","confidence","suggested_followups","tool_trace","model"} or None if the
-    local model is unavailable / never produced a final answer."""
+    """Returns {"answer","citations","confidence","suggested_followups","tool_trace","model","external_calls"} or None if
+    the local model is unavailable / never produced a final answer. The mode comes from the toolbox: with tb.external the
+    turn runs on the external model; a turn that model could not finish comes back with "incomplete" and
+    "external_error", and chat() restarts it on the local toolbox."""
+    external = bool(tb.external)
     max_steps = int(max_steps if max_steps is not None else settings.local_llm.max_tool_steps)
-    system = prompts_mod.render_template(
-        "agent.system.j2",
-        tools=TOOL_SPECS,
-        max_steps=max_steps,
-        dataset_columns=", ".join(tb.dataset_columns()[:60]) or "(no dataset)",
-        sql_limit=SQL_LIMIT,
-        context_text=_context_text(loaded),
-        language=(language or "en").lower(),
-        language_name=prompts_mod.language_name(language),
-        has_schema=False,
-        schema_json="null",
-        task=task,
-    )
+    common = dict(language=(language or "en").lower(), language_name=prompts_mod.language_name(language), has_schema=False, schema_json="null", task=task)
+    parts: list[dict[str, Any]] = []  # external mode: the sanitised objects the messages are built from (agent_chat checks them again)
+    labels: dict[str, str] = {}
+    call_cap = 0
+    if external:
+        call_cap = max(1, int(settings.external_llm.max_calls_per_chat_turn))
+        max_steps = min(max_steps, call_cap - 1)  # the last external call of a turn has to be the answer
+        labels = alias_labels(tb)
+        context_text = ""
+        compact = _context_compact(loaded)
+        if compact:
+            safe, _ = _guarded("context", compact, ws, settings)
+            parts.append({"context": safe})
+            context_text = json.dumps(safe, ensure_ascii=False, default=str)[:CONTEXT_CHARS]
+        system = prompts_mod.render_template("agent.system.external.j2", tools=tool_specs(settings, True), max_steps=max_steps, sig_digits=int(settings.guard.external_sig_digits), context_text=context_text, **common)
+    else:
+        system = prompts_mod.render_template("agent.system.j2", tools=TOOL_SPECS, max_steps=max_steps, dataset_columns=", ".join(tb.dataset_columns()[:60]) or "(no dataset)", sql_limit=SQL_LIMIT, context_text=_context_text(loaded), **common)
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for turn in (history or [])[-6:]:
         role = "assistant" if turn.get("role") == "assistant" else "user"
-        messages.append({"role": role, "content": str(turn.get("content", ""))[:2000]})
+        content = str(turn.get("content", ""))
+        messages.append({"role": role, "content": (_collapse_aliases(content, labels) if external else content)[:2000]})
     messages.append({"role": "user", "content": f"Question: {message}\nRespond with one JSON object (tool call or final)."})
     trace: list[dict[str, Any]] = []
     seen: set[str] = set()
     model = ""
     steps_used = 0
     placeholder_retried = False
+    ext_calls = 0
+    ext_error: Optional[str] = None
+    mark = {"route": "external"} if external else {}
+    sent_before = _external_sent(ws) if external else 0
+
+    def ext_used() -> int:
+        """External calls of this turn: the agent's own plus the ones a tool made through the router (assessor)."""
+        return max(ext_calls, _external_sent(ws) - sent_before) if external else 0
+
     for step in range(max_steps + 3):
-        res = router_mod.local_chat(messages, task=task, purpose=purpose, ws=ws, settings=settings, schema=prompts_mod.AGENT_STEP_SCHEMA, max_tokens=900, artifact_types=["chat", "tool_results"])
-        if not res.ok or not isinstance(res.data, dict):
-            trace.append({"step": step, "tool": None, "ok": False, "error": res.error or "no JSON from model"})
-            if res.route == "none":
-                return None
-            break
+        if external:
+            # agent_chat answers a call it may not send on the local model, with these external-mode messages: ask first,
+            # and treat anything that was not sent as the end of the external turn
+            ready, why = (False, f"external call cap of one chat turn reached ({call_cap}; external_llm.max_calls_per_chat_turn)") if ext_used() >= call_cap else router_mod.external_ready(task, ws, settings)
+            if not ready:
+                ext_error = why
+                break
+            res = router_mod.agent_chat(messages, task=task, purpose=purpose, ws=ws, settings=settings, schema=prompts_mod.AGENT_STEP_SCHEMA, max_tokens=900, payload_parts=parts, artifact_types=["chat", "context", "tool_result"])
+            if res.route != "external":
+                ext_error = "the call was stopped before sending (see the egress ledger)"
+                break
+            ext_calls += 1
+            if not res.ok or not isinstance(res.data, dict):
+                ext_error = res.error or "no JSON from the external model"
+                break
+        else:
+            res = router_mod.local_chat(messages, task=task, purpose=purpose, ws=ws, settings=settings, schema=prompts_mod.AGENT_STEP_SCHEMA, max_tokens=900, artifact_types=["chat", "tool_results"])
+            if not res.ok or not isinstance(res.data, dict):
+                trace.append({"step": step, "tool": None, "ok": False, "error": res.error or "no JSON from model"})
+                if res.route == "none":
+                    return None
+                break
         model = res.model or model
         data = res.data
         action = str(data.get("action") or "final").strip()
@@ -631,7 +817,7 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
                 messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
                 messages.append({"role": "user", "content": "That was a placeholder, not an answer. Write the actual answer for the operator in at least two full sentences, in plain language, citing evidence IDs. Respond with action \"final\"."})
                 continue
-            return {"answer": answer, "citations": [str(c) for c in (data.get("citations") or []) if c], "confidence": data.get("confidence"), "suggested_followups": [str(x) for x in (data.get("suggested_followups") or [])][:4], "tool_trace": trace, "model": model}
+            return {"answer": answer, "citations": [str(c) for c in (data.get("citations") or []) if c], "confidence": data.get("confidence"), "suggested_followups": [str(x) for x in (data.get("suggested_followups") or [])][:4], "tool_trace": trace, "model": model, "external": external, "external_calls": ext_used()}
         if steps_used >= max_steps:
             messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
             messages.append({"role": "user", "content": "No tool calls left. Respond now with action \"final\" and your best answer with citations."})
@@ -645,17 +831,27 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
             seen.add(key)
             result = tb.call(action, args)
         steps_used += 1
+        ok = "error" not in result
+        withheld: Optional[str] = None
+        if external:
+            result, withheld = _guarded("tool_result", result, ws, settings)
+            parts.append({"tool_result": result})
         ms = int((time.time() - t0) * 1000)
         result_text = json.dumps(result, ensure_ascii=False, default=str)
-        trace.append({"step": step, "tool": action, "args": args, "ok": "error" not in result, "ms": ms, "summary": result_text[:300], "thought": str(data.get("thought", ""))[:300]})
+        trace.append({"step": step, "tool": action, "args": args, "ok": ok, "ms": ms, "summary": result_text[:300], "thought": str(data.get("thought", ""))[:300], **mark, **({"withheld": True} if withheld else {})})
         try:
             if ws is not None:
-                ws.log.record("system:llm.agent", "tool_call", "chat_tool", action, {"args": args, "ok": "error" not in result, "ms": ms, "result_chars": len(result_text)})
+                ws.log.record("system:llm.agent", "tool_call", "chat_tool", action, {"args": args, "ok": ok, "ms": ms, "result_chars": len(result_text), **mark, **({"withheld": withheld} if withheld else {})})
         except Exception:
             pass
+        left = min(max_steps - steps_used, call_cap - ext_used() - 1) if external else max_steps - steps_used
         messages.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
-        messages.append({"role": "user", "content": f"Tool result for {action}: {result_text[:TOOL_RESULT_CHARS]}\n({max_steps - steps_used} tool calls left.) Continue with another tool call or finish with action \"final\"."})
-    return {"answer": "", "citations": [], "confidence": None, "suggested_followups": [], "tool_trace": trace, "model": model, "incomplete": True}
+        messages.append({"role": "user", "content": f"Tool result for {action}: {result_text[:TOOL_RESULT_CHARS]}\n({left} tool calls left.) " + ("Respond now with action \"final\" and your best answer with citations." if external and left <= 0 else "Continue with another tool call or finish with action \"final\".")})
+    out = {"answer": "", "citations": [], "confidence": None, "suggested_followups": [], "tool_trace": trace, "model": model, "incomplete": True, "external": external, "external_calls": ext_used()}
+    if external:
+        out["external_error"] = ext_error or "the external model did not reach a final answer"
+        trace.append({"step": len(trace), "tool": None, "ok": False, "error": out["external_error"], **mark})
+    return out
 
 
 # ----------------------------------------------------------------------------------------------
@@ -675,15 +871,37 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
 
     result: Optional[dict[str, Any]] = None
     source = "template"
-    if use_model and settings.route_for(task) in ("local", "external"):
+    route = "none"
+    external_calls = 0
+    ext_trace: list[dict[str, Any]] = []
+    etb: Optional[Toolbox] = None
+
+    def attempt(toolbox: Toolbox) -> Optional[dict[str, Any]]:
         try:
-            result = run_agent(ws, settings, message, loaded, tb, task=task, purpose=f"{task}: {message[:80]}", language=language, history=history, max_steps=max_steps)
+            return run_agent(ws, settings, message, loaded, toolbox, task=task, purpose=f"{task}: {message[:80]}", language=language, history=history, max_steps=max_steps)
         except Exception as e:
-            result = {"answer": "", "citations": [], "tool_trace": [{"error": str(e)}], "model": "", "incomplete": True}
-    trace = (result or {}).get("tool_trace", [])
+            return {"answer": "", "citations": [], "tool_trace": [{"error": str(e)}], "model": "", "incomplete": True}
+
+    if use_model and settings.route_for(task) in ("local", "external"):
+        # external or local is decided once per turn; an external turn that does not end in an answer (provider error,
+        # budget, call cap) is restarted on the local agent, and only then answered by code
+        if _external_turn(task, ws, settings):
+            etb = tb.external_view()
+            result = attempt(etb)
+            external_calls = int((result or {}).get("external_calls") or 0)
+            if not (result and result.get("answer") and not result.get("incomplete")):
+                ext_trace = list((result or {}).get("tool_trace", []))
+                result = attempt(tb)
+        else:
+            result = attempt(tb)
+    trace = ext_trace + list((result or {}).get("tool_trace", []))
     if result and result.get("answer") and not result.get("incomplete"):
-        source = f"llm-local:{result.get('model') or settings.local_llm.model}"
-        answer = result["answer"]
+        if result.get("external"):
+            route, source = "external", f"llm-external:{result.get('model') or settings.external_model_for(task)}"
+            answer = expand_aliases(result["answer"], alias_labels(tb))  # names come back here; they were never sent
+        else:
+            route, source = "local", f"llm-local:{result.get('model') or settings.local_llm.model}"
+            answer = result["answer"]
         citations = _known_ids(ws, result.get("citations", []), loaded)
         followups = result.get("suggested_followups") or suggest_followups(loaded, language)
         confidence = result.get("confidence")
@@ -695,7 +913,9 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
         confidence = det["confidence"]
         if result and result.get("incomplete") and trace:
             answer = answer + "\n(The local model ran tools but did not finish; the summary above was composed by code.)"
-    series = tb.last_series
+        elif ext_trace:
+            answer = answer + "\n(The external model did not finish this turn; the summary above was composed by code.)"
+    series = tb.last_series or (etb.last_series if etb is not None else None)
     if series is None and loaded.get("flag") and ws is not None and ws.exists("dataset"):
         f = loaded["flag"]
         top = (f.get("signals_ranked") or [{}])[0].get("signal")
@@ -714,18 +934,31 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
         "confidence": confidence,
         "tool_trace": trace,
         "source": source,
+        "route": route,
+        "external_calls": external_calls,
         "suggested_followups": followups,
         "series": series,
         "context": loaded.get("context"),
         "latency_ms": int((time.time() - t_start) * 1000),
     }
-    _persist(ws, {"turn_id": turn_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
+    _persist(ws, {"turn_id": turn_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "route": route, "external_calls": external_calls, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
     try:
         if ws is not None:
-            ws.log.record(actor_str, "chat", "chat", turn_id, {"task": task, "question": message[:500], "source": source, "n_tools": len(trace), "context": loaded.get("context")}, evidence_ids=[c for c in citations if c.startswith("EV-")])
+            ws.log.record(actor_str, "chat", "chat", turn_id, {"task": task, "question": message[:500], "source": source, "route": route, "external_calls": external_calls, "n_tools": len(trace), "context": loaded.get("context")}, evidence_ids=[c for c in citations if c.startswith("EV-")])
     except Exception:
         pass
     return out
+
+
+def _external_turn(task: str, ws: Any, settings: Settings) -> bool:
+    """Does this turn run on the external model? The task must route external and the route must be usable right now
+    (profile, allowed model, endpoint, API key, run budget). no-egress never gets past the first test."""
+    if settings.route_for(task) != "external":
+        return False
+    try:
+        return bool(router_mod.external_ready(task, ws, settings)[0])
+    except Exception:
+        return False
 
 
 def _known_ids(ws: Any, ids: list[str], loaded: dict[str, Any]) -> list[str]:

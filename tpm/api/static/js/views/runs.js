@@ -3,6 +3,7 @@
    sent, speed, time remaining and Cancel, then hands over to the stage progress. A file given by path is read
    in place and the screen says so. The upload lives at module level, so it survives a visit to another view. */
 import { state, t, el, clear, api, runApi, errText, toast, bus, fmt, st, section, confirmDialog, viewHead, empty, roleAllows, flash } from '../core.js';
+import { summaryCard, bt } from '../brief.js';
 
 const STAGES = ['ingest', 'profile', 'quality', 'detect', 'diagnose', 'assess', 'report'];
 const RECENT_RUNS = 5;
@@ -146,6 +147,18 @@ export async function render(main) {
   view.append(viewHead('0', t('nav.runs')));
   const jobHost = el('div', { class: 'upload-host', hidden: true });
   view.append(jobHost);
+  // the selected run in short (is the data usable, was anything wrong, what to look at first), once its analysis has ended
+  const ovHost = el('div', { class: 'overview-host' });
+  view.append(ovHost);
+  let ovFor = null;
+  const paintOverview = () => {
+    const s = state.runStatus;
+    const ended = !!(state.run && s && (s.state === 'done' || s.state === 'failed'));
+    const key = ended ? `${state.run}:${s.state}:${state.lang}` : null;
+    if (key === ovFor) return;
+    ovFor = key; clear(ovHost);
+    if (ended) ovHost.append(el('h2', { class: 'brief-top-title', text: bt('brief.overviewTitle', { run: state.run }) }), summaryCard('overview'));
+  };
   const grid = el('div', { class: 'cols cols-side' });
   view.append(grid);
   const left = el('div', { class: 'stack' });
@@ -297,6 +310,7 @@ export async function render(main) {
   const paintJob = () => {
     const active = !!job;
     jobHost.hidden = !active;
+    ovHost.hidden = active;
     grid.hidden = active;
     progress.root.hidden = active || !!progress.root.dataset.hiddenByRole;
     stream.root.hidden = active || !!stream.root.dataset.hiddenByRole;
@@ -306,13 +320,14 @@ export async function render(main) {
   jobListeners.add(paintJob);
 
   await refreshRuns();
+  paintOverview();
   renderProgress(state.runStatus);
   renderStream();
   paintJob();
   if (handoverRun && handoverRun === state.run) { handoverRun = null; flash(progress.root); }
   const offs = [
-    bus.on('status', (s) => { renderProgress(s); renderList(); }),
-    bus.on('run.changed', () => { renderList(); renderProgress(state.runStatus); renderStream(); }),
+    bus.on('status', (s) => { renderProgress(s); renderList(); paintOverview(); }),
+    bus.on('run.changed', () => { renderList(); renderProgress(state.runStatus); renderStream(); paintOverview(); }),
     bus.on('runs.loaded', renderList),
   ];
   view.cleanup = () => { offs.forEach((f) => f()); if (view._offBatch) view._offBatch(); jobListeners.delete(paintJob); clearInterval(tick); };

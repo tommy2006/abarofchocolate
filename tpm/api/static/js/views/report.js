@@ -7,6 +7,7 @@
    "Download PDF" / "Download PowerPoint" fetch `/report.pdf` / `/report.pptx` (generated on demand, cached per
    language on the server), show a generating state while the server works and the error text when it fails. */
 import { state, t, el, clear, runApi, fmt, section, viewHead, needRun, toast, errText, notice } from '../core.js';
+import { summaryCard, techDetails } from '../brief.js';
 
 const IFRAME_FIX = `
 .page { max-width: 100%; padding-left: 16px; padding-right: 16px; }
@@ -15,10 +16,14 @@ const POLL_MS = 3000;
 const POLL_MAX_MS = 6 * 60 * 1000;
 
 export async function render(main) {
-  const view = el('div', { class: 'view' });
-  main.append(view);
-  view.append(viewHead('8', t('nav.report')));
-  if (!state.run) { view.append(needRun()); return view; }
+  // page = title, plain summary, then ONE expander with everything this view rendered before (buttons, e-mail, preview)
+  const page = el('div', { class: 'view' });
+  main.append(page);
+  page.append(viewHead('8', t('nav.report')));
+  if (!state.run) { page.append(needRun()); return page; }
+  const tech = techDetails('report');
+  page.append(summaryCard('report'), tech);
+  const view = tech.body;
   const langs = state.settings ? state.settings.languages : ['en', 'fi', 'sv'];
   const sel = el('select', {}, langs.map((l) => el('option', { value: l, text: l.toUpperCase() })));
   sel.value = langs.includes(state.lang) ? state.lang : langs[0];
@@ -133,6 +138,7 @@ export async function render(main) {
   view.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('rep.language'), sel), openA, dlA, pdfBtn, pptxBtn, regen));
   view.append(exportStatus);
   const em = section(t('rep.email'));
+  em.root.dataset.briefSection = 'email';
   view.append(em.root);
   // the HTML report is always attached; PDF / PowerPoint are generated on the server when missing, so sending can take
   // a few seconds: the button is disabled meanwhile and the result (attached files or the mail server's answer) stays visible
@@ -168,6 +174,7 @@ export async function render(main) {
     el('div', { class: 'small muted', text: t('rep.emailHelp') }),
     emailStatus);
   const pv = section(t('rep.preview'));
+  pv.root.dataset.briefSection = 'preview';
   view.append(pv.root);
   pv.body.append(status, preview);
   view.cleanup = () => { seq++; stopPolling(); };

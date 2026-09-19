@@ -7,6 +7,7 @@
     python -m tpm email <run_id> --to a@b.c [--lang en] [--pdf] [--pptx]
     python -m tpm export <run_id> [--out DIR]
     python -m tpm verify-log <run_id>
+    python -m tpm bench-llm --run <run_id> [--profile hybrid] [--tasks a,b] [--n 3] [--routes local,external] [--dry-run]
     python -m tpm models | bakeoff | demo | doctor | list
 """
 from __future__ import annotations
@@ -469,6 +470,44 @@ def _ollama_tags(base_url: str, timeout: float = 2.5) -> Optional[list[dict[str,
     return None
 
 
+def _models_actions(args: argparse.Namespace, settings: Any) -> Optional[int]:
+    """`models --pull NAME` downloads a model with progress; `models --use NAME|auto` chooses the chat model.
+    With neither flag: prints which models the app uses and why, then returns None so the listing continues."""
+    from .llm import models as mm
+
+    if getattr(args, "pull", None):
+        try:
+            job = mm.PULLS.start(args.pull, settings)
+        except ValueError as e:
+            return _fail(str(e))
+        last = ""
+        while True:
+            j = mm.PULLS.get(job["id"]) or {}
+            line = f"  {j.get('status', '')} {j.get('percent', 0):5.1f}%" + (f"  ({j.get('completed_gb')} / {j.get('total_gb')} GB)" if j.get("total_gb") else "")
+            if line != last:
+                _p(line)
+                last = line
+            if j.get("state") not in ("queued", "running"):
+                break
+            time.sleep(1.0)
+        if j.get("state") != "done":
+            return _fail(j.get("error") or "the download did not finish")
+        _p(f"{args.pull} is ready. Use it with: python -m tpm models --use {args.pull}")
+        return 0
+    if getattr(args, "use", None):
+        kind = "embedding" if getattr(args, "embedding", False) else "chat"
+        try:
+            mm.select(kind, args.use, settings)
+        except ValueError as e:
+            return _fail(str(e))
+        _p(f"Saved: {kind} model = {args.use}")
+        return 0
+    chosen = mm.choose(settings)
+    _p(f"Chat model in use:      {chosen.get('chat') or 'none'}  ({chosen.get('chat_reason')})")
+    _p(f"Search model in use:    {chosen.get('embedding') or 'none'}  ({chosen.get('embedding_reason')})")
+    return None
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     settings = _settings(args)
     from .llm import available
@@ -476,6 +515,9 @@ def cmd_models(args: argparse.Namespace) -> int:
     avail = available()
     _p(f"Profile: {settings.profile}  (external allowed: {settings.active_profile.allow_external})")
     _p(f"LLM layer says: {json.dumps(avail, default=str)}")
+    rc = _models_actions(args, settings)
+    if rc is not None:
+        return rc
     tags = _ollama_tags(settings.local_llm.base_url)
     wanted = [settings.local_llm.model] + list(settings.local_llm.fallback_models) + [settings.local_llm.embedding_model]
     if tags is None:
@@ -495,6 +537,32 @@ def cmd_models(args: argparse.Namespace) -> int:
             _p(f"  {'[x]' if ok else '[ ]'} {m}" + ("" if ok else f"   ->  ollama pull {m}"))
     key = settings.external_llm.api_key
     _p(f"External model: {settings.external_llm.provider}/{settings.external_llm.model}  API key {'present' if key else 'NOT set'} ({settings.external_llm.api_key_env}); route allowed by profile: {settings.active_profile.allow_external}")
+    return 0
+
+
+def cmd_bench_llm(args: argparse.Namespace) -> int:
+    """Time the model tasks of a finished run on the local and on the external route (tpm.llm.bench)."""
+    settings = _settings(args)
+    ws = _open_ws(args.run, settings)
+    from .llm import bench
+
+    tasks = [t.strip() for t in (args.tasks or "").split(",") if t.strip()] or None
+    unknown = [t for t in (tasks or []) if t not in bench.BENCH_TASKS]
+    if unknown:
+        return _fail(f"unknown task(s): {', '.join(unknown)}. Valid: {', '.join(bench.BENCH_TASKS)}")
+    routes = tuple(r.strip() for r in (args.routes or "").split(",") if r.strip()) or bench.ROUTES
+    if any(r not in bench.ROUTES for r in routes):
+        return _fail(f"--routes expects local, external or both, got '{args.routes}'")
+    _p(f"Benchmark of run {ws.run_id}: profile {settings.profile}, {args.n} call(s) per task and route" + (" (dry run: stub providers, nothing is sent)" if args.dry_run else ""))
+    if "external" in routes and not settings.active_profile.allow_external:
+        _p(f"  profile '{settings.profile}' does not allow external models: only the local route is measured (use --profile hybrid)")
+    try:
+        result = bench.run_benchmark(ws, settings, tasks=tasks, n=args.n, routes=routes, chat=not args.no_chat, dry_run=args.dry_run, progress=_p)
+    finally:
+        ws.close()
+    _p("")
+    _p(bench.format_table(result))
+    _p(f"Written: {ws.dir / (bench.DRY_RUN_FILE if args.dry_run else bench.BENCH_FILE)}")
     return 0
 
 
@@ -571,6 +639,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         bad(f"Python {v.major}.{v.minor} is too old", "install Python 3.10+ and re-run run.ps1 / run.sh")
 
     mods = ["pandas", "numpy", "scipy", "sklearn", "lightgbm", "duckdb", "pyarrow", "fastapi", "uvicorn", "pydantic", "yaml", "jinja2", "httpx", "anthropic", "openpyxl", "psutil", "dotenv", "plotly", "ruptures", "multipart", "reportlab", "pptx"]
+    if getattr(sys, "frozen", False):
+        mods.remove("plotly")  # the installed Windows app ships plotly.min.js as a file instead of the Python package
     missing = []
     for m in mods:
         try:
@@ -619,12 +689,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if tags is None:
         warn(f"Ollama not reachable at {settings.local_llm.base_url} (pipeline runs in template mode without it)", f"install https://ollama.com/download then `ollama pull {settings.local_llm.model}`")
     else:
-        names = {m.get("name") for m in tags}
-        if settings.local_llm.model in names:
-            ok(f"Ollama reachable; configured model {settings.local_llm.model} is pulled")
+        try:
+            from .llm import models as _models
+
+            chosen = _models.choose(settings)
+        except Exception:
+            chosen = {"chat": settings.local_llm.model if settings.local_llm.model in {m.get("name") for m in tags} else None, "chat_reason": "", "embedding": None}
+        if chosen.get("chat"):
+            ok(f"Ollama reachable; chat model in use: {chosen['chat']} ({chosen.get('chat_reason', '')})")
         else:
-            fb = [m for m in settings.local_llm.fallback_models if m in names]
-            warn(f"Ollama reachable but {settings.local_llm.model} is not pulled" + (f" (fallbacks available: {', '.join(fb)})" if fb else ""), f"ollama pull {settings.local_llm.model}")
+            warn("Ollama reachable but no chat model is installed (explanations come from templates until one is)", f"`python -m tpm models --pull {settings.local_llm.model}`, or any model in the app: top bar > Local model")
+        if not chosen.get("embedding"):
+            warn("no embedding model installed (search falls back to word matching)", f"`python -m tpm models --pull {settings.local_llm.embedding_model}`")
 
     if (ROOT / ".env").exists():
         ok(".env present")
@@ -732,7 +808,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     mo = sub.add_parser("models", help="show local/external model availability")
     mo.add_argument("--profile", choices=["no-egress", "hybrid", "eu-hosted"])
+    mo.add_argument("--pull", metavar="NAME", help="download a model through the local Ollama, with progress (e.g. qwen3:4b)")
+    mo.add_argument("--use", metavar="NAME", help="use this installed model from now on ('auto' = best installed model for this machine)")
+    mo.add_argument("--embedding", action="store_true", help="with --use: choose the search (embedding) model instead of the chat model")
     mo.set_defaults(fn=cmd_models)
+
+    bl = sub.add_parser("bench-llm", help="time a finished run's model tasks on the local and the external route")
+    bl.add_argument("--run", required=True, metavar="RUN_ID", help="run id, or 'latest'")
+    bl.add_argument("--tasks", help="comma-separated subset: sensor_hypotheses,diagnosis_narrative,critique,report_narrative")
+    bl.add_argument("--n", type=int, default=3, help="calls per task and route (default 3)")
+    bl.add_argument("--routes", help="local,external (default both; external needs a profile that allows it)")
+    bl.add_argument("--no-chat", action="store_true", help="skip the chat question")
+    bl.add_argument("--dry-run", action="store_true", help="stub providers on a scratch copy of the run: nothing is sent, nothing is recorded in the run")
+    bl.add_argument("--profile", choices=["no-egress", "hybrid", "eu-hosted"])
+    bl.set_defaults(fn=cmd_bench_llm)
 
     bo = sub.add_parser("bakeoff", help="run the local-model bake-off script")
     bo.add_argument("extra", nargs="*")

@@ -302,13 +302,16 @@ class EgressRecord(BaseModel):
     artifact_types: list[str] = Field(default_factory=list)
     payload_bytes: int = 0
     payload_hash: str = ""
-    payload_preview: str = ""  # first 500 chars of what was sent (external only)
-    guard_result: str = "allowed"  # allowed | blocked | fallback | n/a
+    payload_preview: str = ""  # first 500 chars of the SANITISED payload that was sent (external only)
+    guard_result: str = "allowed"  # allowed | blocked | budget | fallback | n/a
     guard_reason: str = ""
     response_hash: str = ""
     latency_ms: Optional[int] = None
     ok: bool = True
     error: Optional[str] = None
+    input_tokens: int = 0  # provider-reported usage (external calls)
+    output_tokens: int = 0
+    sanitizer: dict[str, Any] = Field(default_factory=dict)  # what the guard changed before sending: counts + notes
 
 
 class HumanDecision(BaseModel):

@@ -4,6 +4,8 @@ import { state, t, el, clear, runApi, fmt, conf, infStatus, chip, section, table
 import { plot, purge, tokens, colorFor } from '../charts.js';
 import { openChat, signalContext } from '../chat.js';
 import { plainBox } from '../plain.js';
+import { renameBar, loadSignalNames } from '../rename.js';
+import { summaryCard, techDetails, techNested } from '../brief.js';
 
 const FB = {
   'und.kindMost': 'Most likely: {kind} ({pct})',
@@ -22,14 +24,20 @@ const tt = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || 
 const ROLES = ['continuous_measured', 'actuator_like', 'held_sampled', 'constant', 'derived_redundant', 'counter', 'timestamp', 'categorical', 'text', 'identifier', 'unknown'];
 
 export async function render(main, params = {}) {
-  const view = el('div', { class: 'view' });
-  main.append(view);
-  view.append(viewHead('1', t('nav.understanding')));
-  if (!state.run) { view.append(needRun()); return view; }
+  // page = title, plain summary, then ONE expander ("Show technical analyses") with everything this view rendered before
+  const page = el('div', { class: 'view' });
+  main.append(page);
+  page.append(viewHead('1', t('nav.understanding')));
+  if (!state.run) { page.append(needRun()); return page; }
+  const tech = techDetails('understanding');
+  page.append(summaryCard('understanding'), tech);
+  const view = tech.body;
   try { const pb = await plainBox('understanding'); if (pb) view.append(pb); } catch (e) { /* plain box is optional */ }
   const [und, sig, rel, dom, sch] = await Promise.all([runApi('/understanding'), runApi('/signals'), runApi('/relations'), runApi('/domain'), runApi('/schema')]);
   const signals = sig.ok ? sig.data.signals || [] : [];
   const byId = Object.fromEntries(signals.map((s) => [s.id, s]));
+  // renaming a signal is an everyday action ("call S44 'possibly broken'"): it sits above the technical part
+  const rb = renameBar(signals.map((s) => s.id)); if (rb) page.insertBefore(rb, tech);
   const U = und.data || {};
 
   // ---- summary + assumptions + uncertain + domain
@@ -60,6 +68,7 @@ export async function render(main, params = {}) {
 
   // ---- signal catalog
   const cat = section(t('und.catalog'), { right: el('span', { class: 'small muted', text: sch.ok && sch.data.n_rows ? `${fmt.int(sch.data.n_rows)} rows, ${signals.length} signals, ${sch.data.n_groups || 1} groups` : '' }) });
+  cat.root.dataset.briefSection = 'catalog';
   view.append(cat.root);
   if (!sig.ok || !sig.data.available) { cat.body.append(sig.unavailable ? unavailableNote(sig) : empty(t('common.notYet'))); }
   const grid = el('div', { class: 'cols cols-side' });
@@ -90,7 +99,7 @@ export async function render(main, params = {}) {
       const saved = el('span', { class: 'small muted' });
       const save = async () => {
         const r = await postDecision('signal', s.id, 'set_name', { note: `named by operator${s.source_column ? ' (file header: ' + s.source_column + ')' : ''}`, newValue: { display_name: nameIn.value.trim(), display_unit: unitIn.value.trim() } });
-        if (r.ok) { s.display_name = nameIn.value.trim() || null; s.display_unit = unitIn.value.trim() || null; tbl.update(signals); saved.textContent = tt('und.nameSaved'); }
+        if (r.ok) { loadSignalNames(); s.display_name = nameIn.value.trim() || null; s.display_unit = unitIn.value.trim() || null; tbl.update(signals); saved.textContent = tt('und.nameSaved'); }
       };
       detail.append(el('div', { class: 'box', style: { margin: '8px 0 10px', padding: '10px 12px' } },
         el('div', { class: 'small' }, el('b', { text: `${tt('und.header')}: ` }), s.source_column ? el('code', { text: s.source_column }) : el('span', { class: 'muted', text: tt('und.noHeader') })),
@@ -101,7 +110,11 @@ export async function render(main, params = {}) {
     }
     const fp = s.fingerprint || {};
     if (SP[s.id]) detail.append(el('p', { class: 'plain-sig', style: { margin: '6px 0 10px', padding: '10px 12px', borderLeft: '3px solid var(--accent, #2bb5a0)', background: 'var(--bg-2, rgba(127,127,127,.08))', borderRadius: '0 6px 6px 0', overflowWrap: 'anywhere' }, text: SP[s.id] }));
-    detail.append(kv([
+    // the measurements, hypotheses, the role correction and the evidence behind the sentence above
+    const nested = techNested();
+    detail.append(nested);
+    const T = nested.body;
+    T.append(kv([
       [t('und.role'), el('span', {}, (s.human_role_override || s.structural_role).replace(/_/g, ' '), ' ', conf(s.structural_confidence))],
       [t('und.instrument'), s.instrument_hypothesis ? el('span', {}, s.instrument_hypothesis, ' ', conf(s.instrument_confidence)) : null],
       [t('und.unit'), s.unit_operation_hypothesis ? el('span', {}, s.unit_operation_hypothesis, ' ', conf(s.unit_operation_confidence)) : null],
@@ -109,22 +122,22 @@ export async function render(main, params = {}) {
       [t('und.excluded'), s.excluded ? (s.excluded_reason || t('common.yes')) : null],
     ]));
     if (roleAllows('engineer') && Object.keys(fp).length) {
-      detail.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.fingerprint') }), el('div', { class: 'small', text: Object.entries(fp).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => `${k} ${typeof v === 'number' ? fmt.num(v, 3) : v}`).join('   ') }));
+      T.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.fingerprint') }), el('div', { class: 'small', text: Object.entries(fp).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => `${k} ${typeof v === 'number' ? fmt.num(v, 3) : v}`).join('   ') }));
     }
-    if ((s.related_signals || []).length) detail.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.related') }), el('div', { class: 'sigchips' }, s.related_signals.map((r) => chip(`${r.signal}  r ${fmt.num(r.r, 2)}  ${t('und.lag')} ${r.lag}`, 'click', { onClick: () => { if (byId[r.signal]) showSignal(byId[r.signal]); } }))));
+    if ((s.related_signals || []).length) T.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.related') }), el('div', { class: 'sigchips' }, s.related_signals.map((r) => chip(`${r.signal}  r ${fmt.num(r.r, 2)}  ${t('und.lag')} ${r.lag}`, 'click', { onClick: () => { if (byId[r.signal]) showSignal(byId[r.signal]); } }))));
     // hypotheses (inferences about this signal)
     const hb = el('div', {}, el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.hypothesesFor', { id: s.id }) }));
-    detail.append(hb);
+    T.append(hb);
     const ir = await runApi('/inferences', { params: { subject: s.id } });
     for (const inf of ir.ok ? ir.data.items || [] : []) hb.append(hypRow(inf));
     // role override
     const sel = el('select', {}, ROLES.map((r) => el('option', { value: r, text: r.replace(/_/g, ' ') })));
     sel.value = s.human_role_override || s.structural_role;
     const note = el('input', { type: 'text', placeholder: t('common.note'), style: { flex: 1 } });
-    detail.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.roleOverride') }), el('div', { class: 'row' }, sel, note, el('button', { class: 'btn btn-sm btn-override', type: 'button', onClick: async () => { const r = await postDecision('signal', s.id, 'set_role', { note: note.value, newValue: { role: sel.value } }); if (r.ok) { s.human_role_override = sel.value; tbl.update(signals); showSignal(s); } } }, t('common.save'))), el('div', { class: 'hint', text: t('und.roleOverrideHelp') }));
+    T.append(el('h4', { class: 'small muted', style: { marginTop: '12px' }, text: t('und.roleOverride') }), el('div', { class: 'row' }, sel, note, el('button', { class: 'btn btn-sm btn-override', type: 'button', onClick: async () => { const r = await postDecision('signal', s.id, 'set_role', { note: note.value, newValue: { role: sel.value } }); if (r.ok) { s.human_role_override = sel.value; tbl.update(signals); showSignal(s); } } }, t('common.save'))), el('div', { class: 'hint', text: t('und.roleOverrideHelp') }));
     // evidence
     const evBox = el('div', { style: { marginTop: '12px' } }, el('h4', { class: 'small muted', text: t('common.evidence') }));
-    detail.append(evBox);
+    T.append(evBox);
     const evs = await fetchEvidence(s.evidence_ids || []);
     evBox.append(evidenceList(evs));
   }

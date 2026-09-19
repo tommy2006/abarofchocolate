@@ -81,7 +81,7 @@ if [ "$OLLAMA_OK" = "1" ]; then
     if [ "$PULL" = "1" ]; then echo "Pulling $MODEL (about 6 GB)..."; ollama pull "$MODEL" || true; fi
   fi
 else
-  echo "Ollama not found: the app runs fully in template mode (no model-written text). Optional: install https://ollama.com/download and run 'ollama pull $MODEL'."
+  echo "Ollama not found: the app runs fully in template mode (no model-written text). Optional: install https://ollama.com/download; models can then be chosen and downloaded in the app (top bar > Local model)."
 fi
 
 # 5) doctor / demo / serve

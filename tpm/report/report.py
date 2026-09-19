@@ -711,13 +711,25 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     elif llm_state == "ready":
         llm_state = "none"
 
-    return {
+    context = {
         "t": t, "lang": lang, "lang_name": t("lang_name"), "languages": available_languages(), "generated_at": _ts(now_iso()), "run_id": ws.run_id, "meta": meta, "status": status, "source_name": Path(str(meta.get("source_path") or status.get("source_path") or "")).name or t("unknown"), "source_path": meta.get("source_path") or status.get("source_path") or "",
         "stages": stages, "overview": overview, "schema": schema, "dataset": dataset, "domain_items": domain_items, "signals": _signal_rows(signals, evidence, inferences, t, explain), "n_signals_total": len(signals), "relations_count": (len(relations.get("pairs") or []) if isinstance(relations, dict) else (len(relations) if isinstance(relations, list) else 0)),
         "quality": quality, "detect": detect, "suspicious": suspicious, "diagnoses": diag_rows, "n_diag_total": len(diags), "human": human, "log": log, "dataflow": dataflow, "evaluation": eval_ctx, "assessor": assess_ctx, "llm": llm, "llm_state": llm_state, "llm_payload": llm_payload, "has_plain_evidence": explain is not None,
         "caps": {"flags": (len(flag_rows), len(sustained)), "diagnoses": (len(diag_rows), len(diags)), "untrusted": (min(len(untrusted), MAX_UNTRUSTED), len(untrusted))},
         "fmt": {"num": _num, "pct": _pct, "short": _short, "ts": _ts},
     }
+    # Signals a person renamed read "possibly broken (S44)" in every sentence of the report (HTML, PDF, deck);
+    # ids, anchors and the payload for the model keep the bare alias.
+    from ..naming import expand, operator_names
+
+    names = operator_names(ws)
+    if names:
+        keep = {"t", "fmt", "llm_payload", "meta"}
+        context = {k: (v if k in keep else expand(v, names)) for k, v in context.items()}
+        for row in context.get("signals") or []:
+            if isinstance(row, dict) and row.get("id") in names:
+                row["display_name"] = names[row["id"]]
+    return context
 
 
 # ----------------------------------------------------------------------------- model-written summary

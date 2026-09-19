@@ -78,12 +78,12 @@ if ($ollamaOk) {
     try { $tags = (Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -UseBasicParsing -TimeoutSec 3).Content; if ($tags -match [regex]::Escape($model)) { $have = $true } } catch {}
     if ($have) { Write-Host "Ollama: local model $model is available." -ForegroundColor Green }
     else {
-        Write-Host "Ollama is installed but the local model is not pulled. To enable model-written explanations run:" -ForegroundColor Yellow
-        Write-Host "    ollama pull $model" -ForegroundColor Yellow
+        Write-Host "Ollama is installed; the default model $model is not pulled. The app uses any other chat model that is installed." -ForegroundColor Yellow
+        Write-Host "    Choose or download a model in the app (top bar > Local model), or run: ollama pull $model" -ForegroundColor Yellow
         if ($PullModels) { Write-Host "Pulling $model (about 6 GB)..."; & ollama pull $model }
     }
 } else {
-    Write-Host "Ollama not found: the app runs fully in template mode (no model-written text). Optional: install https://ollama.com/download and run 'ollama pull $model'." -ForegroundColor DarkYellow
+    Write-Host "Ollama not found: the app runs fully in template mode (no model-written text). Optional: the app can install Ollama and download models for you (top bar > Local model)." -ForegroundColor DarkYellow
 }
 
 # 5) doctor / demo / serve

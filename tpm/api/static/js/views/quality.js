@@ -1,16 +1,24 @@
 /* View 2: data quality — trust banner, trust by batch, checks with rule traceability, rule composer.
    ?batch=B00008 selects the batch and lists its checks; ?check=CHK-000029 highlights one; ?rule=RULE-001
    scrolls to the rule. */
-import { state, t, el, clear, runApi, fmt, conf, st, chip, section, table, viewHead, needRun, empty, evidenceButton, toast, errText, hiddenHint, actorName, actorRole, unavailableNote, bus, linkifyRefs, cleanText, refLink, refChips, rowsLink, sev, sevWords, confWords, addPlainBox, flash, navigate } from '../core.js';
+import { state, t, el, clear, runApi, cachedRunApi, fmt, conf, st, chip, section, table, viewHead, needRun, empty, evidenceButton, toast, errText, hiddenHint, actorName, actorRole, unavailableNote, bus, linkifyRefs, cleanText, refLink, refChips, rowsLink, sev, sevWords, confWords, addPlainBox, flash, navigate, checkCard } from '../core.js';
 import { openChat, flagContext } from '../chat.js';
+import { summaryCard, techDetails, techNested, itemBrief, itemBriefLocal, bt } from '../brief.js';
 
 export async function render(main, params = {}) {
-  const view = el('div', { class: 'view' });
-  main.append(view);
-  view.append(viewHead('2', t('nav.quality')));
-  if (!state.run) { view.append(needRun()); return view; }
+  // page = title, plain summary, then ONE expander ("Show technical analyses") with everything this view rendered before
+  const page = el('div', { class: 'view' });
+  main.append(page);
+  page.append(viewHead('2', t('nav.quality')));
+  if (!state.run) { page.append(needRun()); return page; }
+  const tech = techDetails('quality');
+  page.append(summaryCard('quality'), tech);
+  const view = tech.body;
   await addPlainBox(view, 'quality');
-  const [tr, batches] = await Promise.all([runApi('/trust'), runApi('/batches')]);
+  const [tr, batches, sg] = await Promise.all([runApi('/trust'), runApi('/batches'), cachedRunApi('signals', '/signals')]);
+  const sigList = sg.ok ? sg.data.signals || [] : [];
+  const sigName = (id) => { const x = sigList.find((y) => y.id === id); const n = x && (x.display_name || x.source_column); return n && n !== id ? `${n} (${id})` : id; };
+  const listNames = (ids, n = 3) => ids.slice(0, n).map(sigName).join(', ') + (ids.length > n ? ` +${ids.length - n}` : '');
   const trust = tr.ok ? tr.data : { items: [] };
   const items = trust.items || [];
   const byBatch = Object.fromEntries(items.map((x) => [x.batch_id, x]));
@@ -112,7 +120,15 @@ export async function render(main, params = {}) {
       why.append(ul, el('p', { class: 'small dim', style: { margin: '2px 0 0' }, text: t('dq.onlyRowsNote') }));
     }
     if (!why.childNodes.length) why.append(el('p', { class: 'small muted', style: { margin: 0 }, text: t('dq.passedAll') }));
-    row.append(why);
+    // plain first: can these rows be used, what is wrong, with which sensors; the row-by-row reasons are one click away
+    const kinds = [...new Set(local.map((g) => whyType(g.check_type)))];
+    const localSigs = [...new Set(local.flatMap((g) => g.signals))];
+    const localBrief = () => itemBriefLocal({ verdict: verdict === 'untrusted' ? 'problem' : verdict === 'caution' ? 'attention' : 'ok', headline: bt('brief.batch.' + verdict),
+      points: [wide.length ? bt('brief.batch.wide', { list: listNames(wide) }) : null, kinds.length ? bt('brief.batch.local', { kinds: kinds.slice(0, 3).join(', '), list: listNames(localSigs) }) : null].filter(Boolean) });
+    const whyNested = techNested(why);
+    // the server's summary of the batch (problems by kind, sensors, rating); only the few rows on screen ask for one.
+    // A server without that route leaves the summary built from the fields of this list.
+    row.append(itemBrief(x.batch_id, { ctx: { object_type: 'trust', object_id: x.batch_id, batch_id: x.batch_id }, onLoad: (d) => { if (!d) row.insertBefore(localBrief(), whyNested); } }), whyNested);
     // group numbers: thousands on large runs, so only on request and only then put in the page
     if (groups.length > 1) {
       const list = el('div', { class: 'grouplist small', hidden: true });
@@ -121,7 +137,7 @@ export async function render(main, params = {}) {
         if (open && !list.firstChild) { if (groups.length <= 300) groups.forEach((g, i) => list.append(i ? ', ' : '', refLink('group', g))); else list.textContent = groups.join(', '); }
         list.hidden = !open; btn.setAttribute('aria-expanded', String(open)); btn.textContent = open ? t('dq.hideGroups') : t('dq.showGroups', { n: fmt.int(groups.length) });
       } }, t('dq.showGroups', { n: fmt.int(groups.length) }));
-      row.append(el('div', { class: 'batchrow-groups' }, btn, list));
+      whyNested.body.append(el('div', { class: 'batchrow-groups' }, btn, list));
     }
     return row;
   };
@@ -154,13 +170,25 @@ export async function render(main, params = {}) {
 
   // ---- checks
   const ck = section(t('dq.checks'));
+  ck.root.dataset.briefSection = 'checks';
   view.append(ck.root);
   const fStatus = el('select', {}, [['', t('common.all')], ['fail', t('dq.fail')], ['warn', t('dq.warn')], ['pass', t('dq.pass')]].map(([v, l]) => el('option', { value: v, text: l })));
   const fCat = el('select', {}, [['', t('common.all')], ...['completeness', 'validity', 'consistency', 'timeliness', 'rule'].map((c) => [c, c])].map(([v, l]) => el('option', { value: v, text: l })));
   const fSig = el('input', { type: 'text', placeholder: t('common.signal'), style: { width: '90px' } });
   const summary = el('div', { class: 'row' });
   const tblHost = el('div');
-  ck.body.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('common.status'), fStatus), el('label', { class: 'row' }, t('dq.category'), fCat), fSig, summary), el('p', { class: 'small muted', text: t('dq.checksHelp') }), tblHost);
+  const ckDetail = el('div', { class: 'box detail ck-detail', hidden: true });
+  ck.body.append(el('div', { class: 'row' }, el('label', { class: 'row' }, t('common.status'), fStatus), el('label', { class: 'row' }, t('dq.category'), fCat), fSig, summary), el('p', { class: 'small muted', text: t('dq.checksHelp') }), tblHost, ckDetail);
+  /** One line a person understands: what is wrong (or that nothing is), with which sensor. */
+  const checkPlain = (c) => (c.status === 'pass' || /_ok$/.test(c.check_type || '') ? bt('brief.check.pass') : whyType(c.check_type) + ((c.signals || []).length ? ' — ' + listNames(c.signals, 2) : ''));
+  const checkCtx = (c) => ({ object_type: 'check', object_id: c.check_id, check_id: c.check_id, batch_id: c.batch_id, title: cleanText(c.statement), kind: 'dq' });
+  /** A clicked check: what is wrong and whether the rows can still be used, first; the full record under the expander. */
+  const showCheck = (c) => {
+    ckDetail.hidden = false; clear(ckDetail);
+    ckDetail.append(el('div', { class: 'row between' }, el('h3', {}, refLink('check', c.check_id), ' ', st(c.status, t('dq.' + c.status))), el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => openChat(checkCtx(c)) }, t('common.ask'))),
+      itemBrief(c.check_id, { ctx: checkCtx(c) }), techNested(checkCard(c)));
+    try { ckDetail.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch { /* ignore */ }
+  };
   fStatus.value = selBatch || params.check ? '' : 'fail';
   [fStatus, fCat].forEach((x) => x.addEventListener('change', loadChecks));
   fSig.addEventListener('change', loadChecks);
@@ -180,16 +208,16 @@ export async function render(main, params = {}) {
         { label: t('dq.type'), render: (c) => (c.check_type || '').replace(/_/g, ' ') },
         { label: t('common.signals'), render: (c) => refChips('signal', c.signals || []) },
         { label: t('common.severity'), render: (c) => el('span', { title: sevWords(c.severity), text: fmt.pct(c.severity) }), num: true },
-        { label: t('dq.statement'), cls: 'wrap', render: (c) => el('span', {}, refLink('check', c.check_id, c.check_id.replace('CHK-', '#')), ' ', linkifyRefs(cleanText(c.statement)), c.row_start !== null && c.row_start !== undefined ? el('span', { class: 'dim small', text: ` (${t('common.rows', { a: c.row_start, b: c.row_end })})` }) : null) },
+        { label: t('dq.statement'), cls: 'wrap', render: (c) => { const tn = techNested(el('span', {}, linkifyRefs(cleanText(c.statement)), c.row_start !== null && c.row_start !== undefined ? el('span', { class: 'dim small', text: ` (${t('common.rows', { a: c.row_start, b: c.row_end })})` }) : null)); tn.classList.add('inline'); tn.addEventListener('click', (e) => e.stopPropagation()); return el('div', {}, el('div', { class: 'ck-plain' }, refLink('check', c.check_id, c.check_id.replace('CHK-', '#')), ' ', el('b', { text: checkPlain(c) })), tn); } },
         { label: t('dq.rule'), render: (c) => (c.rule_id ? refLink('rule', c.rule_id) : '') },
         { label: t('common.evidence'), render: (c) => evidenceButton(c.evidence_ids) },
       ],
       rows, pageSize: 25, keyOf: (c) => c.check_id,
       rowClass: (c) => 'st-' + c.status,
-      onRow: (c) => openChat({ object_type: 'check', object_id: c.check_id, batch_id: c.batch_id, title: cleanText(c.statement), kind: 'dq' }),
+      onRow: (c) => showCheck(c),
     });
     tblHost.append(tbl);
-    if (firstLoad && params.check) { const trEl = tbl.reveal(params.check); if (trEl) flash(trEl); else tblHost.prepend(el('div', { class: 'notice warn', text: t('ref.notFound', { id: params.check }) })); }
+    if (firstLoad && params.check) { const trEl = tbl.reveal(params.check); const hit = rows.find((c) => c.check_id === params.check); if (hit) showCheck(hit); if (trEl) flash(trEl); else tblHost.prepend(el('div', { class: 'notice warn', text: t('ref.notFound', { id: params.check }) })); }
     if (firstLoad && params.batch && !params.check) flash(ck.root);
     firstLoad = false;
   }
@@ -197,6 +225,7 @@ export async function render(main, params = {}) {
 
   // ---- rules
   const rl = section(t('dq.rules'));
+  rl.root.dataset.briefSection = 'rules';
   view.append(rl.root);
   rl.body.append(el('p', { class: 'hint', text: t('dq.rulesIntro') }));
   const ta = el('textarea', { rows: 2, placeholder: t('dq.rulePlaceholder') });

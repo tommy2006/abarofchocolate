@@ -222,7 +222,7 @@ details summary { cursor: pointer; color: var(--primary); }
   {% if signals %}
   {% for s in signals %}
   <div class="card">
-    <h4><span class="mono">{{ s.id }}</span> — {{ s.role_label }} <span class="small conf">({{ t('confidence') }} {{ s.structural_confidence|pct }})</span>
+    <h4><span class="mono">{{ s.id }}</span>{% if s.display_name %} <b>{{ s.display_name }}</b>{% endif %} — {{ s.role_label }} <span class="small conf">({{ t('confidence') }} {{ s.structural_confidence|pct }})</span>
       {% if s.excluded %}<span class="badge b-muted">{{ t('excluded') }}{% if s.excluded_reason %}: {{ s.excluded_reason }}{% endif %}</span>{% endif %}
       {% if s.human_role_override %}<span class="badge b-primary">{{ t('human_override') }}: {{ s.human_role_override }}</span>{% endif %}
     </h4>

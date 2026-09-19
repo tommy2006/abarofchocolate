@@ -13,6 +13,13 @@ from pydantic import BaseModel, Field
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SETTINGS_PATH = ROOT / "config" / "settings.yaml"
 
+
+def _settings_path() -> Path:
+    """TPM_SETTINGS points the app at a settings file outside the program folder (the installed desktop app keeps
+    the user's copy under %LOCALAPPDATA%, so an upgrade does not reset choices made in the UI)."""
+    override = os.environ.get("TPM_SETTINGS", "").strip()
+    return Path(override) if override else DEFAULT_SETTINGS_PATH
+
 # TPM_NO_DOTENV=1 (set by the test suite) keeps a developer's real keys and mail settings out of the process
 if os.environ.get("TPM_NO_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
     load_dotenv(ROOT / ".env", override=False)
@@ -22,6 +29,7 @@ class Profile(BaseModel):
     description: str = ""
     allow_external: bool = False
     guard_strict: bool = True
+    require_custom_endpoint: bool = False  # eu-hosted: the external route needs external_llm.base_url (not anthropic.com)
     routing: dict[str, str] = Field(default_factory=dict)
 
 
@@ -31,6 +39,12 @@ class LocalLLMConfig(BaseModel):
     model: str = "gemma4:e4b-it-qat"
     fallback_models: list[str] = Field(default_factory=list)
     embedding_model: str = "nomic-embed-text"
+    # "user" once somebody picked the model in the UI / CLI: that choice then beats TPM_LOCAL_MODEL from .env.
+    model_selected_by: str = "config"
+    embedding_selected_by: str = "config"
+    # When the configured model (and every fallback) is not installed, use the best installed model that fits this
+    # machine instead of running without a model: the app does not depend on one particular model being present.
+    auto_select: bool = True
     keep_alive: str = "5m"
     num_ctx: int = 8192
     temperature: float = 0.2
@@ -38,17 +52,60 @@ class LocalLLMConfig(BaseModel):
     max_tool_steps: int = 8
 
 
+# Model families that may never be used as the external model, whatever the config says (30-day data retention).
+ALWAYS_BLOCKED_MODEL_PATTERNS = ("fable", "mythos")
+
+
 class ExternalLLMConfig(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-sonnet-5"
+    model_by_task: dict[str, str] = Field(default_factory=dict)  # optional, e.g. {critique: claude-opus-5}
+    allowed_model_patterns: list[str] = Field(default_factory=lambda: ["sonnet", "opus"])
+    blocked_model_patterns: list[str] = Field(default_factory=lambda: ["fable", "mythos"])
     api_key_env: str = "ANTHROPIC_API_KEY"
     base_url: Optional[str] = None
-    max_tokens: int = 2048
-    timeout_s: int = 120
+    max_tokens: int = 4096  # output cap per call; thinking tokens count toward it on Sonnet 5 / Opus 5
+    effort: str = "low"  # output_config.effort: low | medium | high | xhigh | max (low = fastest)
+    timeout_s: int = 60
+    max_calls_per_run: int = 200  # successful external calls per run workspace (pipeline + chat)
+    max_calls_per_chat_turn: int = 6
+    max_output_tokens_per_run: int = 120_000
+    max_parallel: int = 6  # concurrent external calls
+    max_narratives_per_run: int = 12  # diagnoses that get narrative + critique when the route is external
+
+    workspace_id_env: str = "ANTHROPIC_WORKSPACE_ID"  # only for API keys that are not tied to one workspace
 
     @property
     def api_key(self) -> Optional[str]:
         return os.environ.get(self.api_key_env)
+
+    @property
+    def workspace_id(self) -> Optional[str]:
+        """Organisation-level API keys must name the workspace on every request (header anthropic-workspace-id)."""
+        return (os.environ.get(self.workspace_id_env) or "").strip() or None
+
+    def model_allowed(self, model: Optional[str]) -> tuple[bool, str]:
+        """(ok, reason). The lower-cased id must contain an allowed pattern and none of the blocked ones."""
+        m = (model or "").strip().lower()
+        if not m:
+            return False, "no external model configured"
+        blocked = [p.lower() for p in list(self.blocked_model_patterns) + list(ALWAYS_BLOCKED_MODEL_PATTERNS) if p]
+        hit = next((p for p in blocked if p in m), None)
+        if hit:
+            return False, f"model '{model}' is blocked ('{hit}' models keep data for 30 days); use claude-sonnet-5 or claude-opus-5"
+        allowed = [p.lower() for p in self.allowed_model_patterns if p]
+        if allowed and not any(p in m for p in allowed):
+            return False, f"model '{model}' is not in the allowed families ({', '.join(allowed)})"
+        return True, "ok"
+
+    def endpoint_is_first_party(self) -> bool:
+        """True when calls go to Anthropic's own API (no base_url, or an anthropic.com host)."""
+        if not self.base_url:
+            return True
+        from urllib.parse import urlparse
+
+        host = (urlparse(self.base_url if "//" in self.base_url else "//" + self.base_url).hostname or "").lower()
+        return host == "anthropic.com" or host.endswith(".anthropic.com")
 
 
 class GuardConfig(BaseModel):
@@ -60,6 +117,12 @@ class GuardConfig(BaseModel):
     alias_column_names_in_strict: bool = True
     forbid_categorical_values: bool = True
     forbid_row_like_structures: bool = True
+    external_sig_digits: int = 3  # every float that leaves is rounded to this many significant digits
+    alias_names_external: bool = True  # original column names never leave, in any external profile
+    drop_keys_external: list[str] = Field(default_factory=lambda: [
+        "min", "max", "first", "last", "value", "values_at", "observed", "reading", "readings", "raw", "sample", "samples",
+        "rows", "points", "series", "time", "timestamp", "start_time", "end_time", "t_start", "t_end", "source_path",
+        "file", "filename", "path", "evaluation", "label", "labels"])
 
 
 class IngestConfig(BaseModel):
@@ -162,6 +225,25 @@ class Settings(BaseModel):
             return "local"
         return route
 
+    def external_model_for(self, task: Optional[str] = None) -> str:
+        """External model id for a task: external_llm.model_by_task[task], else external_llm.model."""
+        by_task = self.external_llm.model_by_task or {}
+        return str(by_task.get(task or "") or self.external_llm.model)
+
+    def external_block_reason(self, task: Optional[str] = None) -> Optional[str]:
+        """Why the external route cannot be used under these settings (None = usable; the API key is checked by the
+        provider). A blocked model or a missing EU endpoint makes the route unavailable, never an error."""
+        prof = self.active_profile
+        if not prof.allow_external:
+            return f"profile '{self.profile}' does not allow external models"
+        ok, why = self.external_llm.model_allowed(self.external_model_for(task))
+        if not ok:
+            return why
+        if (prof.require_custom_endpoint or self.profile == "eu-hosted") and self.external_llm.endpoint_is_first_party():
+            return ("profile 'eu-hosted' needs external_llm.base_url set to an EU-hosted endpoint: the first-party Anthropic API "
+                    "has no EU-only processing")
+        return None
+
     @property
     def workspace_path(self) -> Path:
         p = Path(self.workspace_dir)
@@ -177,7 +259,7 @@ class Settings(BaseModel):
 def _apply_env(data: dict[str, Any]) -> dict[str, Any]:
     if os.environ.get("TPM_PROFILE"):
         data["profile"] = os.environ["TPM_PROFILE"]
-    if os.environ.get("TPM_LOCAL_MODEL"):
+    if os.environ.get("TPM_LOCAL_MODEL") and (data.get("local_llm") or {}).get("model_selected_by") != "user":
         data.setdefault("local_llm", {})["model"] = os.environ["TPM_LOCAL_MODEL"]
     if os.environ.get("OLLAMA_HOST"):
         host = os.environ["OLLAMA_HOST"]
@@ -196,7 +278,7 @@ def _apply_env(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_settings(path: Optional[str | Path] = None, profile: Optional[str] = None) -> Settings:
-    p = Path(path) if path else DEFAULT_SETTINGS_PATH
+    p = Path(path) if path else _settings_path()
     data: dict[str, Any] = {}
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
@@ -221,7 +303,7 @@ def reload_settings() -> Settings:
 
 def save_settings_overrides(overrides: dict[str, Any], path: Optional[str | Path] = None) -> Settings:
     """Persist top-level overrides (e.g. {'profile': 'hybrid'}) into settings.yaml and reload."""
-    p = Path(path) if path else DEFAULT_SETTINGS_PATH
+    p = Path(path) if path else _settings_path()
     data: dict[str, Any] = {}
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:

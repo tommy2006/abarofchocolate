@@ -222,7 +222,8 @@ def test_compile_rule_uses_llm_when_available(rule_ws, monkeypatch):
     from tpm.contracts import LLMResult
 
     def fake_complete(task, payload, **kw):
-        assert task == "rule_compile" and "signal_catalog" in payload and "schema" in payload
+        assert task == "rule_compile" and "signal_catalog" in payload
+        assert "schema" not in payload and kw.get("schema"), "the closed rule schema travels through schema=, not in the payload (egress guard)"
         return LLMResult(text="", data={"type": "range", "signal": "S02", "max": 2800}, source="llm-local:test", route="local", ok=True)
 
     monkeypatch.setattr(llm, "complete", fake_complete)

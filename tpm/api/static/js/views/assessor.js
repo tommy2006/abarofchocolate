@@ -5,6 +5,7 @@
    dq_scores, more_data_verdict, less_data_verdict, recommendations) and the older fixture shape. */
 import { state, t, el, clear, runApi, fmt, conf, chip, section, viewHead, needRun, empty, evidenceButton, evChips, hiddenHint, meter, toast, errText, confirmDialog, actorName, actorRole, infStatus, unavailableNote, roleAllows, linkifyRefs, cleanText, prose, proseList, refLink, refChips, confWords, addPlainBox, kv, notice } from '../core.js';
 import { plot, purge, tokens } from '../charts.js';
+import { summaryCard, techDetails, answerBlock } from '../brief.js';
 
 function metricName(m) { const k = 'ass.metric.' + m; return t(k) === k ? String(m || '').replace(/_/g, ' ') : t(k); }
 function nGroups(n) { return Number(n) === 1 ? t('ass.oneGroup') : t('ass.nGroups', { n }); }
@@ -84,10 +85,14 @@ function effectSummary(eff) {
 }
 
 export async function render(main) {
-  const view = el('div', { class: 'view' });
-  main.append(view);
-  view.append(viewHead('5', t('nav.assessor'), el('span', { class: 'small muted', text: t('ass.title') })));
-  if (!state.run) { view.append(needRun()); return view; }
+  // page = title, plain summary, then ONE expander ("Show technical analyses") with everything this view rendered before
+  const page = el('div', { class: 'view' });
+  main.append(page);
+  page.append(viewHead('5', t('nav.assessor'), el('span', { class: 'small muted', text: t('ass.title') })));
+  if (!state.run) { page.append(needRun()); return page; }
+  const tech = techDetails('assessor');
+  page.append(summaryCard('assessor'), tech);
+  const view = tech.body;
   await addPlainBox(view, 'assessor');
   const r = await runApi('/assessor');
   const raw = r.ok ? r.data : {};
@@ -149,6 +154,7 @@ export async function render(main) {
 
   // ---- recommendations
   const rs = section(t('ass.recommendations'));
+  rs.root.dataset.briefSection = 'recommendations';
   view.append(rs.root);
   rs.body.append(el('p', { class: 'small muted', text: t('ass.recHelp') }));
   if (!a.recs.length) rs.body.append(empty(t('ass.noRecs')));
@@ -171,6 +177,7 @@ export async function render(main) {
 
   // ---- question box (chat with the assessor)
   const qs = section(t('ass.chat'));
+  qs.root.dataset.briefSection = 'ask';
   view.append(qs.root);
   const q = el('input', { type: 'text', placeholder: t('ass.chatPlaceholder'), style: { flex: 1, minWidth: '200px' } });
   const ans = el('div', { class: 'stack asschat', style: { gap: '6px' } });
@@ -184,8 +191,8 @@ export async function render(main) {
     busy.remove();
     if (rr.ok && rr.data.answer) {
       const x = rr.data.answer;
-      const m = el('div', { class: 'msg assistant' }, linkifyRefs(singleLead(x.text || '')));
-      m.append(el('span', { class: 'src', text: !x.source || x.source === 'template' ? t('chat.source.template') : x.source.startsWith('llm-external') ? `${t('chat.source.external')} ${x.model || ''}` : `${t('chat.source.local')} ${x.model || x.source.split(':')[1] || ''}` }), (x.evidence_ids || []).length ? evChips(x.evidence_ids) : null);
+      const m = el('div', { class: 'msg assistant' }, answerBlock(singleLead(x.text || ''), { technical: [(x.evidence_ids || []).length ? el('div', { class: 'cites' }, evChips(x.evidence_ids)) : null] }));
+      m.append(el('span', { class: 'src', text: !x.source || x.source === 'template' ? t('chat.source.template') : x.source.startsWith('llm-external') ? `${t('chat.source.external')} ${x.model || ''}` : `${t('chat.source.local')} ${x.model || x.source.split(':')[1] || ''}` }));
       ans.prepend(m);
       if ((x.followups || []).length) ans.prepend(el('div', { class: 'row' }, x.followups.slice(0, 4).map((f) => el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => ask(f) }, f))));
     } else ans.prepend(el('div', { class: 'msg assistant', text: errText(rr) }));

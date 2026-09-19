@@ -16,3 +16,7 @@ te_process.csv
 pair_*_answers.txt
 .DS_Store
 Thumbs.db
+
+# Windows packaging output (packaging/windows/build.ps1)
+build/
+dist/

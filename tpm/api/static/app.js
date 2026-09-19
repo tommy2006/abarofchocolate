@@ -2,6 +2,9 @@
    lamps, role picker, language + theme switch, SSE subscription for the selected run. */
 import { state, t, el, clear, api, loadLang, store, bus, toast, modal, st, fmt, roleAllows, navigate, recordNavigation, installRefHandler, viewAccess, lockText, lockProgressText, lockGlyph, viewHead } from './js/core.js';
 import { initChat } from './js/chat.js';
+import { focusSection } from './js/brief.js';
+import { openModelsPanel, mt as modelsText } from './js/models.js';
+import { loadSignalNames } from './js/rename.js';
 import * as runs from './js/views/runs.js';
 import * as understanding from './js/views/understanding.js';
 import * as quality from './js/views/quality.js';
@@ -57,6 +60,8 @@ async function route() {
   if (seq !== routeSeq) { if (made && made.cleanup) { try { made.cleanup(); } catch { /* ignore */ } } return; }  // a newer navigation took over while this one loaded
   current = made;
   rendering = false;
+  // an action of a summary card may point at a block inside the folded technical part: unfold it and scroll there
+  if (params.section && !locked) focusSection(main, params.section);
   main.focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', route);
@@ -154,7 +159,8 @@ function renderLamps() {
   const models = s.models || {};
   lamps.append(
     lamp(s.allow_external ? 'warn' : 'ok', t('status.profile'), s.profile || '–', s.allow_external ? t('status.egressPossible') : t('status.noEgress')),
-    lamp(models.local ? 'ok' : 'off', t('status.local'), (models.local_model || s.local_model || '–') + (models.local ? '' : ` (${t('status.notLoaded')})`), models.local ? t('status.loaded') : t('status.notLoaded')),
+    // the local-model lamp opens the models panel: choose another installed model, download one, install Ollama
+    (() => { const l = lamp(models.local ? 'ok' : 'off', t('status.local'), (models.local_model || s.local_model || '–') + (models.local ? '' : ` (${t('status.notLoaded')})`) + ' ▾', modelsText('lampHint')); l.setAttribute('role', 'button'); l.setAttribute('tabindex', '0'); l.style.cursor = 'pointer'; const open = () => openModelsPanel(refreshSettings); l.addEventListener('click', open); l.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } }); return l; })(),
     lamp(s.external_route_exists ? 'warn' : 'off', t('status.external'), s.external_route_exists ? `${t('status.exists')}: ${s.external_model}` : t('status.notExists')),
     lamp(s.external_calls ? 'warn' : 'ok', t('status.calls'), String(s.external_calls || 0) + (s.external_blocked ? ` (+${s.external_blocked} ${t('flow.summary.blocked')})` : '')),
   );
@@ -204,6 +210,7 @@ async function selectRun(id) {
     const r = await api(`/api/runs/${encodeURIComponent(state.run)}/status`);
     if (r.ok) state.runStatus = r.data; else { state.run = null; store.set('run', null); }
   }
+  await loadSignalNames();  // names people gave to signals, shown wherever a signal id appears
   bus.emit('run.changed', state.run);
   if (state.run) subscribe();
 }
@@ -271,5 +278,12 @@ async function boot() {
   const saved = store.get('run', null);
   const initial = saved && state.runs.some((r) => r.run_id === saved) ? saved : (state.runs[0] ? state.runs[0].run_id : null);
   if (initial) await selectRun(initial); else route();
+  // A computer without Ollama or without any chat model: offer the setup panel once per browser session.
+  try {
+    if (!sessionStorage.getItem('tpm.modelsOffered')) {
+      const m = await api('/api/models');
+      if (m.ok && ['install_ollama', 'start_ollama', 'pull_chat_model'].includes(m.data.next_step)) { sessionStorage.setItem('tpm.modelsOffered', '1'); openModelsPanel(refreshSettings); }
+    }
+  } catch (e) { /* the panel stays reachable from the Local model lamp */ }
 }
 boot();

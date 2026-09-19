@@ -88,7 +88,7 @@ A five-minute judging walkthrough is in [docs/JUDGES_GUIDE.md](docs/JUDGES_GUIDE
 | `email <run_id> --to a@b.c[,d@e.f] [--lang …] [--subject …] [--pdf] [--pptx]` | E-mails the HTML report, optionally with the PDF / the deck attached; needs `TPM_SMTP_*` in `.env` (clear error otherwise). |
 | `export <run_id> [--out DIR] [--lang …]` | Writes `<run_id>_export.zip`: reports (HTML, PDF, PowerPoint), `decision_log.jsonl`, `egress_ledger.jsonl`, `verify.json`, derived JSON/JSONL artifacts. Never the raw data. |
 | `verify-log <run_id>` | Recomputes the SHA-256 hash chain of the decision log. Exit code 1 if broken. |
-| `models` | Which local models are pulled, the exact `ollama pull` commands for missing ones, and external availability. |
+| `models` | Which local models are in use and why, everything installed, external availability. `--pull NAME` downloads a model, `--use NAME [--embedding]` chooses one (`auto` = automatic). |
 | `bakeoff` | Runs `scripts/bakeoff.py` (local-model comparison on representative tasks). |
 | `doctor` | Checks Python, packages, free RAM, disk, workspace writability, Ollama, `.env`, implemented stages; prints fixes. |
 | `list` | Lists runs in the workspace. |
@@ -104,11 +104,44 @@ Rules file: one plain-language rule per line (`#` comments allowed), e.g. `confi
 ## Configuration and privacy profiles
 
 Everything tunable is in `config/settings.yaml`; secrets and machine-specific overrides go in `.env`
-(`TPM_PROFILE`, `TPM_LOCAL_MODEL`, `OLLAMA_HOST`, `TPM_EXTERNAL_MODEL`, `TPM_EXTERNAL_BASE_URL`, `ANTHROPIC_API_KEY`,
+(`TPM_PROFILE`, `TPM_LOCAL_MODEL`, `OLLAMA_HOST`, `TPM_EXTERNAL_MODEL`, `TPM_EXTERNAL_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`,
 `TPM_WORKSPACE`, `TPM_TIME_BUDGET_S`, `TPM_SMTP_*`).
 
 | Profile | External calls | What may leave the machine |
 |---|---|---|
+| `no-egress` (default) | none | nothing; every model task runs on the local Ollama model or on code templates |
+| `hybrid` | the model tasks that work on derived results (sensor hypotheses, rule compilation, diagnosis narrative, critique, report summary) **and the chat** go to Claude through the **egress guard**; everything that reads raw data stays local | aggregated, rounded and anonymised results only (see below) - never rows, never exact readings |
+| `eu-hosted` | same routing as hybrid, but only against an EU-hosted endpoint (`external_llm.base_url`; the first-party Anthropic API has no EU processing, so an empty or `anthropic.com` address is refused), guard in strict mode | same, plus operator notes are dropped |
+
+**What the hybrid profile sends, and what it never sends.** Every outgoing payload is sanitised and then checked
+against an invariant just before sending; a payload that fails the check is not sent:
+
+- column names become aliases (`S01`...), also inside sentences and in chat questions;
+- every decimal number is rounded to 3 significant digits, also inside sentences; single raw readings
+  (`min`, `max`, `first`, `value`, points, series, rows) are removed; aggregates over fewer than 30 samples are removed;
+- dates, times and epoch time stamps become `[time]`; values of text / category / label columns become `[value]`;
+  file names become `[file]`; label-based evaluation never leaves;
+- the chat model gets no SQL tool; its statistics tool returns aggregates without min/max, its series tool at most
+  20 bucket means over at least 30 rows each. Full-detail series go to your screen only.
+
+**Limited calls.** Models: `claude-sonnet-5` (default, fastest) or `claude-opus-5`, chosen in the Data-flow page.
+Fable / Mythos models are refused in code (30-day data retention). Per run at most 200 external calls and
+120,000 output tokens (`external_llm.max_calls_per_run`, `max_output_tokens_per_run`), at most 6 calls per chat
+answer; when a limit is reached, or the guard or the API refuses, the task runs on the local model instead.
+Every attempt - sent, refused, over budget, failed - is in the egress ledger with the sanitised preview and token
+counts, shown on the Data-flow page. An organisation-level API key also needs `ANTHROPIC_WORKSPACE_ID` in `.env`.
+
+**What it speeds up (measured on the 6 GB practice file, this laptop: 1355 s in total).** 89 % of that time is
+number crunching on raw data (ingest, quality checks, detection), which must stay local and cannot be outsourced.
+The model calls were 149 s (5 calls of 25-37 s). In hybrid these run concurrently, so more findings get a written
+explanation in less time, and a chat answer no longer waits for several slow local calls in a row. Measure it on
+your own machine and run: `python -m tpm bench-llm --run <run_id> --profile hybrid` (writes `llm_benchmark.json`,
+shown on the Data-flow page).
+
+Switch with `TPM_PROFILE=hybrid`, `--profile hybrid`, or on the Data-flow page. Details: [docs/DATAFLOW.md](docs/DATAFLOW.md),
+contract of the feature: [docs/HYBRID_SPEC.md](docs/HYBRID_SPEC.md).
+
+---|---|---|
 | `no-egress` (default) | none | nothing; every model task runs on the local Ollama model or on code templates |
 | `hybrid` | derived-artifact tasks (sensor hypotheses, rule compilation, diagnosis narrative, critique, report narrative) go to Anthropic through the **egress guard**; raw-data tasks stay local | signal-catalog aggregates, relation summaries, check / flag / diagnosis statements, rule text — never rows |
 | `eu-hosted` | same routing as hybrid against an EU-hosted endpoint (`external_llm.base_url`), guard in strict mode | same, with column names replaced by aliases |
@@ -124,17 +157,34 @@ The pipeline is fully functional without any language model: every narrative has
 version. A local model adds hypotheses, rule compilation from free text, narratives, the critique and the "why"
 chat, all without network egress.
 
-1. Install Ollama: https://ollama.com/download
-2. Pull the configured model (6 GB, fits an 8 GB GPU) and the embedding model:
-   ```
-   ollama pull gemma4:e4b-it-qat
-   ollama pull nomic-embed-text
-   ```
-   Smaller alternative: `ollama pull gemma3:4b` then `TPM_LOCAL_MODEL=gemma3:4b` in `.env`.
-   Configured fallbacks (`local_llm.fallback_models`): `qwen3:8b`, `granite4.1:8b`, `llama3:8b`, `gemma3:4b`.
-3. `python -m tpm models` shows what is pulled and what is missing. `run.ps1 -PullModels` / `run.sh --pull-models`
-   pull the configured model for you.
-4. `python -m tpm bakeoff` compares the pulled models on JSON validity, schema compliance, tool calls and latency.
+The app does not expect one particular model. It uses, in this order: the model you chose, the configured default
+(`gemma4:e4b-it-qat`, 6 GB, fits an 8 GB GPU), a configured fallback, or otherwise **the best chat model that is
+installed and fits this computer's memory**. The same goes for the search (embedding) model
+(default `nomic-embed-text`; without one, search uses word matching).
+
+In the app: click **Local model** in the top bar. The panel shows what is installed and which model is in use and
+why, lets you choose another one, **download any model from the Ollama library with a progress bar**, start Ollama,
+and on a Windows computer without Ollama **download and open the official Ollama installer** (its digital
+signature is checked first). On a fresh computer the panel opens by itself and offers "Download the two standard
+models". These downloads fetch software only; none of your data is sent.
+
+From the command line:
+```
+python -m tpm models                      # models in use and why, everything installed
+python -m tpm models --pull qwen3:4b      # download through the local Ollama, with progress
+python -m tpm models --use qwen3:4b       # use it from now on   (--use auto = back to automatic)
+python -m tpm models --use all-minilm --embedding
+```
+A choice made in the app or with `--use` is stored in `config/settings.yaml` (`local_llm.model_selected_by: user`)
+and then wins over `TPM_LOCAL_MODEL` in `.env`. `run.ps1 -PullModels` / `run.sh --pull-models` pull the configured
+default for you. `python -m tpm bakeoff` compares the pulled models on JSON validity, schema compliance, tool calls
+and latency.
+
+## Windows app (installer)
+
+`dist/NorrinTPM-Setup.exe` installs the monitor like any Windows program (Start menu, desktop shortcut,
+"Installed apps" entry with uninstaller; per user, no administrator rights, no Python needed). Build it with
+`powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1`. Details: [docs/WINDOWS_APP.md](docs/WINDOWS_APP.md).
 
 ---
 
@@ -182,7 +232,7 @@ chat, all without network egress.
 | Python not found | install 3.10+ from python.org (tick "Add to PATH"), re-run the launcher |
 | `pip install` fails | check the network / proxy; `python -m pip install -r requirements.txt` shows the full error |
 | Port 8000 in use | `.\run.ps1 -Port 8080` / `./run.sh --port 8080` |
-| "Ollama not reachable" | optional; install Ollama and `ollama pull gemma4:e4b-it-qat`; the app works in template mode meanwhile |
+| "Ollama not reachable" | optional; in the app click **Local model** in the top bar (install / start Ollama, download a model); the app works in template mode meanwhile |
 | Not enough RAM | close other applications; a local 6 GB model plus the pipeline wants ~8 GB free; detection subsamples automatically |
 | A stage shows `failed` | the error is in `workspace/<run_id>/status.json` and the decision log; `python -m tpm run … --continue-on-error` keeps going |
 | Wrong delimiter / header / grouping | `--opt delimiter=; --opt has_header=false --opt group_columns=col1`, or set them on the Runs page |

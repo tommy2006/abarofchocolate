@@ -356,6 +356,8 @@ export function rowsLink(a, b, { signals, label } = {}) {
 /** <a class="ref"> for one object; the global click handler (installRefHandler) does the jump. */
 export function refLink(type, id, label) {
   const href = ROUTE_OF[type] ? ROUTE_OF[type](id) : '#';
+  // a signal somebody renamed reads "possibly broken (S44)" wherever its id is shown (names: js/rename.js)
+  if (type === 'signal' && (label === undefined || label === id) && state.signalNames && state.signalNames[id]) label = `${state.signalNames[id]} (${id})`;
   return el('a', { href, class: 'ref ref-' + type, dataset: { refType: type, refId: id }, title: t('ref.' + type) + ' ' + id + ' — ' + t('ref.open') }, label === undefined ? id : label);
 }
 /** Kind of object an id names, from its prefix: 'DIAG-000005' -> 'diagnosis', 'B00008' -> 'batch'. Unknown -> 'evidence'. */
@@ -394,7 +396,9 @@ export function linkifyRefs(text) {
     else continue;
     if (type === 'signal') { sigBefore = id; sigEnd = m.index + m[0].length; }
     if (m.index > last) f.append(document.createTextNode(s.slice(last, m.index)));
-    f.append(refLink(type, id, m[0]));
+    // "pressure sensor (S44)": the text already carries a name in front of the alias, so the link keeps the bare id
+    const named = type === 'signal' && m.index > 0 && s[m.index - 1] === '(';
+    f.append(refLink(type, id, named ? el('span', { text: m[0] }) : m[0]));
     last = m.index + m[0].length;
   }
   if (last < s.length) f.append(document.createTextNode(s.slice(last)));
@@ -577,7 +581,7 @@ export function evidenceItem(e) {
   const meta = [!isObj && e.kind ? el('span', { text: e.kind }) : null, sigs, e.n_samples ? el('span', { text: `${fmt.int(e.n_samples)} ${t('common.n_samples')}` }) : null, e.computed_by ? el('span', { text: `${t('common.computedBy')} ${e.computed_by}` }) : null, e.group_id ? el('span', {}, `${t('common.group')} `, refLink('group', e.group_id)) : null, e.batch_id && type !== 'batch' ? refLink('batch', e.batch_id) : null].filter(Boolean).flatMap((x, i) => (i ? [' — ', x] : [x]));
   const engineer = roleAllows('engineer');
   const tech = el('details', { class: 'evtech', open: engineer, style: { marginTop: '3px' } },
-    el('summary', { class: 'small dim', style: { cursor: 'pointer' } }, t('evidence.technical')),
+    el('summary', { class: 'small dim', style: { cursor: 'pointer' } }, t('brief.showTech') === 'brief.showTech' ? t('evidence.technical') : t('brief.showTech')),
     plain && stmt ? el('div', { class: 'small muted techstmt', style: { margin: '2px 0', overflowWrap: 'anywhere' } }, linkifyRefs(stmt)) : null,
     meta.length ? el('div', { class: 'meta' }, meta) : null,
     engineer ? valuesLine(e.values) : null);
@@ -690,6 +694,15 @@ export async function showRefModal(type, id) {
         if (s) { s.className = 'small muted techstmt'; s.prepend(el('span', { class: 'dim', text: t('evidence.technical') + ': ' })); }
       }
       node = card ? frag(lead, card) : generic();
+      // plain summary of the object first (what it is, what to do now); everything above goes under "Show technical analyses"
+      try {
+        const { itemBrief, techNested } = await import('./brief.js');
+        if (items.length) {
+          const tech = techNested(node);
+          tech.open = roleAllows('engineer');
+          node = frag(itemBrief(id, { onLoad: (d) => { if (!d) tech.open = true; } }), tech);
+        }
+      } catch (e) { console.debug('brief unavailable', e && e.message); }
     }
   } catch (e) { node = notice(String(e && e.message ? e.message : e), 'fail'); }
   clear(body).append(node);
@@ -791,11 +804,20 @@ export function viewHead(num, title, right) {
 export function needRun() { return el('div', { class: 'notice warn', text: t('runs.noRunHint') }); }
 export function signalLabel(id, signalsById) {
   const s = signalsById && signalsById[id];
-  return el('span', { title: s && s.source_column ? `${t('und.sourceName')}: ${s.source_column}` : undefined, text: id });
+  const given = (s && s.display_name) || (state.signalNames && state.signalNames[id]);
+  return el('span', { title: s && s.source_column ? `${t('und.sourceName')}: ${s.source_column}` : undefined, text: given ? `${given} (${id})` : id });
 }
-/** Highlight an element briefly and scroll it into view. */
+/** Open every closed <details> above a node: the page keeps its technical part folded ("Show technical analyses"),
+    and whatever a link, a deep link or the back button points at must be visible before it is scrolled to. */
+export function revealAncestors(node) {
+  let opened = false;
+  for (let p = node && node.parentElement; p; p = p.parentElement) if (p.tagName === 'DETAILS' && !p.open) { p.open = true; opened = true; }
+  return opened;
+}
+/** Highlight an element briefly and scroll it into view (unfolding the technical part around it first). */
 export function flash(node) {
   if (!node) return;
+  revealAncestors(node);
   node.classList.add('flash');
   try { node.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* ignore */ }
   setTimeout(() => node.classList.remove('flash'), 2500);
