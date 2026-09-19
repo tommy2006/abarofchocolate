@@ -24,7 +24,8 @@ recorded in a tamper-evident log.
 
 **Data sovereignty.** Raw readings never leave the computer. The AI helper is a local model (Ollama); the optional
 *hybrid* profile sends only aggregated, rounded and anonymised results to Claude, through a guard that checks every
-payload first. Details in [docs/DATAFLOW.md](docs/DATAFLOW.md).
+payload first; the *eu-hosted* profile sends the same guarded results to Mistral Large 3 running in Finland (Verda).
+Details in [docs/DATAFLOW.md](docs/DATAFLOW.md).
 
 Built by team *abarofchocolate* for the Norrin "Trustworthy process monitor" challenge (September 2026).
 What we changed after an expert reviewed our first output: [What changed after the expert review](#what-changed-after-the-expert-review-round-6).
@@ -224,12 +225,12 @@ against an invariant just before sending; a payload that fails the check is not 
 - the chat model gets no SQL tool; its statistics tool returns aggregates without min/max, its series tool at most
   20 bucket means over at least 30 rows each. Full-detail series go to your screen only.
 
-**Limited calls.** Models: `claude-sonnet-5` (default, fastest) or `claude-opus-5`, chosen in the Data-flow page.
+**Limited calls.** Models: `claude-sonnet-5` (default, fastest) or `claude-opus-5`, chosen in *Settings > Data flow & privacy*.
 Fable / Mythos models are refused in code (30-day data retention). Per run at most 200 external calls and
 120,000 output tokens (`external_llm.max_calls_per_run`, `max_output_tokens_per_run`), at most 6 calls per chat
 answer; when a limit is reached, or the guard or the API refuses, the task runs on the local model instead.
 Every attempt - sent, refused, over budget, failed - is in the egress ledger with the sanitised preview and token
-counts, shown on the Data-flow page. An organisation-level API key also needs `ANTHROPIC_WORKSPACE_ID` in `.env`.
+counts, shown in *Settings > Data flow & privacy*. An organisation-level API key also needs `ANTHROPIC_WORKSPACE_ID` in `.env`.
 
 **What it speeds up - measured, not assumed.** On the 6 GB practice file (this laptop, 1355 s in total) 89 % of
 the time is number crunching on raw data (ingest, quality checks, detection). That must stay local and cannot be
@@ -252,18 +253,18 @@ side by side: the diagnose stage writes narratives and critiques for up to 12 fi
 sequentially, and chat answers arrive in about half the time. For a full 6 GB analysis this saves roughly two of
 about twenty-two minutes; the rest is local computation by design. The benchmark used 16 calls
 (88 k input and 22 k output tokens). Repeat it on your machine:
-`python -m tpm bench-llm --run <run_id> --profile hybrid` (writes `llm_benchmark.json`, shown on the Data-flow page).
+`python -m tpm bench-llm --run <run_id> --profile hybrid` (writes `llm_benchmark.json`, shown in *Settings > Data flow & privacy*).
 
-Switch with `TPM_PROFILE=hybrid`, `--profile hybrid`, or on the Data-flow page. Details: [docs/DATAFLOW.md](docs/DATAFLOW.md),
-contract of the feature: [docs/HYBRID_SPEC.md](docs/HYBRID_SPEC.md).
+**The EU-hosted model.** `TPM_PROFILE=eu-hosted` sends the same guarded summaries to **Mistral Large 3**, a European
+open-weight model the hackathon organisers run on **Verda** serverless GPU containers in Finland (Verda, formerly
+DataCrunch, is a Finnish GPU cloud). Put their key in `.env` as `TPM_EU_API_KEY`; the endpoint and the model are
+already in `config/settings.yaml`. Measured on the demo run: 12 guarded payloads answered, median 12.9 s per call.
+The profile accepts only services on `profiles.eu-hosted.eu_hosts` and refuses Anthropic's own API, US regions and
+worldwide Bedrock profiles, so a wrong address makes the route unavailable instead of quietly leaving the EU.
 
----|---|---|
-| `no-egress` (default) | none | nothing; every model task runs on the local Ollama model or on code templates |
-| `hybrid` | derived-artifact tasks (sensor hypotheses, rule compilation, diagnosis narrative, critique, report narrative) go to Anthropic through the **egress guard**; raw-data tasks stay local | signal-catalog aggregates, relation summaries, check / flag / diagnosis statements, rule text — never rows |
-| `eu-hosted` | same routing as hybrid against Mistral Large 3 on Verda in Finland (`profiles.eu-hosted.external_llm`, key `TPM_EU_API_KEY`), guard in strict mode | same, with column names replaced by aliases |
-
-Switch with `TPM_PROFILE=hybrid`, `--profile hybrid`, or in the UI settings. Every external call is written to the
-egress ledger (what was sent, to which model, why, guard result). Details: [docs/DATAFLOW.md](docs/DATAFLOW.md).
+Switch with `TPM_PROFILE=hybrid` (or `eu-hosted`), `--profile eu-hosted`, or in *Settings > Data flow & privacy*.
+Every external call is written to the egress ledger: what was sent, to which model, to which endpoint, why, and the
+guard result. Details: [docs/DATAFLOW.md](docs/DATAFLOW.md), contract: [docs/HYBRID_SPEC.md](docs/HYBRID_SPEC.md).
 
 ---
 
