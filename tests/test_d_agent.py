@@ -150,3 +150,43 @@ def test_public_chat_wrapper_never_raises(demo, monkeypatch):
     monkeypatch.setattr(agent_mod, "chat", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     out2 = llm.chat(ws, s, "Why?")
     assert "boom" in out2.get("error", "") and out2["source"] == "template"
+
+
+def test_run_summary_counts_what_the_pages_count(demo):
+    """The chat used to deny shares the pages show ("73 % of the findings are process changes") because it could look
+    at single findings but never count them. run_summary gives it the run's own totals, and they must match the
+    artifacts the pages read."""
+    ws, s = demo
+    tb = agent_mod.Toolbox(ws, s)
+    out = tb.run_summary()
+    diags = ws.diagnoses()
+    if diags:
+        by = out["diagnoses"]["by_cause"]
+        assert out["diagnoses"]["total"] == len(diags)
+        for cause in {d.cause_class for d in diags}:
+            n = sum(1 for d in diags if d.cause_class == cause)
+            assert by[cause]["n"] == n and abs(by[cause]["share"] - n / len(diags)) < 1e-3, cause
+        assert abs(sum(v["share"] for v in by.values()) - 1) < 0.01
+    assert out["flags"]["total"] == len(ws.flags())
+    assert out["checks"]["total"] == len(ws.checks())
+    # the tool is offered to both models; the totals are also in the system prompt, so an answer cannot deny them
+    assert "run_summary" in [t["name"] for t in agent_mod.tool_specs(s)]
+    assert "run_summary" in [t["name"] for t in agent_mod.tool_specs(s, external=True)]
+    facts = agent_mod._run_facts(tb)
+    assert str(out["flags"]["total"]) in facts and (not diags or str(out["diagnoses"]["total"]) in facts)
+
+
+def test_run_summary_leaves_no_reading_in_what_an_external_model_would_see(demo):
+    """Counts and shares only: the guard of the hybrid profile passes them, and no raw reading rides along."""
+    from tpm.config import load_settings
+    from tpm.llm import guard as guard_mod
+
+    ws, _ = demo
+    hybrid = load_settings(profile="hybrid")
+    out = agent_mod.Toolbox(ws, hybrid, external=True).run_summary()
+    text = json.dumps(out, default=str)
+    assert "row_start" not in text and "readings" not in text
+    g = guard_mod.check({"tool_result": out}, hybrid, ws=ws)
+    assert g.allowed, g.reason
+    kept = g.sanitized_payload["tool_result"]
+    assert kept.get("flags", {}).get("total") == out["flags"]["total"]

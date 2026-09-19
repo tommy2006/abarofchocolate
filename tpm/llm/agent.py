@@ -51,6 +51,7 @@ TOOL_SPECS: list[dict[str, str]] = [
     {"name": "get_diagnosis", "args": "id: str", "description": "one diagnosis with steps, propagation, uncertainty, critique and evidence statements."},
     {"name": "get_evidence", "args": "id: str", "description": "one evidence item (statement, values, n_samples, signals)."},
     {"name": "list_checks", "args": "batch_id?: str, signal?: str", "description": "data-quality checks (pass/warn/fail) with statements, optionally filtered by batch or signal."},
+    {"name": "run_summary", "args": "", "description": "the totals of this run, the same numbers the pages show: how many flags, diagnoses (per likely cause, with shares), fault patterns (named when the plant's failure list fits), critique verdicts, data-quality checks per status, batches and untrusted batches, the event rule, and the evaluation against labels when the file had any. Use it for any question about how many / what share."},
     {"name": "search", "args": "query: str", "description": "semantic/keyword search over evidence, inferences, flags, diagnoses, checks, rules, patterns and the docs."},
     {"name": "assessor_evaluate", "args": "action_text: str", "description": "ask the data-quality assessor to evaluate a proposed action in natural language (bounded experiments; nothing is applied)."},
 ]
@@ -367,6 +368,90 @@ class Toolbox:
                 continue
             out.append({"check_id": c.check_id, "check_type": c.check_type, "status": c.status, "severity": c.severity, "signals": c.signals, "batch_id": c.batch_id, "statement": c.statement, "evidence_ids": c.evidence_ids})
         return {"n": len(out), "checks": out[:50]}
+
+    def run_summary(self) -> dict[str, Any]:
+        """Counts of the run's own results: what the pages count, computed from the same artifacts. Aggregates only
+        (numbers and shares, ids of patterns), so the answer can be the same in every profile."""
+        ws = self.ws
+        out: dict[str, Any] = {"run_id": getattr(ws, "run_id", None)}
+        if ws is None:
+            return out
+        def _share(n: int, total: int) -> float:
+            return round(n / total, 4) if total else 0.0
+        try:
+            sch = self.schema
+            if sch is not None:
+                out["dataset"] = {"rows": getattr(sch, "n_rows", None), "signals": len(getattr(sch, "signal_columns", []) or []), "groups": getattr(sch, "n_groups", None)}
+        except Exception:
+            pass
+        try:
+            flags = ws.flags()
+            kinds: dict[str, int] = {}
+            for f in flags:
+                kinds[str(f.kind)] = kinds.get(str(f.kind), 0) + 1
+            out["flags"] = {"total": len(flags), "by_kind": kinds}
+        except Exception:
+            pass
+        try:
+            diags = ws.diagnoses()
+            causes: dict[str, int] = {}
+            pats: dict[str, int] = {}
+            verdicts: dict[str, int] = {}
+            named: dict[str, str] = {}
+            for d in diags:
+                causes[str(d.cause_class)] = causes.get(str(d.cause_class), 0) + 1
+                if d.pattern_id:
+                    pats[str(d.pattern_id)] = pats.get(str(d.pattern_id), 0) + 1
+                    ft = str(d.fault_type or "")
+                    if d.pattern_id not in named and "possibly" in ft:
+                        named[str(d.pattern_id)] = ft
+                v = d.critique.verdict if getattr(d, "critique", None) else None
+                if v:
+                    verdicts[str(v)] = verdicts.get(str(v), 0) + 1
+            n = len(diags)
+            out["diagnoses"] = {"total": n,
+                                "by_cause": {k: {"n": v, "share": _share(v, n)} for k, v in sorted(causes.items(), key=lambda kv: -kv[1])},
+                                "by_pattern": {k: {"n": v, "share": _share(v, n), "named": named.get(k)} for k, v in sorted(pats.items(), key=lambda kv: -kv[1])[:8]},
+                                "critique_verdicts": verdicts,
+                                "note": "cause classes: process = the process itself changed, sensor = one instrument, data = the recording, unknown = the evidence does not decide"}
+        except Exception:
+            pass
+        try:
+            checks = ws.checks()
+            st: dict[str, int] = {}
+            for c in checks:
+                st[str(c.status)] = st.get(str(c.status), 0) + 1
+            out["checks"] = {"total": len(checks), "by_status": st}
+        except Exception:
+            pass
+        try:
+            tr = ws.trust()
+            bad = [t for t in tr if not t.trusted]
+            out["batches"] = {"total": len(tr), "untrusted": len(bad)}
+        except Exception:
+            pass
+        for art, key, keep in (("quality_summary.json", "quality_verdict", ("verdict", "statement", "n_fail", "n_warn", "n_not_testable", "top_problem")),
+                               ("evaluation.json", "evaluation", None), ("detect_meta.json", "event_rule", None)):
+            try:
+                if not ws.exists(art) and not (ws.dir / art).exists():
+                    continue
+                data = ws.read_json(art, None)
+                if not isinstance(data, dict):
+                    continue
+                if keep:
+                    out[key] = {k: data.get(k) for k in keep if data.get(k) is not None}
+                elif art == "detect_meta.json":
+                    out[key] = data.get("event_rule")
+                else:
+                    cols = data.get("columns") or {}
+                    first = next(iter(cols.values()), {}) if isinstance(cols, dict) else {}
+                    out[key] = {k: first.get(k) for k in ("row_level", "group_level") if first.get(k)} or None
+            except Exception:
+                continue
+        return {k: v for k, v in out.items() if v not in (None, {}, [])}
+
+    def tool_run_summary(self, **_: Any) -> dict[str, Any]:
+        return self.run_summary()
 
     def tool_search(self, query: str = "", k: int = 6, **_: Any) -> dict[str, Any]:
         hits = self.index.search(query, k=int(k or 6))
@@ -824,6 +909,29 @@ def _is_placeholder_answer(answer: str) -> bool:
     return len(a) < 8 or bool(_PLACEHOLDER_RE.match(a))
 
 
+def _run_facts(tb: "Toolbox") -> str:
+    """One line of the run's totals for the system prompt: the model must not deny what the pages show."""
+    try:
+        s = tb.run_summary()
+    except Exception:
+        return ""
+    bits = []
+    d = s.get("diagnoses") or {}
+    if d.get("total"):
+        by = ", ".join(f"{k} {v['n']} ({v['share']:.0%})" for k, v in (d.get("by_cause") or {}).items())
+        bits.append(f"{d['total']} diagnoses by likely cause: {by}")
+    f = s.get("flags") or {}
+    if f.get("total"):
+        bits.append(f"{f['total']} flags (" + ", ".join(f"{k} {v}" for k, v in (f.get("by_kind") or {}).items()) + ")")
+    c = s.get("checks") or {}
+    if c.get("total"):
+        bits.append(f"{c['total']} data-quality checks (" + ", ".join(f"{k} {v}" for k, v in (c.get("by_status") or {}).items()) + ")")
+    b = s.get("batches") or {}
+    if b.get("total"):
+        bits.append(f"{b['total']} batches, {b.get('untrusted', 0)} untrusted")
+    return "; ".join(bits)
+
+
 def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any], tb: Toolbox, *, task: str = "why_chat", purpose: str = "operator chat", language: str = "en", history: Optional[list[dict[str, str]]] = None, max_steps: Optional[int] = None, stop: Optional[Callable[[], bool]] = None) -> Optional[dict[str, Any]]:
     """Returns {"answer","citations","confidence","suggested_followups","tool_trace","model","external_calls"} or None if
     the local model is unavailable / never produced a final answer. The mode comes from the toolbox: with tb.external the
@@ -849,7 +957,7 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
             context_text = json.dumps(safe, ensure_ascii=False, default=str)[:CONTEXT_CHARS]
         system = prompts_mod.render_template("agent.system.external.j2", tools=tool_specs(settings, True), max_steps=max_steps, sig_digits=int(settings.guard.external_sig_digits), context_text=context_text, **common)
     else:
-        system = prompts_mod.render_template("agent.system.j2", tools=TOOL_SPECS, max_steps=max_steps, dataset_columns=", ".join(tb.dataset_columns()[:60]) or "(no dataset)", sql_limit=SQL_LIMIT, context_text=_context_text(loaded), **common)
+        system = prompts_mod.render_template("agent.system.j2", tools=TOOL_SPECS, run_facts=_run_facts(tb), max_steps=max_steps, dataset_columns=", ".join(tb.dataset_columns()[:60]) or "(no dataset)", sql_limit=SQL_LIMIT, context_text=_context_text(loaded), **common)
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     for turn in (history or [])[-6:]:
         role = "assistant" if turn.get("role") == "assistant" else "user"

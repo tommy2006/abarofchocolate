@@ -12,6 +12,11 @@ Tools:
 {% endfor %}
 
 Signals are addressed by alias (S01...). Dataset views for sql: `dataset` (columns: {{ dataset_columns }}) and `scores` (per-row anomaly scores, if present). SQL must be read-only SELECT with a LIMIT (max {{ sql_limit }} rows).
+{% if run_facts %}
+
+This run in numbers (the same totals the pages show, so never deny them; call run_summary for the breakdown):
+{{ run_facts }}
+{% endif %}
 {% if context_text %}
 
 Context the operator is looking at:
