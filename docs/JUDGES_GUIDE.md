@@ -28,6 +28,7 @@ Then, on the finished run, let the app demonstrate the parts that need a person 
 ```
 python -m tpm showcase --run latest                rules -> checks, accept / question / override and the downstream effect, why-chat, report
 python -m tpm guard-demo --run latest              the privacy guard on this run's own data: before / after, raw rows blocked
+python -m tpm eu-check --run latest                where the external model really runs: measured, not claimed (EU profile)
 python -m tpm report latest --format summary       one A4 page to share
 ```
 
@@ -131,6 +132,13 @@ record batch" through the identical pipeline.
 - **See the guard work** instead of trusting a promise: *Show the guard on this run* on the Data flow page (or
   `python -m tpm guard-demo --run latest`) puts a real message of the run through the guard (names replaced,
   numbers rounded) and a deliberately unsafe message made of raw rows, which is blocked. Nothing is sent.
+- **See where the EU model runs** instead of trusting that promise either: *Check where it runs* on the same page (or
+  `python -m tpm eu-check --run latest`) reads the run's own ledger for the hosts the calls went to, asks the endpoint
+  for its TLS certificate, and times a TCP round trip next to AWS endpoints whose region AWS documents, at the same
+  moment from your machine. In fibre a signal covers ~200 km per millisecond, so the round trip is a ceiling on the
+  distance: here the EU endpoint answers in ~9 ms (at most ~900 km) while N. Virginia takes ~136 ms. It also shows the
+  refusals (a US region, a look-alike host, Anthropic's own API, a worldwide inference profile) and states plainly what
+  it cannot prove. Nothing is sent.
 - *Who wrote the explanations* (Data flow and Diagnoses pages, report section 8) says how many explanations a
   model wrote and why the rest use the evidence template.
 - The model layer is swapped by configuration only: `local_llm.model` (Ollama), `external_llm.model` (Claude in

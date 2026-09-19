@@ -1801,6 +1801,41 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         ws.log.record(f"human:{actor}({role})", "guard_demo_requested", "run", run_id, {"profile": res.get("profile"), "unsafe_verdict": (res.get("unsafe") or {}).get("verdict"), "sent": False})
         return {"ok": True, "guard_demo": _guard_demo_ctx(ws, lang), "unsafe_blocked": (res.get("unsafe") or {}).get("verdict") == "blocked", "headers_leaked": bool((res.get("headers_check") or {}).get("found"))}
 
+    def _eu_check(ws: Any, calibrate: bool) -> dict[str, Any]:
+        """Measure where the external model runs (tpm.llm.residency): the run's ledger, the endpoint's certificate,
+        the round trip against reference regions, the registry, and the refusals. No data is sent anywhere."""
+        fn = _lazy("tpm.llm.residency:check")
+        fmt = _lazy("tpm.llm.residency:format_check")
+        if fn is None or fmt is None:
+            return _unavailable("tpm.llm.residency:check", "The residency check is not available in this build.")
+        try:
+            res = fn(state.settings, ws=ws, calibrate=calibrate)
+        except Exception as e:
+            raise HTTPException(500, f"the residency check failed: {e}")
+        return {"ok": True, "result": res, "lines": list(fmt(res))}
+
+    @app.get("/api/eu-check")
+    def get_eu_check(calibrate: bool = Query(True)) -> dict[str, Any]:
+        return _eu_check(None, calibrate)
+
+    @app.post("/api/runs/{run_id}/eu-check")
+    def post_eu_check(run_id: str, body: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Same check, cross-checked against this run's egress ledger; the result is kept with the run as evidence."""
+        ws = state.ws(run_id)
+        body = body or {}
+        out = _eu_check(ws, bool(body.get("calibrate", True)))
+        res = out.get("result") or {}
+        try:
+            ws.write_json("eu_residency", res)
+            actor, role = str(body.get("actor") or "ui")[:60], str(body.get("role") or "operator")[:20]
+            verdict = (res.get("verdict") or {}).get("ok")
+            ws.log.record(f"human:{actor}({role})", "residency_checked", "run", run_id,
+                          {"endpoint": (res.get("endpoint") or {}).get("host"), "verdict": verdict,
+                           "min_rtt_ms": (res.get("rtt") or {}).get("min_ms"), "max_km": (res.get("distance") or {}).get("max_km")})
+        except Exception:
+            pass
+        return out
+
     @app.get("/api/runs/{run_id}/egress")
     def get_egress(run_id: str, lang: str = Query("en")) -> dict[str, Any]:
         ws = state.ws(run_id)

@@ -107,6 +107,44 @@ export async function render(main) {
   };
   renderGuard(E.guard_demo);
 
+  // ---- where the external model really runs: measurements, not claims. The app asks the endpoint itself (certificate,
+  // round trip against reference endpoints whose region is documented), reads this run's own ledger for the hosts the
+  // calls went to, and shows what the profile refuses. Everything from the settings is labelled as a claim.
+  const es = section(t('flow.euCheck'));
+  es.root.dataset.briefSection = 'residency';
+  if (s.allow_external) view.append(es.root);
+  const renderResidency = (data) => {
+    clear(es.body);
+    es.body.append(el('p', { class: 'hint', text: t('flow.euCheckHint') }));
+    const btn = el('button', { class: 'btn', type: 'button' }, data ? t('flow.euCheckAgain') : t('flow.euCheckRun'));
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = t('flow.euCheckWorking');
+      const r = state.run ? await runApi('/eu-check', { method: 'POST', body: { actor: actorName(), role: actorRole() } }) : await api('/api/eu-check');
+      btn.disabled = false;
+      if (!r.ok) { btn.textContent = t('flow.euCheckRun'); toast(errText(r), 'fail'); return; }
+      if (!es.root.isConnected) return;
+      renderResidency(r.data);
+      const ok = ((r.data.result || {}).verdict || {}).ok;
+      toast(ok ? t('flow.euCheckOk') : t('flow.euCheckFail'), ok ? 'ok' : 'fail');
+    });
+    es.body.append(el('div', { class: 'row' }, btn));
+    if (!data) return;
+    const res = data.result || {}, v = res.verdict || {}, ep = res.endpoint || {};
+    es.body.append(el('div', { class: 'row small', style: { margin: '8px 0', flexWrap: 'wrap' } },
+      chip(v.ok ? t('flow.euCheckOk') : t('flow.euCheckFail'), v.ok ? 'ok' : 'fail'),
+      el('span', { class: 'muted', text: `${t('flow.euCheckClaimed')}: ${[ep.operator_says, ep.location_says].filter(Boolean).join(', ') || '-'}` })));
+    es.body.append(el('ul', { class: 'small', style: { overflowWrap: 'anywhere' } }, (v.lines || []).map((x) => el('li', { text: x }))));
+    const refs = (res.references || []).filter((x) => x.n);
+    if (refs.length && (res.rtt || {}).min_ms !== undefined) {
+      const rows = [{ where: `${ep.host} — ${t('flow.euCheckThis')}`, ms: res.rtt.min_ms }].concat(refs.map((x) => ({ where: x.where, ms: x.min_ms })));
+      es.body.append(el('h3', { class: 'small', style: { marginTop: '10px' }, text: t('flow.euCheckRefs') }),
+        table({ columns: [{ label: t('flow.euCheckWhere'), key: 'where' }, { label: 'ms', render: (x) => fmt.num(x.ms, 1), num: true }], rows, pageSize: 10, keyOf: (x) => x.where }));
+    }
+    if ((v.limits || []).length) es.body.append(el('details', { style: { marginTop: '8px' } }, el('summary', { class: 'small', text: t('flow.euCheckLimits') }),
+      el('ul', { class: 'small muted' }, v.limits.map((x) => el('li', { text: x })))));
+  };
+  renderResidency(null);
+
   // ---- ledger
   const ls = section(t('flow.ledger'), { level: 'engineer', right: E.summary ? el('span', { class: 'row small muted' }, chip(`${E.summary.local || 0} ${t('flow.summary.local')}`, 'ok'), chip(`${E.summary.external_allowed || 0} ${t('flow.summary.sent')}`, E.summary.external_allowed ? 'warn' : ''), chip(`${E.summary.external_blocked || 0} ${t('flow.summary.blocked')}`)) : null });
   // "See the list of what was sent where": the ledger for reviewers, the plain statement for everybody else

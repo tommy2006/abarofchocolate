@@ -602,6 +602,32 @@ def cmd_guard_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eu_check(args: argparse.Namespace) -> int:
+    """Measure where the external model runs (tpm.llm.residency): the run's own ledger, the TLS certificate, the
+    round trip against reference endpoints whose region is documented, the registry, and what the app refuses."""
+    settings = _settings(argparse.Namespace(settings=getattr(args, "settings", None), workspace=getattr(args, "workspace", None), profile=args.profile))
+    from .llm import residency
+
+    ws = _open_ws(args.run, settings) if args.run else None
+    try:
+        result = residency.check(settings, ws=ws, calibrate=not args.no_calibrate)
+        if ws is not None:
+            ws.write_json("eu_residency", result)
+        if args.json:
+            _p(json.dumps(result, indent=1, ensure_ascii=False, default=str))
+        else:
+            for line in residency.format_check(result):
+                _p(line)
+            if ws is not None:
+                _p(f"\n  written to {ws.dir / 'eu_residency.json'}")
+    except Exception as e:
+        return _fail(f"the residency check failed: {e}")
+    finally:
+        if ws is not None:
+            ws.close()
+    return 0 if (result.get("verdict") or {}).get("ok") is not False else 2
+
+
 def _coverage_line(settings: Any, run_id: Optional[str]) -> Optional[str]:
     """`tpm models`: who wrote the explanations of a run (the latest one by default), in one plain sentence."""
     from .workspace import Workspace
@@ -930,6 +956,13 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("--lang", choices=["en", "fi", "sv"], help="language of the model reply when --send is used")
     gd.add_argument("--json", action="store_true", help="print the result as JSON (it is always written to guard_demo.json)")
     gd.set_defaults(fn=cmd_guard_demo)
+
+    ec = sub.add_parser("eu-check", help="measure where the external model runs: ledger, certificate, round trip vs. reference regions, registry, refusals")
+    ec.add_argument("--run", metavar="RUN_ID", help="cross-check this run's egress ledger (run id, or 'latest')")
+    ec.add_argument("--profile", choices=["no-egress", "hybrid", "eu-hosted"], help="check this profile instead of the active one")
+    ec.add_argument("--no-calibrate", action="store_true", help="skip the reference endpoints (no TCP connects to AWS S3)")
+    ec.add_argument("--json", action="store_true", help="print the result as JSON (with --run it is also written to eu_residency.json)")
+    ec.set_defaults(fn=cmd_eu_check)
 
     bl = sub.add_parser("bench-llm", help="time a finished run's model tasks on the local and the external route")
     bl.add_argument("--run", required=True, metavar="RUN_ID", help="run id, or 'latest'")

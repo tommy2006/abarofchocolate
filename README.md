@@ -189,6 +189,7 @@ page: `tpm/api/static/js/views/live.js`.
 | `verify-log <run_id>` | Recomputes the SHA-256 hash chain of the decision log (exit code 1 if broken) and lists, per kind of object, what has an entry of its own and why anything does not. |
 | `showcase --run <run_id> [--rules FILE] [--no-chat]` | On a finished run: compiles rules into checks and runs them, accepts / questions / overrides three diagnoses and shows the effect on a later event, asks the why-chat one question, regenerates the report. |
 | `guard-demo --run <run_id> [--profile hybrid\|eu-hosted] [--send]` | Shows the egress guard on the run's own data: a real message before and after, and a deliberately unsafe message of raw rows that is blocked. Nothing is sent unless `--send` (then only the safe message, once). |
+| `eu-check [--run <run_id>] [--no-calibrate] [--json]` | Measures where the external model runs instead of claiming it: which endpoints the run's calls went to (its own ledger), the endpoint's TLS certificate, the round trip against endpoints whose region is documented, what the address registry says, and that a US or worldwide endpoint is refused. Sends no data; writes `eu_residency.json` to the run. |
 | `models` | Which local models are in use and why, everything installed, external availability. `--pull NAME` downloads a model, `--use NAME [--embedding]` chooses one (`auto` = automatic). |
 | `bakeoff` | Runs `scripts/bakeoff.py` (local-model comparison on representative tasks). |
 | `doctor` | Checks Python, packages, free RAM, disk, workspace writability, Ollama, `.env`, implemented stages; prints fixes. |
@@ -261,6 +262,15 @@ DataCrunch, is a Finnish GPU cloud). Put their key in `.env` as `TPM_EU_API_KEY`
 already in `config/settings.yaml`. Measured on the demo run: 12 guarded payloads answered, median 12.9 s per call.
 The profile accepts only services on `profiles.eu-hosted.eu_hosts` and refuses Anthropic's own API, US regions and
 worldwide Bedrock profiles, so a wrong address makes the route unavailable instead of quietly leaving the EU.
+
+**Do not take our word for it.** *Settings > Data flow & privacy > Check where it runs*, or
+`python -m tpm eu-check --run <run_id>`, measures it on your machine: which endpoints that run's calls actually went to
+(from its own ledger), which service answered (its TLS certificate), and how long a TCP round trip takes next to
+endpoints whose region is documented, measured at the same moment. On this laptop the EU endpoint answers in **9 ms**
+- at ~200 km/ms in fibre that is at most ~900 km away - while AWS N. Virginia takes 136 ms and Oregon 191 ms, so the
+machine that answered cannot be in North America. The check also proves the refusals (a US region, a look-alike host,
+Anthropic's own API, a worldwide inference profile) and prints what it does *not* prove: it locates the machine that
+answered, not a relay behind it, so ask the operator for the data centre and its logging as well.
 
 Switch with `TPM_PROFILE=hybrid` (or `eu-hosted`), `--profile eu-hosted`, or in *Settings > Data flow & privacy*.
 Every external call is written to the egress ledger: what was sent, to which model, to which endpoint, why, and the

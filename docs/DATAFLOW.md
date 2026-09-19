@@ -133,6 +133,13 @@ operator and the location. The guard and its invariant are the same as in hybrid
 - `tests/test_d_*` exercise the guard on raw-looking payloads; `tests/test_f_report.py` checks that the report
   renders the ledger and the statement in all three languages.
 - `python -m tpm guard-demo --run <run>` proves the guard on the run itself (section 8).
+- `python -m tpm eu-check --run <run>` (UI: *Settings > Data flow & privacy > Check where it runs*) measures where the
+  external model runs, instead of repeating the vendor's claim: the hosts this run's calls went to (its own ledger,
+  cross-checked against `eu_hosts`), the endpoint's TLS certificate, the TCP round trip next to AWS endpoints whose
+  region AWS documents (measured at the same moment from the same machine; ~200 km/ms in fibre bounds the distance),
+  the RDAP registry entry, and the refusal of a US region, a look-alike host, the first-party Anthropic API and a
+  worldwide inference profile. It sends no data, writes `eu_residency.json` into the run, and lists what it does not
+  prove (a relay behind the endpoint, the country of a certificate, stale registry countries).
 - `tests/test_d_guard_demo.py` runs every external task, the chat and rule compilation on a dataset with
   Tennessee-Eastman headers (`xmeas_1 .. xmeas_41`, `xmv_1 .. xmv_11`, `faultNumber`, `simulationRun`, `sample`) in the
   eu-hosted profile (strict guard, fake EU endpoint) and in hybrid, with questions, operator hints and rule text that
