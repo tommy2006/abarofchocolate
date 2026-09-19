@@ -3,14 +3,16 @@
 import { state, t, el, clear, runApi, fmt, conf, infStatus, chip, section, table, viewHead, needRun, empty, evidenceButton, fetchEvidence, evidenceList, decisionBar, postDecision, hiddenHint, kv, roleAllows, bus, meter, unavailableNote } from '../core.js';
 import { plot, purge, tokens, colorFor } from '../charts.js';
 import { openChat, signalContext } from '../chat.js';
+import { plainBox } from '../plain.js';
 
 const ROLES = ['continuous_measured', 'actuator_like', 'held_sampled', 'constant', 'derived_redundant', 'counter', 'timestamp', 'categorical', 'text', 'identifier', 'unknown'];
 
-export async function render(main) {
+export async function render(main, params = {}) {
   const view = el('div', { class: 'view' });
   main.append(view);
   view.append(viewHead('1', t('nav.understanding')));
   if (!state.run) { view.append(needRun()); return view; }
+  try { const pb = await plainBox('understanding'); if (pb) view.append(pb); } catch (e) { /* plain box is optional */ }
   const [und, sig, rel, dom, sch] = await Promise.all([runApi('/understanding'), runApi('/signals'), runApi('/relations'), runApi('/domain'), runApi('/schema')]);
   const signals = sig.ok ? sig.data.signals || [] : [];
   const byId = Object.fromEntries(signals.map((s) => [s.id, s]));
@@ -57,11 +59,14 @@ export async function render(main) {
     rowClass: (s) => (s.excluded ? 'dim' : ''),
   });
   grid.append(tbl, detail);
+  const SP = U.signal_plain || {};
+  if (params && params.signal && byId[params.signal]) { showSignal(byId[params.signal]); setTimeout(() => detail.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); }
 
   async function showSignal(s) {
     clear(detail);
     detail.append(el('div', { class: 'row between' }, el('h3', {}, `${t('und.detail')}: ${s.id}`, s.source_column ? el('span', { class: 'muted small', text: ` (${t('und.sourceName')}: ${s.source_column})` }) : null), el('button', { class: 'btn btn-sm', type: 'button', onClick: () => openChat(signalContext(s)) }, t('common.ask'))));
     const fp = s.fingerprint || {};
+    if (SP[s.id]) detail.append(el('p', { class: 'plain-sig', style: 'margin:6px 0 10px;padding:10px 12px;border-left:3px solid var(--accent, #2bb5a0);background:var(--bg-2, rgba(127,127,127,.08));border-radius:0 6px 6px 0;overflow-wrap:anywhere', text: SP[s.id] }));
     detail.append(kv([
       [t('und.role'), el('span', {}, (s.human_role_override || s.structural_role).replace(/_/g, ' '), ' ', conf(s.structural_confidence))],
       [t('und.instrument'), s.instrument_hypothesis ? el('span', {}, s.instrument_hypothesis, ' ', conf(s.instrument_confidence)) : null],

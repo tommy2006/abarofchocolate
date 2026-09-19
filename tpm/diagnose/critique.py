@@ -100,10 +100,32 @@ def llm_objections(ws, settings, diag: Diagnosis, checks: list[dict[str, Any]], 
     if res is None or not res.ok:
         return [], "template"
     objs: list[str] = []
+
+    def _as_text(o: Any) -> str:
+        if isinstance(o, dict):
+            txt = str(o.get("text") or o.get("objection") or o.get("statement") or "").strip()
+            ids = o.get("evidence_ids") or o.get("evidence") or []
+            if isinstance(ids, str):
+                ids = [ids]
+            ids = [str(i) for i in ids if str(i) not in txt]
+            return (txt + (f" (evidence: {', '.join(ids)})" if ids else "")).strip()
+        return str(o).strip()
+
     if res.data and isinstance(res.data.get("objections"), list):
-        objs = [str(o) for o in res.data["objections"]]
+        objs = [_as_text(o) for o in res.data["objections"]]
     elif res.text:
-        objs = [ln.strip("-* ").strip() for ln in res.text.splitlines() if ln.strip()]
+        txt = res.text.strip()
+        if txt.startswith("{"):
+            try:
+                import json as _json
+
+                d = _json.loads(txt)
+                objs = [_as_text(o) for o in (d.get("objections") or [])] if isinstance(d, dict) else []
+            except Exception:
+                objs = []
+        else:
+            objs = [ln.strip("-* ").strip() for ln in txt.splitlines() if ln.strip()]
+    objs = [o for o in objs if o and not o.startswith("{")]
     valid_ids = set(diag.evidence_ids)
     objs = [o for o in objs if any(eid in o for eid in valid_ids)]
     return objs[:6], res.source

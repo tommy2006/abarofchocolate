@@ -128,13 +128,86 @@ def build_diagnosis(ws, diag_id: str, group: str, flags: list[Flag], onset_flag:
         for e in pattern.get("evidence_ids") or []:
             if e not in evidence_ids:
                 evidence_ids.append(e)
-    lead = ", ".join(f"{s.signal} ({s.direction}, {s.contribution:.0%})" for s in ranked[:3])
-    summary = f"{fault_type} in group {group}: rows {main.row_start}-{main.row_end}, {CAUSE_WORDS.get(main.likely_cause_class, 'deviation')}; leading signals {lead}. Confidence {conf:.0%}."
+    summary = plain_summary(fault_type, group, main, ranked, conf, chain)
     return Diagnosis(id=diag_id, flag_ids=[f.id for f in flags] + ([onset_flag.id] if onset_flag is not None else []), group_id=group, pattern_id=main.pattern_id, fault_type=fault_type, cause_class=main.likely_cause_class, ranked_signals=ranked, propagation=chain, steps=steps, summary=summary, confidence=round(conf, 3), uncertainty=uncertainty, assumptions=assumptions[:8], evidence_ids=evidence_ids, narrative_source="template" if src is None else "human+template")
 
 
+_DIR_WORDS = {"up": "rose above its normal level", "down": "fell below its normal level", "noisy": "became much noisier than usual", "stuck": "froze at one value", "shifted": "stopped following the signals it normally moves with", "deviating": "deviated from its normal behaviour"}
+_CAUSE_SENTENCE = {
+    "process": "The pattern points to a change in the process itself rather than a faulty instrument: several related signals moved together.",
+    "sensor": "The pattern points to an instrument problem rather than the process: one signal broke away from the signals it normally follows while they stayed consistent with each other.",
+    "data": "The pattern points to a data problem: the leading signal was already marked unreliable by the data-quality checks in these rows, so this should be treated as bad data, not as a process event.",
+    "mixed": "Both a process change and an instrument or data problem seem to be involved.",
+    "unknown": "Whether this is a process change or an instrument problem cannot be settled from the evidence available for this event.",
+}
+
+
+def _conf_words(c: float) -> str:
+    if c >= 0.85:
+        return "very confident"
+    if c >= 0.7:
+        return "fairly confident"
+    if c >= 0.5:
+        return "moderately confident"
+    if c >= 0.3:
+        return "not very confident"
+    return "uncertain"
+
+
+def plain_summary(fault_type: str, group: str, main: Flag, ranked: list[SignalContribution], conf: float, chain: list[PropagationStep]) -> str:
+    """Two to four plain-language sentences a non-specialist can read: what, where, which signals, how sure."""
+    where = f"in group {group}, rows {main.row_start}-{main.row_end}" if group else f"in rows {main.row_start}-{main.row_end}"
+    first = f"The monitor found {fault_type} {where}."
+    parts: list[str] = []
+    for r in ranked[:3]:
+        share = f" and accounts for {r.contribution:.0%} of the deviation" if r.contribution >= 0.1 else ""
+        parts.append(f"{r.signal} {_DIR_WORDS.get(r.direction or 'deviating', 'deviated')}{share}")
+    second = ("The signal " if len(parts) == 1 else "The signals involved: ") + "; ".join(parts) + "." if parts else ""
+    third = _CAUSE_SENTENCE.get(main.likely_cause_class, _CAUSE_SENTENCE["unknown"])
+    prop = ""
+    if chain:
+        c0 = chain[0]
+        lag = f" about {c0.lag} samples later" if c0.lag else " shortly after"
+        prop = f" The disturbance appears to have travelled from {c0.from_signal} to {c0.to_signal}{lag}."
+    fourth = f" We are {_conf_words(conf)} in this reading ({conf:.0%})."
+    return " ".join(x for x in (first, second, third + prop + fourth) if x)
+
+
+def _extract_json(text: str) -> Optional[dict[str, Any]]:
+    import json as _json
+    import re as _re
+
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = _re.sub(r"^```[a-zA-Z]*\n?|```$", "", t).strip()
+    try:
+        d = _json.loads(t)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        m = _re.search(r"\{.*\}", t, _re.S)
+        if m:
+            try:
+                d = _json.loads(m.group(0))
+                return d if isinstance(d, dict) else None
+            except Exception:
+                return None
+    return None
+
+
+def _clean_prose(x: Any) -> str:
+    if isinstance(x, dict):
+        for k in ("text", "summary", "statement", "step"):
+            if isinstance(x.get(k), str):
+                return x[k].strip()
+        return ""
+    return str(x).strip()
+
+
 def add_llm_narrative(ws, settings, diag: Diagnosis, language: str = "en") -> Diagnosis:
-    """Optional LLM narrative layered on the template (never replaces the steps)."""
+    """Optional LLM narrative layered on the template (never replaces the steps). The model answers in JSON
+    ({summary, steps, uncertainty}); only its prose is kept -- raw JSON never reaches the operator."""
     try:
         from ..llm import complete
     except Exception:
@@ -149,8 +222,27 @@ def add_llm_narrative(ws, settings, diag: Diagnosis, language: str = "en") -> Di
         res = complete("diagnosis_narrative", payload, purpose=f"explain {diag.id}", ws=ws, settings=settings, language=language)
     except Exception:
         return diag
-    if res is not None and res.ok and res.text and res.text.strip():
-        diag.summary = diag.summary + f"\n\n[{res.source}] " + res.text.strip()[:2000]
+    if res is not None and res.ok and (res.data or (res.text and res.text.strip())):
+        data = res.data if isinstance(res.data, dict) else _extract_json(res.text or "")
+        model_summary = ""
+        model_steps: list[str] = []
+        model_unc: list[str] = []
+        if data:
+            model_summary = _clean_prose(data.get("summary") or data.get("explanation") or "")
+            model_steps = [_clean_prose(x) for x in (data.get("steps") or []) if _clean_prose(x)]
+            model_unc = [_clean_prose(x) for x in (data.get("uncertainty") or data.get("uncertainties") or []) if _clean_prose(x)]
+        else:
+            txt = (res.text or "").strip()
+            model_summary = "" if txt.startswith("{") else txt[:1500]
+        if not (model_summary or model_steps):
+            return diag
+        if model_summary:
+            diag.summary = diag.summary + "\n\n" + model_summary[:1500]
+        if model_steps:
+            diag.steps = diag.steps + ["Model explanation: " + st[:400] for st in model_steps[:6]]
+        for u in model_unc[:4]:
+            if u not in diag.uncertainty:
+                diag.uncertainty.append(u[:300])
         diag.narrative_source = f"{res.source}+template"
         ws.log.record(f"llm:{res.route}:{res.model}" if res.route in ("local", "external") else "system:diagnose", "narrative", "diagnosis", diag.id, {"source": res.source, "ledger_id": res.ledger_id}, diag.evidence_ids)
     return diag

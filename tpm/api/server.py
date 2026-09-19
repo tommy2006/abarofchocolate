@@ -514,10 +514,33 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         d, ok = _read_artifact(state.ws(run_id), "domain")
         return _wrap(d or {}, ok)
 
+    @app.get("/api/runs/{run_id}/plain")
+    def get_plain(run_id: str, view: str = Query("understanding"), lang: str = Query("en"), enhance: int = Query(0)) -> dict[str, Any]:
+        """Plain-language explanation of a view for non-specialists (template; local-model rewording on request)."""
+        from .plain import VIEWS, plain_for
+
+        ws = state.ws(run_id)
+        if view not in VIEWS:
+            return {"available": False, "error": f"unknown view {view}", "views": list(VIEWS)}
+        try:
+            d = plain_for(ws, state.settings, view, lang=lang, enhance=bool(enhance))
+        except Exception as e:
+            return {"available": False, "error": str(e)[:300]}
+        return {"available": bool(d.get("paragraphs")), **d}
+
     @app.get("/api/runs/{run_id}/understanding")
     def get_understanding(run_id: str) -> dict[str, Any]:
         ws = state.ws(run_id)
         d, ok = _read_artifact(ws, "understanding")
+        if ok and d:
+            # normalise the profile stage's artifact into what the UI/report expect (summary, assumptions,
+            # uncertain, hypotheses, per-signal plain text) -- the raw keys are kept alongside
+            try:
+                from .plain import understanding_normalized
+
+                d = understanding_normalized(ws)
+            except Exception as e:
+                d = dict(d); d["normalize_error"] = str(e)[:200]
         if not ok:
             # derive a minimal understanding from schema + inferences so the view is never empty
             sch, ok2 = _read_artifact(ws, "schema")
