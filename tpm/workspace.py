@@ -66,6 +66,25 @@ def dumps(obj: Any, indent: Optional[int] = None) -> str:
     return json.dumps(obj, default=_json_default, indent=indent, ensure_ascii=False, allow_nan=True)
 
 
+def _replace_with_retry(tmp: Path, target: Path, attempts: int = 40) -> None:
+    """os.replace fails with PermissionError on Windows while another thread/process has the target open
+    (the API polls status.json while the pipeline rewrites it). Retry briefly, then fall back to an in-place
+    write so a status update can never kill a run."""
+    for i in range(attempts):
+        try:
+            tmp.replace(target)
+            return
+        except PermissionError:
+            time.sleep(0.01 + 0.005 * i)
+    try:
+        target.write_bytes(tmp.read_bytes())
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 class _Registry:
     """Append-only JSONL registry with sequential IDs (EV-000001 / INF-000001)."""
 
@@ -209,7 +228,7 @@ class Workspace:
         with self._lock:
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(dumps(obj, indent=1))
-            tmp.replace(p)
+            _replace_with_retry(tmp, p)
         return p
 
     def read_json(self, artifact: str, default: Any = None) -> Any:
@@ -252,7 +271,7 @@ class Workspace:
             with open(tmp, "w", encoding="utf-8") as f:
                 for o in objs:
                     f.write(dumps(o) + "\n")
-            tmp.replace(p)
+            _replace_with_retry(tmp, p)
 
     # ---------- typed helpers ----------
     def schema(self):

@@ -5,6 +5,20 @@ import { plot, purge, tokens, colorFor } from '../charts.js';
 import { openChat, signalContext } from '../chat.js';
 import { plainBox } from '../plain.js';
 
+const FB = {
+  'und.kindMost': 'Most likely: {kind} ({pct})',
+  'und.kindWhy': 'Why',
+  'und.header': 'Header in your file',
+  'und.noHeader': 'Your file has no header for this column.',
+  'und.headerHelp': 'The system did not use this header to decide anything: it identifies signals by how they behave, and works with the neutral alias {id}. If you know what {id} measures, name it here. Your name is logged as a human decision and shown next to the alias.',
+  'und.nameLabel': 'What {id} measures',
+  'und.namePlaceholder': 'e.g. Reactor pressure',
+  'und.unitPlaceholder': 'unit, e.g. kPa',
+  'und.useHeader': 'Use the header as the name',
+  'und.nameSaved': 'Saved and logged.',
+};
+const tt = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [a, b] of Object.entries(vars || {})) v = v.replaceAll(`{${a}}`, b); } return v; };
+
 const ROLES = ['continuous_measured', 'actuator_like', 'held_sampled', 'constant', 'derived_redundant', 'counter', 'timestamp', 'categorical', 'text', 'identifier', 'unknown'];
 
 export async function render(main, params = {}) {
@@ -21,9 +35,14 @@ export async function render(main, params = {}) {
   // ---- summary + assumptions + uncertain + domain
   const top = el('div', { class: 'cols cols-2' });
   const summary = el('div', { class: 'stack' }, el('h2', { text: t('und.title') }), el('p', { text: U.summary || t('common.notYet') }));
-  if (dom.ok && dom.data.available) {
-    const lk = dom.data.likelihood || {};
-    summary.append(el('h3', { text: t('und.domain') }), el('div', {}, Object.entries(lk).sort((a, b) => b[1] - a[1]).map(([k, v]) => meter(k.replace(/_/g, ' '), v))), dom.data.statement ? el('p', { class: 'small muted', text: dom.data.statement }) : null);
+  const lk = (dom.ok && (dom.data.domain_likelihood || dom.data.likelihood)) || (sch.ok && sch.data.domain_likelihood) || {};
+  const kinds = Object.entries(lk).filter(([, v]) => typeof v === 'number').sort((a, b) => b[1] - a[1]);
+  if (kinds.length) {
+    const why = (dom.ok && (dom.data.explanation || dom.data.statement)) || '';
+    summary.append(el('h3', { text: t('und.domain') }),
+      el('p', { text: tt('und.kindMost', { kind: kinds[0][0].replace(/_/g, ' '), pct: fmt.pct ? fmt.pct(kinds[0][1]) : `${Math.round(kinds[0][1] * 100)}%` }) }),
+      el('div', {}, kinds.map(([k, v]) => meter(k.replace(/_/g, ' '), v))),
+      why ? el('p', { class: 'small muted', text: `${tt('und.kindWhy')}: ${why}` }) : null);
   }
   const lists = el('div', { class: 'stack' },
     el('h3', { text: t('und.assumptions') }), (U.assumptions || []).length ? el('ul', { class: 'list' }, (U.assumptions || []).map((a) => el('li', {}, infStatus('assumed'), ' ', a))) : empty(),
@@ -48,7 +67,7 @@ export async function render(main, params = {}) {
   const detail = el('div', { class: 'box' }, el('div', { class: 'empty', text: t('und.pickSignal') }));
   const tbl = table({
     columns: [
-      { label: t('und.alias'), render: (s) => el('span', { title: s.source_column ? `${t('und.sourceName')}: ${s.source_column}` : '' }, el('b', { text: s.id }), s.excluded ? el('span', { class: 'dim small', text: ' ✕' }) : null) },
+      { label: t('und.alias'), render: (s) => el('span', { title: s.source_column ? `${tt('und.header')}: ${s.source_column}` : tt('und.noHeader') }, el('b', { text: s.id }), s.display_name ? el('span', { class: 'small', text: ` · ${s.display_name}${s.display_unit ? ' (' + s.display_unit + ')' : ''}` }) : null, s.excluded ? el('span', { class: 'dim small', text: ' ✕' }) : null) },
       { label: t('und.role'), render: (s) => el('span', {}, (s.human_role_override || s.structural_role || 'unknown').replace(/_/g, ' '), s.human_role_override ? el('span', { class: 'small', style: { marginLeft: '6px' } }, infStatus(null, { human: 'overridden' })) : null) },
       { label: t('common.confidence'), render: (s) => conf(s.structural_confidence) },
       { label: t('und.instrument'), render: (s) => s.instrument_hypothesis ? el('span', {}, s.instrument_hypothesis, ' ', el('span', { class: 'small' }, infStatus(s.instrument_confidence >= 0.5 ? 'assumed' : 'uncertain')), ' ', conf(s.instrument_confidence, { label: false })) : el('span', { class: 'dim', text: '–' }) },
@@ -64,7 +83,22 @@ export async function render(main, params = {}) {
 
   async function showSignal(s) {
     clear(detail);
-    detail.append(el('div', { class: 'row between' }, el('h3', {}, `${t('und.detail')}: ${s.id}`, s.source_column ? el('span', { class: 'muted small', text: ` (${t('und.sourceName')}: ${s.source_column})` }) : null), el('button', { class: 'btn btn-sm', type: 'button', onClick: () => openChat(signalContext(s)) }, t('common.ask'))));
+    detail.append(el('div', { class: 'row between' }, el('h3', {}, `${t('und.detail')}: ${s.id}`, s.display_name ? el('span', { class: 'muted', text: ` · ${s.display_name}${s.display_unit ? ' (' + s.display_unit + ')' : ''}` }) : null), el('button', { class: 'btn btn-sm', type: 'button', onClick: () => openChat(signalContext(s)) }, t('common.ask'))));
+    {
+      const nameIn = el('input', { type: 'text', placeholder: tt('und.namePlaceholder'), value: s.display_name || '', style: { flex: '2', minWidth: '0' }, 'aria-label': tt('und.nameLabel', { id: s.id }) });
+      const unitIn = el('input', { type: 'text', placeholder: tt('und.unitPlaceholder'), value: s.display_unit || '', style: { flex: '1', minWidth: '0' } });
+      const saved = el('span', { class: 'small muted' });
+      const save = async () => {
+        const r = await postDecision('signal', s.id, 'set_name', { note: `named by operator${s.source_column ? ' (file header: ' + s.source_column + ')' : ''}`, newValue: { display_name: nameIn.value.trim(), display_unit: unitIn.value.trim() } });
+        if (r.ok) { s.display_name = nameIn.value.trim() || null; s.display_unit = unitIn.value.trim() || null; tbl.update(signals); saved.textContent = tt('und.nameSaved'); }
+      };
+      detail.append(el('div', { class: 'box', style: { margin: '8px 0 10px', padding: '10px 12px' } },
+        el('div', { class: 'small' }, el('b', { text: `${tt('und.header')}: ` }), s.source_column ? el('code', { text: s.source_column }) : el('span', { class: 'muted', text: tt('und.noHeader') })),
+        el('div', { class: 'hint', style: { margin: '4px 0 8px' }, text: tt('und.headerHelp', { id: s.id }) }),
+        el('div', { class: 'row', style: { gap: '8px', flexWrap: 'wrap' } }, nameIn, unitIn,
+          s.source_column ? el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => { nameIn.value = s.source_column; } }, tt('und.useHeader')) : null,
+          el('button', { class: 'btn btn-sm btn-override', type: 'button', onClick: save }, t('common.save')), saved)));
+    }
     const fp = s.fingerprint || {};
     if (SP[s.id]) detail.append(el('p', { class: 'plain-sig', style: { margin: '6px 0 10px', padding: '10px 12px', borderLeft: '3px solid var(--accent, #2bb5a0)', background: 'var(--bg-2, rgba(127,127,127,.08))', borderRadius: '0 6px 6px 0', overflowWrap: 'anywhere' }, text: SP[s.id] }));
     detail.append(kv([

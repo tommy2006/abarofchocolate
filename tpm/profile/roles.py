@@ -285,6 +285,14 @@ def apply_override(ws, settings, decision) -> dict[str, Any]:
         target.excluded = bool(nv["excluded"])
         target.excluded_reason = "operator" if target.excluded else None
         changed["excluded"] = target.excluded
+    if "display_name" in nv or "name" in nv:
+        name = str(nv.get("display_name") or nv.get("name") or "").strip()[:80] or None
+        target.display_name = name
+        changed["display_name"] = name
+    if "display_unit" in nv or "unit" in nv:
+        unit = str(nv.get("display_unit") or nv.get("unit") or "").strip()[:24] or None
+        target.display_unit = unit
+        changed["display_unit"] = unit
     if decision.action == "accept":
         for iid in target.inference_ids:
             inf = ws.inferences.get(iid)
@@ -292,7 +300,9 @@ def apply_override(ws, settings, decision) -> dict[str, Any]:
                 inf.human_status = "accepted"
                 ws.inferences.update(inf)
         changed["accepted"] = True
-    hinf = ws.inferences.add(target.id, f"operator set {changed}" if changed else f"operator {decision.action}", status="inferred", confidence=1.0, evidence_ids=[], reasoning=decision.note or "", source="human", stage=STAGE)
+    what = ", ".join(f"{k.replace('_', ' ')} = {v}" for k, v in changed.items()) if changed else decision.action
+    hev = ws.evidence.add("human_decision", f"{decision.actor_name} ({decision.role}) decided for {target.id}: {what}." + (f" Note: {decision.note}" if decision.note else ""), signals=[target.id], values={"action": decision.action, "changed": changed, "actor": decision.actor_name, "role": decision.role}, computed_by="profile.apply_override")
+    hinf = ws.inferences.add(target.id, f"operator set {what}" if changed else f"operator {decision.action}", status="inferred", confidence=1.0, evidence_ids=[hev.id], reasoning=decision.note or "", source="human", stage=STAGE)
     target.inference_ids.append(hinf.id)
     write_catalog(ws, descriptors)
     ws.log.record(ACTOR, "signal_override_applied", "signal", target.id, {"actor": f"human:{decision.actor_name}({decision.role})", "changed": changed, "note": decision.note, "inference": hinf.id})

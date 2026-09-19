@@ -94,6 +94,8 @@ class SignalDescriptor(BaseModel):
     excluded: bool = False  # excluded from detection (label/meta/constant)
     excluded_reason: Optional[str] = None
     human_role_override: Optional[str] = None
+    display_name: Optional[str] = None  # operator-given meaning ("Reactor pressure"); never inferred from headers
+    display_unit: Optional[str] = None  # operator-given unit ("kPa")
 
 
 class GroupingCandidate(BaseModel):
@@ -335,6 +337,7 @@ class RunStatus(BaseModel):
     source_path: str
     profile: str
     state: str = "pending"  # pending | running | done | failed
+    error: Optional[str] = None  # why the run failed when it died outside a stage (shown in the Runs view)
     stages: list[StageStatus] = Field(default_factory=list)
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)

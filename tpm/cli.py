@@ -229,8 +229,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.lang:
         options["language"] = args.lang
     if args.no_llm:
+        # every stage that can call a model reads one of these keys
         options["report_llm"] = False
         options["use_llm"] = False
+        options["no_llm"] = True      # diagnose
+        options["skip_llm"] = True    # profile
     stages = [s.strip() for s in args.stages.split(",") if s.strip()] if args.stages else None
     if stages:
         known = {s for s, _ in STAGES}

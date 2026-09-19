@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -40,10 +41,24 @@ class DecisionLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        # Several connections open the same log at the same moment (the API answers /status and /events for a
+        # run while the pipeline thread opens its own Workspace). On a fresh database that race ended in
+        # "database is locked" and killed the run before its first stage. Autocommit mode + busy timeout +
+        # retried initialisation make opening safe; record() takes the write lock explicitly.
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30.0, isolation_level=None)
+        self._conn.execute("PRAGMA busy_timeout=30000")
+        last: Exception | None = None
+        for attempt in range(60):
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.executescript(_SCHEMA)
+                last = None
+                break
+            except sqlite3.OperationalError as e:  # locked / busy: another connection is initialising
+                last = e
+                time.sleep(0.05 + 0.01 * attempt)
+        if last is not None:
+            raise last
 
     def _last_hash(self) -> str:
         row = self._conn.execute("SELECT hash FROM entries ORDER BY seq DESC LIMIT 1").fetchone()
@@ -61,16 +76,34 @@ class DecisionLog:
         payload = payload or {}
         ev = list(evidence_ids or [])
         with self._lock:
-            ts = now_iso()
-            prev = self._last_hash()
-            body = _canon({"ts": ts, "actor": actor, "action": action, "object_type": object_type, "object_id": object_id, "payload": payload, "evidence_ids": ev, "prev": prev})
-            h = hashlib.sha256(body.encode("utf-8")).hexdigest()
-            cur = self._conn.execute(
-                "INSERT INTO entries(ts, actor, action, object_type, object_id, payload, evidence_ids, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?)",
-                (ts, actor, action, object_type, object_id, _canon(payload), _canon(ev), prev, h),
-            )
-            self._conn.commit()
-            return LogEntry(seq=cur.lastrowid, ts=ts, actor=actor, action=action, object_type=object_type, object_id=object_id, payload=payload, evidence_ids=ev, prev_hash=prev, hash=h)
+            last: Exception | None = None
+            for attempt in range(80):
+                try:
+                    # write lock first, THEN read the last hash: two connections can never chain from the same
+                    # predecessor, so the hash chain stays linear with several writers
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        ts = now_iso()
+                        prev = self._last_hash()
+                        body = _canon({"ts": ts, "actor": actor, "action": action, "object_type": object_type, "object_id": object_id, "payload": payload, "evidence_ids": ev, "prev": prev})
+                        h = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                        cur = self._conn.execute(
+                            "INSERT INTO entries(ts, actor, action, object_type, object_id, payload, evidence_ids, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (ts, actor, action, object_type, object_id, _canon(payload), _canon(ev), prev, h),
+                        )
+                        seq = cur.lastrowid
+                        self._conn.execute("COMMIT")
+                    except Exception:
+                        try:
+                            self._conn.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                        raise
+                    return LogEntry(seq=seq, ts=ts, actor=actor, action=action, object_type=object_type, object_id=object_id, payload=payload, evidence_ids=ev, prev_hash=prev, hash=h)
+                except sqlite3.OperationalError as e:  # locked / busy
+                    last = e
+                    time.sleep(0.02 + 0.005 * attempt)
+            raise last if last is not None else RuntimeError("decision log write failed")
 
     def _row_to_entry(self, r: tuple) -> LogEntry:
         return LogEntry(seq=r[0], ts=r[1], actor=r[2], action=r[3], object_type=r[4], object_id=r[5], payload=json.loads(r[6]), evidence_ids=json.loads(r[7]), prev_hash=r[8], hash=r[9])

@@ -81,7 +81,8 @@ def _n(x: Any) -> str:
 def signal_plain(sig: dict[str, Any]) -> str:
     """One or two sentences about a signal for a non-specialist."""
     role = sig.get("human_role_override") or sig.get("structural_role") or "unknown"
-    base = f"{sig['id']} behaves like {ROLE_ONE.get(role, ROLE_ONE['unknown'])}"
+    named = f" (named \"{sig['display_name']}\"{' in ' + sig['display_unit'] if sig.get('display_unit') else ''} by an operator)" if sig.get("display_name") else ""
+    base = f"{sig['id']}{named} behaves like {ROLE_ONE.get(role, ROLE_ONE['unknown'])}"
     c = sig.get("structural_confidence")
     s = base + (f" ({_conf_words(c)}, {c:.0%})." if isinstance(c, (int, float)) else ".")
     fp = sig.get("fingerprint") or {}
@@ -278,10 +279,16 @@ def _plain_assessor(ws) -> list[str]:
         p1 += "."
     more = a.get("more_data_verdict") or {}
     less = a.get("less_data_verdict") or {}
-    wm = more.get("would_help")
-    p2 = ("Would more data help? " + ("Yes. " if wm else ("No. " if wm is False else "Unclear. ")) + str(more.get("why") or "")).strip()
-    wl = less.get("would_help")
-    p3 = ("Would removing some data help? " + ("Yes. " if wl else ("No. " if wl is False else "Unclear. ")) + str(less.get("why") or "")).strip()
+    def _verdict(v: dict, yes: str, no: str, unclear: str) -> str:
+        import re as _re
+
+        why = _re.sub(r"^\s*(yes|no|unclear)\s*[.,:;!-]*\s*", "", str(v.get("why") or ""), flags=_re.I).strip()
+        why = (why[0].lower() + why[1:]) if why and not why[:2].isupper() else why
+        head = yes if v.get("would_help") else (no if v.get("would_help") is False else unclear)
+        return (head + (": " + why if why else ".")).strip()
+
+    p2 = _verdict(more, "Adding more data of the same kind would probably help", "Adding more data of the same kind would probably not help", "It is unclear whether more data would help")
+    p3 = _verdict(less, "Removing some of the data would probably help", "Removing data would probably not help", "It is unclear whether removing data would help")
     recs = a.get("recommendations") or []
     p4 = ("Recommendations: " + " ".join(f"({i + 1}) {r.get('text')}" for i, r in enumerate(recs[:3]))) if recs else ""
     p5 = "Ask in your own words below (for example: would dropping S05 improve quality? what if we add 20 more runs?). Nothing is changed until you approve it."
