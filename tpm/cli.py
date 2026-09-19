@@ -788,8 +788,11 @@ def cmd_showcase(args: argparse.Namespace) -> int:
     settings = _settings(args)
     from .showcase import run_showcase
 
+    ws0 = _open_ws(args.run_id, settings)  # 'latest' works; a clear error for an unknown run
+    run_id = ws0.run_id
+    ws0.close()
     try:
-        res = run_showcase(args.run_id, settings, rules_file=args.rules, chat_q=not args.no_chat, lang=args.lang)
+        res = run_showcase(run_id, settings, rules_file=args.rules, chat_q=not args.no_chat, lang=args.lang)
     except Exception as e:
         return _fail(str(e))
     r = res["rules"]
@@ -937,7 +940,7 @@ def build_parser() -> argparse.ArgumentParser:
     do.set_defaults(fn=cmd_doctor)
 
     sc = sub.add_parser("showcase", help="on a finished run: compile + run rules, accept/question/override diagnoses (with the downstream effect), ask the why-chat, regenerate the report")
-    sc.add_argument("--run", dest="run_id", required=True)
+    sc.add_argument("--run", dest="run_id", required=True, metavar="RUN_ID", help="run id, or 'latest'")
     sc.add_argument("--rules", help="plain-language rules file (default: 4 rules written from the run's own catalogue)")
     sc.add_argument("--no-chat", action="store_true", help="skip the why-chat question (the local model can take a minute)")
     sc.add_argument("--lang", choices=["en", "fi", "sv"], default="en")

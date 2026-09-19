@@ -16,7 +16,15 @@ fault types and six data-quality defects, no labels, no documentation), runs the
 each stage with progress and elapsed time versus the time budget, then the workspace path and the report path.
 
 To use your own file instead: drop it on the **Runs** page (or `python -m tpm run <file>`). Headers may be absent;
-nothing needs to be labelled.
+nothing needs to be labelled. No Python? Install the Windows app from `dist/NorrinTPM-Setup.exe` (see the README).
+
+Then, on the finished run, let the app demonstrate the parts that need a person or a rule:
+
+```
+python -m tpm showcase --run latest                rules -> checks, accept / question / override and the downstream effect, why-chat, report
+python -m tpm guard-demo --run latest              the privacy guard on this run's own data: before / after, raw rows blocked
+python -m tpm report latest --format summary       one A4 page to share
+```
 
 ## 1. Sensor understanding report — *Understanding* view, report section 1
 
@@ -37,8 +45,11 @@ nothing needs to be labelled.
   blocks), validity (out-of-range spikes, unit shifts), consistency (frozen / stuck sensors, duplicates),
   timeliness (timestamp gaps). Each check has pass / warn / fail, a severity, the responsible signals, rows, and
   evidence IDs.
-- The **trust verdict** per batch: when too many signals fail, the batch is marked "data cannot be trusted" and
-  every downstream flag for that batch carries lower confidence (a red banner in the UI).
+- The **trust verdict** per batch: when too many signals fail, or whole records are bad (duplicated rows, a block
+  frozen across many signals), the batch is marked "data cannot be trusted" and every downstream flag for that
+  batch carries lower confidence (a red banner in the UI). Signals frozen or missing in the same rows are one grouped
+  finding, not twenty; every signal has a plausible range (with its source); a check that cannot run on this data
+  (e.g. timeliness without a time column) says **not testable** in grey instead of passing.
 - **Rules**: type a plain-language rule in the rule box ("S03 must stay between 100 and 140", "S07 must not change
   by more than 5 per sample", "S02 acceleration must not exceed 3 units per sample squared", cross-signal, rolling
   statistics, missing / stale …). It is compiled into a closed JSON check spec (never arbitrary code), shown for
@@ -50,11 +61,17 @@ nothing needs to be labelled.
   pre-change-point segments, densest windows) and its assumptions are listed. An operator may set a reference
   period instead.
 - Every row is scored **out-of-fold** (GroupKFold over the detected groups; a row is never scored by a model that
-  saw its own group). The timeline shows the ensemble score per group with the threshold; flags mark where the
-  score stays above it, and each flag lists the responsible signals with their share, direction and lag — never an
-  unexplained aggregate.
-- Change points give the onset (abrupt vs. gradual, first- and second-order), patterns cluster similar events
-  (`PATTERN-A …`, nameable by the operator), and cascade detection orders propagation between signal clusters.
+  saw its own group). An **event needs a lasting rise**: the median score of one window must reach a threshold
+  calibrated on held-out normal stretches; one or two high readings are point findings. When labels exist, the report
+  prints precision, recall and the false-alarm rate of normal runs (0 of 1,000 on the 6 GB practice file).
+- Each flag lists the responsible signals with their share, direction and lag; when no signal dominates it says so
+  ("about 11 signals of cluster C02") and names one lag reference instead of a precise-looking list.
+- Valves and controller outputs are recognised (0-100 % range, pinned at a limit, other signals follow them):
+  a valve stuck at its limit is **actuator saturation**, a process symptom, not a sensor fault.
+- Change points give the onset (abrupt vs. gradual, first- and second-order), patterns cluster similar events and
+  are **named from the plant's list of known failure types** when enough of its sensors lead
+  (`PATTERN-E: possibly Fault 6`), otherwise "cannot name" with the closest candidate; cascade detection orders
+  propagation between signal clusters, with upstream / downstream wording.
 - Sensor vs. process: one signal breaking its correlation structure is reported as a sensor / data problem, several
   correlated signals moving together as a process fault.
 
@@ -69,8 +86,9 @@ Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes t
   signals with a plain-language reason for each, the propagation chain, a numbered step-by-step explanation for a
   non-expert, confidence, and explicit uncertainty and assumptions.
 - The **critique** panel (bonus): code cross-checks (lead/lag consistency with the relations, batch trust, detector
-  agreement) plus a devil's-advocate pass; the verdict (supported / weakened / rejected) and the adjusted confidence
-  are shown before the diagnosis is presented.
+  agreement) and four alternatives argued from the evidence (a data problem, a process change, a saturated actuator,
+  a single broken sensor); the verdict (supported / weakened / rejected) and the adjusted confidence are shown before
+  the diagnosis is presented, and every disagreement is logged. The confidence is labelled as a heuristic score.
 - Bonus "why" interface: click *why?* on any flag or diagnosis to ask a question in natural language. The local tool
   agent answers from the evidence and can query the raw data on this machine; the answer cites evidence IDs.
 
@@ -78,18 +96,23 @@ Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes t
 
 Accept / question / override / dismiss on any inference, flag, diagnosis, rule or pattern, with a name, a mode
 (Basic / Operator / Engineer) and a note. The report lists each decision with the state **before and after**.
-Overrides feed back (e.g. a corrected role changes the next batch's checks).
+Overrides feed back (e.g. a corrected role changes the next batch's checks, and after an override a later event of
+the same kind is typed with the person's label: `python -m tpm showcase --run latest` shows it).
 
 ## 6. Decision log — *Settings > Decision log* (Engineer mode), report section 6 and appendix
 
-Every inference, check, flag, diagnosis, egress event and human decision is an entry in a SQLite log whose entries
-are SHA-256 hash-chained. *Verify chain* (UI) or `python -m tpm verify-log <run_id>` recomputes every hash. Export
-as JSONL from the UI or with `python -m tpm export <run_id>`.
+Every inference, check, flag, diagnosis, critique, egress event and human decision is an entry of its own in a
+SQLite log whose entries are SHA-256 hash-chained. *Verify chain* (UI) or `python -m tpm verify-log <run_id>`
+recomputes every hash and lists, per kind of object, whether each one has its own entry (and why not, if not); the
+Log page shows the same table. Raw readings are never logged. Export as JSONL from the UI or with
+`python -m tpm export <run_id>`.
 
 ## 7. Adaptability — report section 7, [ADAPTABILITY.md](ADAPTABILITY.md)
 
 The pipeline never learns what a reactor is. `samples/demo_records.csv` (an order table with manual-entry errors)
-goes through the same stages: run `python -m tpm run samples/demo_records.csv` and look at the same views. The
+goes through the same stages: run `python -m tpm run samples/demo_records.csv` and look at the same views. A third
+domain, a web-service log with free-text messages (`samples/demo_log.csv`), runs too: an adapter turns how often each
+kind of entry occurs and the length of the messages into signals. The
 document explains which stages are generic, which adapters change, and walks a "drifting sensor" and a "corrupted
 record batch" through the identical pipeline.
 
@@ -101,6 +124,11 @@ record batch" through the identical pipeline.
   the ledger records every external call: task, purpose, model, artifact types, payload size and hash, a preview of
   what was sent, and the guard result. Payloads that fail the guard (raw-looking series, too many numbers,
   categorical values, record-like structures) are blocked and served locally instead — the ledger shows `blocked`.
+- **See the guard work** instead of trusting a promise: *Show the guard on this run* on the Data flow page (or
+  `python -m tpm guard-demo --run latest`) puts a real message of the run through the guard (names replaced,
+  numbers rounded) and a deliberately unsafe message made of raw rows, which is blocked. Nothing is sent.
+- *Who wrote the explanations* (Data flow and Diagnoses pages, report section 8) says how many explanations a
+  model wrote and why the rest use the evidence template.
 - The model layer is swapped by configuration only: `local_llm.model` (Ollama), `external_llm.model` /
   `external_llm.base_url` (EU-hosted endpoint), profile routing per task.
 
@@ -114,7 +142,8 @@ record batch" through the identical pipeline.
 | Visual dashboards of drift over time | Monitor view (score timelines, contributions), report sparklines |
 | Critique / review step | Diagnoses view, report section 4 |
 | Exportable diagnosis and decision log | Report view → export; `python -m tpm export` |
-| Third domain (log / free-text records) | architectural walkthrough in ADAPTABILITY.md (text columns become categorical / text roles with the same detectors on their derived features) |
+| Third domain (log / free-text records) | `python -m tpm run samples/demo_log.csv`; results and what was missed in ADAPTABILITY.md |
+| One-page summary to share | Report page, *One-page summary (PDF)*; `python -m tpm report latest --format summary` |
 
 ## If something does not work
 
