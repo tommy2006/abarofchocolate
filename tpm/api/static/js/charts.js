@@ -65,6 +65,9 @@ export function plot(node, traces, layout = {}, config = {}) {
   for (const ax of ['xaxis', 'yaxis', 'yaxis2']) if (layout[ax]) lay[ax] = Object.assign({}, baseLayout()[ax] || baseLayout().yaxis, layout[ax]);
   const z = Number(state.zoom) || 1;
   if (z !== 1) { lay = zoomLayout(lay, z); traces = traces.map((tr) => zoomed(tr, z)); }
+  // Plotly draws its SVG absolutely and leaves the box as CSS made it: a chart taller than its box would cover what
+  // comes after it (the legend under the donut). The box takes the height of the chart that is really drawn.
+  if (lay.height) node.style.height = `${Math.round(lay.height)}px`;
   // Plotly follows the window only: a box that changes width by itself (a second box added next to it, the chat drawer
   // opening, the text size) is watched here, so the chart is redrawn to its box instead of spilling out or staying small
   if (!node._ro && window.ResizeObserver) {

@@ -108,7 +108,17 @@ export async function render(main, params) {
       bits.push(el('span', { class: 'small dim', text: t('live.status.rows', { n: fmt.int(s.rows) }) + ' · ' + t('live.status.every', { every: fmt.dur(snap.cfg.interval), rows: fmt.int(snap.expected_rows) }) + ' · ' + (!snap.running ? tx('live.status.finished') : snap.baseline_ready ? t('live.status.monitoring') : t('live.status.learning', { done: snap.learning, total: snap.cfg.baseline_cycles })) }));
       if (snap.next_at && snap.running) bits.push(el('span', { class: 'small dim', text: ' · ' + t('live.status.next', { time: fmt.time(snap.next_at) }) }));
     }
-    statusBox.append(el('div', {}, bits));
+    // one click stops what is running (the demo, a simulation, a watched file or a link); no trip to Settings
+    const stopBtn = s.kind === 'none' || !roleAllows('operator') ? null : el('button', { class: 'btn btn-sm live-stop', type: 'button', title: t('live.stop.hint') },
+      t(s.kind === 'simulate' || s.kind === 'demo' ? 'live.stop.sim' : 'live.stop.src'));
+    if (stopBtn) stopBtn.addEventListener('click', async () => {
+      const label = stopBtn.textContent;
+      stopBtn.disabled = true; stopBtn.textContent = t('live.stop.working');
+      const r = await api('/api/live/source/stop', { method: 'POST', body: { actor: actorName() } });
+      stopBtn.disabled = false; stopBtn.textContent = label;
+      if (r.ok) { toast(t('live.stop.done'), 'ok'); await poll(true); } else toast(errText(r), 'fail');
+    });
+    statusBox.append(el('div', { class: 'row between' }, el('div', {}, bits), stopBtn));
     // the server sends the status line as message keys (translated here); its English text is the fallback
     if (s.detail && s.kind !== 'none') statusBox.append(el('div', { class: 'small dim', text: (s.detail_msg || []).length ? s.detail_msg.map(tm).join(' ') : s.detail }));
     if (s.error) statusBox.append(el('div', { class: 'notice fail small', text: s.error }));
