@@ -55,6 +55,10 @@ def run_evaluation(ws, inputs, store, flags, settings, rule: Optional[dict[str, 
     codes_sorted = store.grp_codes[order]
     ev_flags = [f for f in flags if f.kind in ("anomaly", "drift", "changepoint")]
     flagged_groups = {f.group_id for f in ev_flags}
+    # the rows the stage really reports: a group keeps its strongest events, so these are fewer than the rule's
+    reported_by_group: dict[str, list[tuple[int, int]]] = {}
+    for f in ev_flags:
+        reported_by_group.setdefault(str(f.group_id), []).append((int(f.row_start), int(f.row_end)))
     for col in labels:
         try:
             top = con.execute(f"SELECT CAST({qident(col)} AS VARCHAR) AS v, COUNT(*) AS n FROM dataset GROUP BY v ORDER BY n DESC LIMIT 200").fetchall()
@@ -101,12 +105,15 @@ def run_evaluation(ws, inputs, store, flags, settings, rule: Optional[dict[str, 
         starts = np.concatenate([[0], cut]) if len(gs) else np.zeros(0, dtype=int)
         ends = np.concatenate([cut, [len(gs)]]) if len(gs) else np.zeros(0, dtype=int)
         flagged_sorted = np.zeros(len(gs), dtype=bool)
+        reported_sorted = np.zeros(len(gs), dtype=bool)
         for a, b in zip(starts, ends):
             group = store.groups[int(gs[a])]
             ym, sm, r = ys[a:b], ss[a:b], rs[a:b]
             has_abn = bool(ym.any())
             fm = event_rows(sm)  # the event rule, not every single reading above threshold
             flagged_sorted[a:b] = fm
+            for r0, r1 in reported_by_group.get(str(group), ()):   # the events the operator is actually shown
+                reported_sorted[a:b] |= (r >= r0) & (r <= r1)
             is_flagged = bool(fm.any()) or group in flagged_groups
             if has_abn:
                 det.append(is_flagged)
@@ -121,6 +128,13 @@ def run_evaluation(ws, inputs, store, flags, settings, rule: Optional[dict[str, 
         fp = int((flagged_sorted & (ys == 0)).sum())
         fn = int((~flagged_sorted & (ys == 1)).sum())
         res["row_level"] = {"precision": round(tp / max(1, tp + fp), 4), "recall": round(tp / max(1, tp + fn), 4), "flagged_fraction": round(float(flagged_sorted.mean()), 4) if len(flagged_sorted) else None, "rows_above_row_threshold_fraction": round(float((ss >= 1.0).mean()), 4) if len(ss) else None}
+        res["row_level"]["measures"] = "every stretch the event rule marks, whether or not the stage reported it"
+        rtp = int((reported_sorted & (ys == 1)).sum())
+        rfp = int((reported_sorted & (ys == 0)).sum())
+        rfn = int((~reported_sorted & (ys == 1)).sum())
+        res["reported_events"] = {"precision": round(rtp / max(1, rtp + rfp), 4), "recall": round(rtp / max(1, rtp + rfn), 4),
+                                  "flagged_fraction": round(float(reported_sorted.mean()), 4) if len(reported_sorted) else None, "n_events": len(ev_flags),
+                                  "measures": "only the events the stage reported (it keeps the strongest per run), i.e. what a person sees on the pages"}
         # how often an event's confidence was right, on this labelled data (evaluation only; never fed back)
         abn_groups = {store.groups[int(gs[a_])] for a_, b_ in zip(starts, ends) if ys[a_:b_].any()}
         bins = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.85), (0.85, 1.01)]

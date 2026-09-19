@@ -391,9 +391,28 @@ class Toolbox:
             for x in sigs:
                 roles[str(x.get("structural_role"))] = roles.get(str(x.get("structural_role")), 0) + 1
             act = [str(x.get("id")) for x in sigs if x.get("structural_role") == "actuator_like"]
+            cl: dict[str, int] = {}
+            for x in sigs:
+                if x.get("cluster_id"):
+                    cl[str(x["cluster_id"])] = cl.get(str(x["cluster_id"]), 0) + 1
             out["signals"] = {"total": len(sigs), "by_role": roles, "valves_or_controller_outputs": act,
-                              "clusters": len({x.get("cluster_id") for x in sigs if x.get("cluster_id")}),
-                              "note": "actuator_like = a valve or controller output (manipulated), continuous_measured / held_sampled = measurements"}
+                              "clusters": {"total": len(cl), "sizes": dict(sorted(cl.items(), key=lambda kv: -kv[1])[:6])},
+                              "note": "actuator_like = a valve or controller output (manipulated), continuous_measured / held_sampled = measurements; a CLUSTER is sensors that move together, a GROUP is one run / batch of rows of the file"}
+        except Exception:
+            pass
+        try:    # who moves first: the Understanding page draws the same relations
+            rel = ws.read_json("relations.json", {}) or {}
+            lead: dict[str, int] = {}
+            for _f, lst in (rel.get("leaders") or {}).items():
+                for e in lst or []:
+                    if e.get("leader"):
+                        lead[str(e["leader"])] = lead.get(str(e["leader"]), 0) + 1
+            pairs = rel.get("pairs") or []
+            if pairs or lead:
+                strongest = max(pairs, key=lambda x: abs(float(x.get("r") or 0)), default=None)
+                out["relations"] = {"pairs": len(pairs), "leads_most_often": dict(sorted(lead.items(), key=lambda kv: -kv[1])[:5]),
+                                    "strongest_pair": {k: strongest.get(k) for k in ("a", "b", "r", "lag")} if strongest else None,
+                                    "note": "lag > 0 means a moves first and b follows that many readings later"}
         except Exception:
             pass
         try:
@@ -402,9 +421,14 @@ class Toolbox:
             for f in flags:
                 kinds[str(f.kind)] = kinds.get(str(f.kind), 0) + 1
             groups = {f.group_id for f in flags if f.group_id}
+            rows_reported = sum(int(f.row_end) - int(f.row_start) + 1 for f in flags if f.kind in ("anomaly", "drift", "changepoint"))
+            top_ev = sorted(flags, key=lambda f: -float(f.score or 0))[:3]
             out["flags"] = {"total": len(flags), "by_kind": kinds, "groups_with_findings": len(groups),
                             "groups_in_file": (out.get("dataset") or {}).get("groups"),
-                            "note": "a group is one run / batch of the file; a finding covers a stretch of rows, so there are fewer groups than flags"}
+                            "rows_in_reported_events": rows_reported,
+                            "strongest": [{"id": f.id, "score": round(float(f.score or 0), 3), "times_the_threshold": round(float(f.score or 0), 2), "group": f.group_id,
+                                           "rows": [int(f.row_start), int(f.row_end)], "signals": [r.signal for r in (f.signals_ranked or [])[:3]]} for f in top_ev],
+                            "note": "a group is one run / batch of the file; a finding covers a stretch of rows. rows_in_reported_events counts the rows of the findings the pages show; the evaluation's flagged_fraction counts every stretch the rule marks, which is more"}
         except Exception:
             pass
         try:
@@ -418,31 +442,68 @@ class Toolbox:
                 if d.pattern_id:
                     pats[str(d.pattern_id)] = pats.get(str(d.pattern_id), 0) + 1
                     ft = str(d.fault_type or "")
-                    if d.pattern_id not in named and "possibly" in ft:
-                        named[str(d.pattern_id)] = ft
+                    if ft:   # the name the pages show: the fault type most of the pattern's findings carry now
+                        per = named.setdefault(str(d.pattern_id), {})
+                        per[ft] = per.get(ft, 0) + 1
                 v = d.critique.verdict if getattr(d, "critique", None) else None
                 if v:
                     verdicts[str(v)] = verdicts.get(str(v), 0) + 1
             n = len(diags)
+            first_sig: dict[str, int] = {}
+            for d in diags:
+                for r in (d.ranked_signals or [])[:1]:
+                    if r.signal:
+                        first_sig[str(r.signal)] = first_sig.get(str(r.signal), 0) + 1
+            sat = sum(1 for d in diags if "actuator saturation" in str(d.fault_type or ""))
             out["diagnoses"] = {"total": n,
+                                "broken_sensors": causes.get("sensor", 0),
+                                "actuator_saturation": sat,
+                                "named_first_most_often": dict(sorted(first_sig.items(), key=lambda kv: -kv[1])[:5]),
                                 "by_cause": {k: {"n": v, "share": _share(v, n)} for k, v in sorted(causes.items(), key=lambda kv: -kv[1])},
-                                "by_pattern": {k: {"n": v, "share": _share(v, n), "named": named.get(k)} for k, v in sorted(pats.items(), key=lambda kv: -kv[1])[:8]},
+                                "by_pattern": {k: {"n": v, "share": _share(v, n), "called": max((named.get(k) or {}).items(), key=lambda kv: kv[1])[0] if named.get(k) else None} for k, v in sorted(pats.items(), key=lambda kv: -kv[1])[:8]},
                                 "critique_verdicts": verdicts,
                                 "note": "cause classes: process = the process itself changed, sensor = one instrument, data = the recording, unknown = the evidence does not decide"}
         except Exception:
             pass
+        checks_all: list = []
         try:
             checks = ws.checks()
+            checks_all = list(checks)
             st: dict[str, int] = {}
             for c in checks:
                 st[str(c.status)] = st.get(str(c.status), 0) + 1
-            out["checks"] = {"total": len(checks), "by_status": st}
+            fail_types: dict[str, int] = {}
+            rows_by_type: dict[str, int] = {}
+            for c in checks:
+                if c.status == "fail":
+                    t_ = str(c.check_type)
+                    fail_types[t_] = fail_types.get(t_, 0) + 1
+                    v = c.values if isinstance(c.values, dict) else {}
+                    for key in ("n", "n_rows", "rows", "violations"):
+                        if isinstance(v.get(key), (int, float)):
+                            rows_by_type[t_] = rows_by_type.get(t_, 0) + int(v[key])
+                            break
+            out["checks"] = {"total": len(checks), "by_status": st,
+                             "failing_types": dict(sorted(fail_types.items(), key=lambda kv: -kv[1])[:6]),
+                             "rows_behind_failing_types": dict(sorted(rows_by_type.items(), key=lambda kv: -kv[1])[:6])}
+        except Exception:
+            pass
+        try:    # the operating rules a person typed, and what they found (the Data quality page lists the same)
+            rules = ws.rules()
+            if rules:
+                res: dict[str, dict[str, int]] = {}
+                for c in checks_all:
+                    if c.rule_id:
+                        res.setdefault(str(c.rule_id), {})[str(c.status)] = res.setdefault(str(c.rule_id), {}).get(str(c.status), 0) + 1
+                out["rules"] = [{"id": r.id, "text": r.text[:120], "status": r.status, "compiled": bool(r.compiled), "results_per_batch": res.get(r.id, {})} for r in rules[:12]]
         except Exception:
             pass
         try:
             tr = ws.trust()
             bad = [t for t in tr if not t.trusted]
-            out["batches"] = {"total": len(tr), "untrusted": len(bad)}
+            worst = sorted(tr, key=lambda v: float(v.trust_score or 0))[:3]
+            out["batches"] = {"total": len(tr), "untrusted": len(bad),
+                              "worst": [{"batch": v.batch_id, "trust_score": round(float(v.trust_score or 0), 3), "reasons": (v.reasons or [])[:2]} for v in worst]}
         except Exception:
             pass
         try:    # what left this machine, from the run's own egress ledger (the Data flow page reads the same file)
@@ -457,13 +518,26 @@ class Toolbox:
                                 "note": "demonstration records are shown, never sent; raw rows never leave in any profile"}
         except Exception:
             pass
-        try:    # what the assessor concluded (the Assessor page shows the same)
+        try:    # what the assessor concluded (the Assessor page shows the same fields)
             a_ = ws.read_json("assessor.json", None)
             if isinstance(a_, dict):
+                out["assessor"] = {k: a_.get(k) for k in ("combined_score", "more_data_verdict", "less_data_verdict", "summary", "coverage", "fitness") if a_.get(k) is not None}
                 recs = [str((r or {}).get("text") or r)[:200] for r in (a_.get("recommendations") or [])[:3]]
-                out["assessor"] = {k: a_.get(k) for k in ("verdict", "combined", "statement", "more_data") if a_.get(k) is not None}
                 if recs:
                     out["assessor"]["top_recommendations"] = recs
+        except Exception:
+            pass
+        try:    # what people did with the findings (the decision bar on every card writes these)
+            hum = ws.log.entries(actor_prefix="human:", limit=400)
+            acts: dict[str, int] = {}
+            last = []
+            for e in hum:
+                if e.action in ("accept", "question", "override", "dismiss", "approve_rule", "reject_rule"):
+                    acts[e.action] = acts.get(e.action, 0) + 1
+                    last.append({"action": e.action, "object": e.object_id, "by": e.actor, "note": str((e.payload or {}).get("note") or "")[:120]})
+            if acts:
+                out["human_decisions"] = {"by_action": acts, "last": last[-5:],
+                                          "note": "an override renames every later finding of the same kind, so a pattern can carry a person's label instead of a guess"}
         except Exception:
             pass
         for art, key, keep in (("quality_summary.json", "quality_verdict", ("verdict", "statement", "n_fail", "n_warn", "n_not_testable", "top_problem")),
@@ -481,7 +555,19 @@ class Toolbox:
                 else:
                     cols = data.get("columns") or {}
                     first = next(iter(cols.values()), {}) if isinstance(cols, dict) else {}
-                    out[key] = {k: first.get(k) for k in ("row_level", "group_level") if first.get(k)} or None
+                    ev = {k: first.get(k) for k in ("row_level", "group_level", "reported_events") if first.get(k)}
+                    if ev:   # every number says what it means, so an answer never has to guess
+                        rl, gl = ev.get("row_level") or {}, ev.get("group_level") or {}
+                        ev["in_plain_words"] = {
+                            "precision": f"of the rows the app marks, {float(rl.get('precision', 0)):.0%} are labelled faulty in the file" if rl.get("precision") is not None else None,
+                            "recall": (f"ROWS, not faults: of the rows the file labels faulty, {float(rl.get('recall', 0)):.0%} lie inside a marked stretch. Whether a fault is caught at all is the detection rate below "
+                                       f"({float(gl.get('detection_rate', 0)):.0%} of faulty runs), so do not say the app misses {1 - float(rl.get('recall', 0)):.0%} of the faults") if rl.get("recall") is not None else None,
+                            "detection_rate": f"{float(gl.get('detection_rate', 0)):.0%} of the faulty runs got at least one finding" if gl.get("detection_rate") is not None else None,
+                            "false_alarm_rate": f"{float(gl.get('false_alarm_rate', 0)):.0%} of the {gl.get('n_groups_normal', 0)} normal runs got a finding" if gl.get("false_alarm_rate") is not None else None,
+                            "auroc": "how well the score separates faulty rows from normal ones: 1.0 perfect, 0.5 no better than chance",
+                            "caution": "labels are used only to evaluate afterwards; detection never reads them"}
+                        ev["auroc"] = first.get("auroc_ensemble")
+                    out[key] = ev or None
             except Exception:
                 continue
         return {k: v for k, v in out.items() if v not in (None, {}, [])}
@@ -965,6 +1051,22 @@ def _run_facts(tb: "Toolbox") -> str:
     b = s.get("batches") or {}
     if b.get("total"):
         bits.append(f"{b['total']} batches, {b.get('untrusted', 0)} untrusted")
+    sg = s.get("signals") or {}
+    if sg.get("total"):
+        cl = (sg.get("clusters") or {})
+        big = max((cl.get("sizes") or {}).items(), key=lambda kv: kv[1], default=None)
+        bits.append(f"{sg['total']} sensors ({len(sg.get('valves_or_controller_outputs') or [])} valves / controller outputs) in {cl.get('total', 0)} clusters"
+                    + (f", largest {big[0]} with {big[1]} sensors" if big else ""))
+    rel = s.get("relations") or {}
+    if rel.get("leads_most_often"):
+        bits.append("leads most often: " + ", ".join(f"{k} ({v})" for k, v in list(rel["leads_most_often"].items())[:3]))
+    ev = (s.get("evaluation") or {}).get("row_level") or {}
+    gl = (s.get("evaluation") or {}).get("group_level") or {}
+    if ev.get("precision") is not None:
+        bits.append(f"evaluation against the file's labels: precision {ev['precision']:.2f}, recall {ev['recall']:.2f}, {gl.get('detection_rate', 0):.0%} of faulty runs detected, {gl.get('false_alarm_rate', 0):.0%} false alarms")
+    rows = (s.get("checks") or {}).get("rows_behind_failing_types") or {}
+    if rows:
+        bits.append("rows behind the failing checks: " + ", ".join(f"{k} {v:,}" for k, v in list(rows.items())[:3]))
     return "; ".join(bits)
 
 

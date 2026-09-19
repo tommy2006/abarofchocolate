@@ -152,13 +152,19 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
             notes.append(f"evaluation failed: {e}")
         lap("evaluation", t0)
 
-    # rows inside sustained events (the event rule), not every single reading above the row threshold
+    # rows inside the events this stage keeps - the same rule the evaluation counts with (find_segments, not the bare
+    # mask), so "rows flagged" means one thing in the report, the pages and the evaluation
     _er = (ev_meta or {}).get("event_rule") or {}
+    _min_len, _window = int(settings.detect.min_event_len), int(settings.detect.window)
+    _persist = int(_er.get("persist_rows") or 0) or None
+    _sthr = float(_er.get("sustained_threshold") or 1.0)
     n_flagged_rows = 0
     for _g, _idx in store.group_indices().items():
         _o = np.argsort(store.rows[_idx], kind="stable")
-        n_flagged_rows += int(sustained_mask(store.ens[_idx][_o], int(_er.get("persist_rows") or 1), float(_er.get("sustained_threshold") or 1.0)).sum())
+        _ens = store.ens[_idx][_o]
+        n_flagged_rows += sum(int(_b - _a) for _a, _b in find_segments(_ens, _min_len, max(_min_len, _window), window=_window, persist=_persist, sustain_thr=_sthr))
     n_rows_above_row_threshold = int((store.ens >= 1.0).sum())
+    n_rows_reported = sum(int(f.row_end) - int(f.row_start) + 1 for f in flags if f.kind in ("anomaly", "drift", "changepoint"))
     meta = {
         "detectors_configured": detector_names,
         "detectors_used": selection["selected"],
@@ -170,9 +176,13 @@ def run_detect(ws, settings, ctx: Optional[dict[str, Any]] = None) -> dict[str, 
         "scoring": score_meta,
         "events": ev_meta | {"n_flags": len(flags), "by_kind": {k: sum(1 for f in flags if f.kind == k) for k in DETECT_KINDS}, "n_onsets": len(onsets)},
         "patterns": pat_meta,
-        "rows_flagged": n_flagged_rows,
+        "rows_flagged": n_flagged_rows,  # rows inside kept events; rows_above_row_threshold counts single readings
+
         "rows_flagged_fraction": round(n_flagged_rows / max(1, store.n), 4),
         "rows_above_row_threshold": n_rows_above_row_threshold,
+        "rows_in_reported_events": n_rows_reported,
+        "rows_in_reported_events_fraction": round(n_rows_reported / max(1, store.n), 4),
+        "rows_counted": "rows_flagged = every stretch the event rule marks; rows_in_reported_events = the events this stage reported (the strongest per run); rows_above_row_threshold = single readings at or above the row threshold",
         "event_rule": _er,
         "timing_s": timing | {"total": round(time.time() - t_start, 2)},
         "time_budget_s": budget.seconds,

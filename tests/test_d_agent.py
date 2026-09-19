@@ -185,7 +185,10 @@ def test_run_summary_leaves_no_reading_in_what_an_external_model_would_see(demo)
     hybrid = load_settings(profile="hybrid")
     out = agent_mod.Toolbox(ws, hybrid, external=True).run_summary()
     text = json.dumps(out, default=str)
-    assert "row_start" not in text and "readings" not in text
+    # counts, shares and locators (ids, row ranges) only: no reading of a sensor and no series
+    assert '"values"' not in text and '"series"' not in text and "dataset.parquet" not in text
+    for key in ("mean", "median", "min", "max", "q95"):
+        assert f'"{key}"' not in text, key
     g = guard_mod.check({"tool_result": out}, hybrid, ws=ws)
     assert g.allowed, g.reason
     kept = g.sanitized_payload["tool_result"]
