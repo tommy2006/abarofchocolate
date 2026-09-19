@@ -778,6 +778,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         warn("web UI (tpm.api.server) not present; CLI + HTML report still work")
     else:
         ok("web UI module present (python -m tpm serve)")
+    _check_live_catalogue(ok, bad)
 
     _p("")
     _p(f"{problems} problem(s), {warnings} warning(s)")
@@ -814,6 +815,24 @@ def cmd_showcase(args: argparse.Namespace) -> int:
     _p(f"4. Report: {res.get('report') or res.get('report_error')}")
     _p("   Results: showcase.json in the run folder")
     return 0
+
+
+def _check_live_catalogue(ok: Callable[[str], None], bad: Callable[..., None]) -> int:
+    """The live monitor's known failure types (config/failure_signatures.yaml). An installed app built without the file
+    would silently watch for generic drift only, so a missing or empty catalogue is a problem."""
+    from .live import signatures
+
+    try:
+        sigs, files = signatures.load()
+    except Exception as e:  # noqa: BLE001
+        bad(f"live monitor: the known failure types could not be read ({e})", f"check {signatures.CONFIG_FILE}")
+        return 0
+    if sigs:
+        ok(f"live monitor: {len(sigs)} known failure types loaded from {', '.join(Path(f).name for f in files)}")
+    else:
+        bad(f"live monitor: no known failure types found at {signatures.CONFIG_FILE}",
+            "ship config/failure_signatures.yaml next to config/settings.yaml (Windows build: packaging/windows/norrin_tpm.spec datas)")
+    return len(sigs)
 
 
 def cmd_list(args: argparse.Namespace) -> int:

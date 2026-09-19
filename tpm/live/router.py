@@ -27,6 +27,11 @@ def create_router(get_monitor: Callable[[], LiveMonitor]) -> APIRouter:
     def state() -> dict[str, Any]:
         return get_monitor().snapshot()
 
+    @router.get("/alarm")
+    def alarm() -> dict[str, Any]:
+        """The current alarm card only (the app polls it on every page, so an alarm is never missed off page 7)."""
+        return get_monitor().alarm_brief()
+
     @router.get("/log")
     def log(limit: int = Query(200, ge=1, le=2000)) -> dict[str, Any]:
         return {"entries": get_monitor().read_log(limit)}

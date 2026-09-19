@@ -114,6 +114,32 @@ def test_installer_quotes_powershell_strings():
     assert inst.default_dir().name == inst.APP_ID
 
 
+def _spec_shipped_files() -> set[str]:
+    """Paths (relative to the bundle root) of the data files the Windows build ships: the file lists of
+    packaging/windows/norrin_tpm.spec, evaluated with the PyInstaller build steps left out."""
+    spec = ROOT / "packaging" / "windows" / "norrin_tpm.spec"
+    src = spec.read_text(encoding="utf-8").split("\na = Analysis(")[0]
+    src = src.replace("from PyInstaller.utils.hooks import collect_data_files, collect_submodules", "")
+    ns = {"SPECPATH": str(spec.parent), "collect_data_files": lambda *a, **k: [], "collect_submodules": lambda *a, **k: []}
+    exec(compile(src, str(spec), "exec"), ns)
+    return {(Path(dest) / Path(path).name).as_posix() for path, dest in ns["datas"]}
+
+
+def test_the_windows_build_ships_every_config_file_the_app_reads():
+    """The frozen app looks for config/*.yaml at the bundle root (tpm.config: settings.yaml, tpm.live.signatures: the
+    known failure types). A file the spec leaves out silently switches a feature off in the installed app: without
+    failure_signatures.yaml the live monitor only ever raises generic drift alarms."""
+    from tpm.live import signatures
+
+    shipped = _spec_shipped_files()
+    need = {p.relative_to(ROOT).as_posix() for p in (ROOT / "config").glob("*.yaml")}
+    need.add(signatures.CONFIG_FILE.relative_to(ROOT).as_posix())
+    missing = sorted(need - shipped)
+    assert not missing, f"packaging/windows/norrin_tpm.spec does not ship {missing}: add them to `datas` (e.g. every config/*.yaml)"
+    for page in ("tpm/api/static/logo.png", "tpm/api/static/js/views/live.js", "tpm/api/static/js/views/settings.js", "tpm/api/static/styles-live.css"):
+        assert page in shipped, page
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows installer")
 def test_installer_refuses_a_package_without_payload(tmp_path):
     inst = _load_installer()

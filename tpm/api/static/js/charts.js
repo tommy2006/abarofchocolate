@@ -1,7 +1,7 @@
 /* Plotly wrapper themed from the CSS tokens, plus inline-SVG sparklines. Plotly is served from the
    Python package at /static/vendor/plotly.min.js; when it is missing, charts degrade to a notice. */
 import { el, state, t as t0, runApi, fmt, navigate, bus, closeAllModals, refLink, cleanText, linkifyRefs, modal, decisionBar, refTypeOfId } from './core.js';
-import { runAction, hiddenInBasic } from './brief.js';
+import { runAction, hiddenInBasic, firstSentences } from './brief.js';
 
 export function tokens() {
   const cs = getComputedStyle(document.documentElement);
@@ -27,11 +27,44 @@ export function baseLayout(extra = {}) {
 }
 export const CONFIG = { displaylogo: false, responsive: true, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'toImage'], displayModeBar: 'hover' };
 
+/* Text size: a chart is drawn outside the CSS zoom of the page (.tpm-plot in styles.css), because Plotly's hover and
+   click do not know about zoom. What Plotly measures in pixels (fonts, marker sizes, margins, height) is scaled by the
+   text size here instead, and every chart is drawn again when the text size changes. */
+const DATA_KEYS = new Set(['x', 'y', 'z', 'text', 'customdata', 'hovertext', 'labels', 'values', 'ids', 'meta', 'parents']);
+function zoomed(obj, z, key = '') {
+  if (Array.isArray(obj)) return obj.length && obj[0] && typeof obj[0] === 'object' && !Array.isArray(obj[0]) ? obj.map((v) => zoomed(v, z, key)) : obj;
+  if (!obj || typeof obj !== 'object' || obj instanceof Date || ArrayBuffer.isView(obj)) return obj;   // typed arrays are data
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (DATA_KEYS.has(k)) out[k] = v;
+    else if (k === 'size' && (/font$/i.test(key) || key === 'marker')) out[k] = typeof v === 'number' ? v * z : Array.isArray(v) ? v.map((s) => (typeof s === 'number' ? s * z : s)) : v;
+    else out[k] = zoomed(v, z, k);
+  }
+  return out;
+}
+function zoomLayout(lay, z) {
+  const out = zoomed(lay, z);
+  for (const k of ['height', 'width']) if (typeof out[k] === 'number') out[k] = Math.round(out[k] * z);
+  if (out.margin) for (const s of ['l', 'r', 't', 'b', 'pad']) if (typeof out.margin[s] === 'number') out.margin[s] = Math.round(out.margin[s] * z);
+  if (out.uniformtext && typeof out.uniformtext.minsize === 'number') out.uniformtext.minsize *= z;
+  out.hoverlabel = Object.assign({}, out.hoverlabel, { font: Object.assign({ size: 13 * z }, (out.hoverlabel || {}).font) });  // Plotly's default is 13, not the layout font
+  return out;
+}
+const drawn = new Set();                                   // charts on screen, drawn again when the text size changes
+bus.on('zoom.changed', () => { for (const node of [...drawn]) { if (!node.isConnected || !node._plotArgs) { drawn.delete(node); continue; } try { plot(node, ...node._plotArgs); } catch { /* ignore */ } } });
+/** Width of a chart's box in page pixels (the size the text is laid out in), whatever the text size. */
+export function boxWidth(node) { return (node.getBoundingClientRect().width || 0) / (Number(state.zoom) || 1); }
+
 export function plot(node, traces, layout = {}, config = {}) {
   if (!window.Plotly) { node.replaceChildren(el('div', { class: 'notice warn', text: 'Plotly is not loaded (vendor/plotly.min.js missing).' })); return null; }
-  const lay = baseLayout(layout);
+  node._plotArgs = [traces, layout, config];
+  node.classList.add('tpm-plot');
+  drawn.add(node);
+  let lay = baseLayout(layout);
   // merge axis defaults with caller's axis settings
   for (const ax of ['xaxis', 'yaxis', 'yaxis2']) if (layout[ax]) lay[ax] = Object.assign({}, baseLayout()[ax] || baseLayout().yaxis, layout[ax]);
+  const z = Number(state.zoom) || 1;
+  if (z !== 1) { lay = zoomLayout(lay, z); traces = traces.map((tr) => zoomed(tr, z)); }
   // Plotly follows the window only: a box that changes width by itself (a second box added next to it, the chat drawer
   // opening, the text size) is watched here, so the chart is redrawn to its box instead of spilling out or staying small
   if (!node._ro && window.ResizeObserver) {
@@ -42,6 +75,7 @@ export function plot(node, traces, layout = {}, config = {}) {
   return window.Plotly.react(node, traces, lay, Object.assign({}, CONFIG, config));
 }
 export function purge(node) {
+  if (node) { drawn.delete(node); node._plotArgs = null; }
   if (node && node._ro) { node._ro.disconnect(); node._ro = null; }
   if (window.Plotly && node) try { window.Plotly.purge(node); } catch { /* ignore */ }
 }
@@ -86,17 +120,18 @@ export const VFB = {
   'adv.use.yes': "These rows can be used", 'adv.use.partly': "Usable, except the rows set aside", 'adv.use.no': "Do not rely on these rows",
   'adv.loading': "Looking up the answer", 'adv.showRows': "Show these rows", 'adv.more': "Show {n} more", 'adv.none': "No advice is stored for this item.",
   'adv.top': "Start here: the most important problems", 'adv.topHelp': "Each strip reads left to right: what is wrong, why, and what to do about it.",
+  'adv.moreBasic': "{n} more are listed in Operator mode.",
   'dq.viz.title': "Where the faulty data is", 'dq.viz.help': "Top: how far each batch can be trusted (green = trusted, amber = usable with care, red = not trusted). Bottom: which kind of check found a problem in which batch (grey = nothing found, amber = smaller problem, red = failed). Hover for the reason, click a batch to open it.",
   'dq.viz.score': "Trust (%)", 'dq.viz.capped': "Showing the {n} worst of {total} batches.", 'dq.viz.cell.pass': "passed", 'dq.viz.cell.warn': "smaller problem", 'dq.viz.cell.fail': "failed",
   'dq.faulty.title': "The faulty data, worst first", 'dq.faulty.none': "No faulty data was found: every check passed.", 'dq.faulty.more': "{n} further problems are listed under “Show technical analyses”.",
   'dq.faulty.batch': "Batch {id}", 'dq.faulty.wholeBatch': "the whole batch",
   'dq.checked.title': "What was checked", 'dq.checked.help': "Every batch went through the same checks. The bars show how often each check passed, found a smaller problem, or failed.",
   'dq.checked.batch': "Checks run on batch {id}", 'dq.checked.total': "{n} checks were run on {b} batches.",
-  'dq.score.title': "What the % score means", 'dq.score.means': "{pct} means: about {lost} of what this batch could tell us is lost to data problems.",
-  'dq.score.full': "100 % means: nothing in this batch is lost to data problems.",
+  'dq.score.title': "What the % score means", 'dq.score.means': "{pct} is a trust grade, not a share of lost data: 100 % means every check passed.",
+  'dq.score.full': "100 %: every check passed on this batch.",
   'dq.score.rest.trusted': "Rows marked unreliable are set aside; the rest can be used.", 'dq.score.rest.untrusted': "So much is affected that findings from this batch should not be relied on.",
   'dq.score.legend.ok': "Green: trusted, every check passed", 'dq.score.legend.warn': "Amber: usable, some rows or sensors are set aside", 'dq.score.legend.fail': "Red: below {pct}, the batch is not trusted",
-  'dq.score.how': "The score starts at 100 %. It drops mostly when many sensors have problems over a large part of the batch, somewhat for problems of the whole file (gaps, duplicates, wrong order), and slightly for small warnings.",
+  'dq.score.how': "The score is a grade, not the share of data that is lost. It starts at 100 % (every check passed) and drops most when sensors cannot be used (up to 70 points when many of them fail), less for problems of the whole batch such as gaps, duplicate rows or time going backwards (up to 30 points), and a little for smaller warnings (up to 10 points).",
   'dq.group.completeness': "Is anything missing?", 'dq.group.validity': "Are the values possible?", 'dq.group.consistency': "Do the values agree?", 'dq.group.timeliness': "Is the timing right?", 'dq.group.rule': "Your own rules",
   'diag.viz.cause': "Findings by likely cause", 'diag.viz.group': "Groups with the most findings", 'diag.viz.timeline': "When the findings happened", 'diag.viz.timelineHelp': "Each dot is one finding: further right = later in the data, higher = more serious, colour = likely cause. Click a dot to open it.",
   'diag.viz.row': "row in the data", 'diag.viz.serious': "how serious (%)", 'diag.viz.findings': "findings", 'diag.cause.process': "Process changed", 'diag.cause.sensor': "Faulty sensor", 'diag.cause.data': "Data problem", 'diag.cause.mixed': "More than one cause", 'diag.cause.unknown': "Not explained",
@@ -105,7 +140,7 @@ export const VFB = {
   'mon.viz.perSignal': "Sensors involved in the most events", 'mon.viz.events': "events", 'mon.viz.group': "group", 'mon.top': "The strongest events",
   'und.types.title': "What each sensor probably measures", 'und.types.help': "The system guesses the kind of instrument from how the values behave, not from the names. Accept a guess or correct it; your answer is recorded.",
   'und.types.confidence': "How sure", 'und.types.unitop': "Part of the plant", 'und.types.why': "Why", 'und.types.all': "All kinds", 'und.types.noGuess': "no guess yet", 'und.types.showAll': "Show all {n} sensors", 'und.types.details': "Details",
-  'und.net.title': "How the sensors interact", 'und.net.help': "Each dot is a sensor, coloured by what it probably measures. A line joins two sensors that move together: thicker = stronger, red = they move in opposite directions. An arrow points from the sensor that moves first to the one that follows. Click a dot for details.",
+  'und.net.title': "How the sensors interact", 'und.net.help': "Each dot is a sensor, coloured by what it probably measures. A line joins two sensors that move together: thicker = stronger, red = they move in opposite directions. An arrow points from the sensor that moves first to the one that follows; the number on it (+3) says how many readings later it follows. Click a dot for details.",
   'und.net.capped': "Showing the {n} strongest of {total} connections.", 'und.net.none': "No strong connections between sensors were found.", 'und.net.lag': "follows {n} readings later", 'und.net.together': "move together", 'und.net.opposite': "move in opposite directions",
   'und.kind.flow': "Flow", 'und.kind.pressure': "Pressure / level", 'und.kind.temperature': "Temperature", 'und.kind.analyzer': "Analyser / composition", 'und.kind.valve': "Valve / controller output", 'und.kind.power': "Power / speed", 'und.kind.other': "Other", 'und.kind.unknown': "Unknown",
   'und.unsure.problem': "The system is not sure what {name} measures.", 'und.unsure.reason': "Its best guess is “{guess}”, but it is only {pct} sure.", 'und.unsure.fix1': "If you know what it measures, name it; the name is used everywhere from then on.", 'und.unsure.fix2': "Accept or correct the guess so later explanations use the right words.", 'und.unsure.name': "Name this sensor",
@@ -129,10 +164,13 @@ export function chartNode(cls = '') { return el('div', { class: 'chart viz-chart
 
 // ---------------------------------------------------------------- Problem -> Reason -> Answer
 const USE_CLS = { yes: 'ok', partly: 'warn', no: 'fail' };
-/** One strip. problem / reason: string | Node | array; fix: [string]; use: yes|partly|no; extra: node(s) under the steps. */
-export function praStrip({ verdict = 'attention', problem, where, reason, reasonMore, fix = [], use, extra, label } = {}) {
+/** One strip. problem / reason: string | Node | array; fix: [string]; use: yes|partly|no; extra: node(s) under the steps.
+    compact (Basic mode): the problem, ONE sentence of reason and the first two things to do; no ids, no second-level
+    detail (pass `reason` as text so it can be cut). */
+export function praStrip({ verdict = 'attention', problem, where, reason, reasonMore, fix = [], use, extra, label, compact = false } = {}) {
+  if (compact) { label = null; reasonMore = null; fix = (fix || []).slice(0, 2); if (typeof reason === 'string') reason = firstSentences(reason, 1); }
   const col = (cls, n, head, ...kids) => el('div', { class: 'pra-col ' + cls }, el('div', { class: 'pra-head' }, el('span', { class: 'pra-num', 'aria-hidden': 'true', text: n }), head), kids);
-  return el('div', { class: 'pra', dataset: { verdict } },
+  return el('div', { class: 'pra' + (compact ? ' compact' : ''), dataset: { verdict } },
     label ? el('div', { class: 'pra-label small muted' }, label) : null,
     el('div', { class: 'pra-cols' },
       col('pra-problem', '1', vt('adv.problem'), el('p', { class: 'pra-main' }, problem), where ? el('div', { class: 'pra-where small' }, where) : null),
@@ -150,19 +188,21 @@ export async function fetchItemBrief(id) {
 }
 /** Strip of one object of the run (DIAG- / FLAG- / CHK- / batch id): summary + why + fix from GET /brief/item.
     opts: { label, where (node), extra (node), fallback: { problem, reason }, onLoad, actions (true: the object's next
-    steps as buttons), ctx (chat context of those buttons) } */
+    steps as buttons), ctx (chat context of those buttons), compact (Basic mode, see praStrip: the "Where: group ...,
+    rows ..." line and the ask buttons that name the object's id are left out too) } */
 export function praForItem(id, opts = {}) {
   const host = el('div', { class: 'pra-host', dataset: { praId: id } }, el('div', { class: 'dim small', text: vt('adv.loading') + '…' }));
+  const compact = !!opts.compact;
   (async () => {
     const d = await fetchItemBrief(id);
     const fb = opts.fallback || {};
-    if (!d) { host.replaceChildren(praStrip({ problem: fb.problem || id, reason: fb.reason, where: opts.where, extra: opts.extra, label: opts.label })); return; }
+    if (!d) { host.replaceChildren(praStrip({ problem: fb.problem || id, reason: fb.reason, where: opts.where, extra: opts.extra, label: opts.label, compact })); return; }
     const pts = d.points || [];
     const wherePt = pts.find((p) => /^(Where|Missä|Var)\b/.test(p));
     const rest = pts.filter((p) => p !== wherePt);
-    const extra = [opts.actions ? briefActionButtons(d.actions, opts.ctx, { skipRef: id }) : null, opts.extra || null].filter(Boolean);
-    host.replaceChildren(praStrip({ verdict: d.verdict, problem: d.headline, where: [wherePt ? el('div', { text: wherePt }) : null, opts.where || null], reason: d.why || fb.reason || rest[0],
-      reasonMore: (d.why ? rest : rest.slice(1)).map((p) => el('div', { text: p })), fix: d.fix || [], use: d.can_use_rows, extra: extra.length ? extra : null, label: opts.label }));
+    const extra = [opts.actions ? briefActionButtons(d.actions, opts.ctx, { skipRef: id, noAsk: compact }) : null, opts.extra || null].filter(Boolean);
+    host.replaceChildren(praStrip({ verdict: d.verdict, problem: d.headline, where: [wherePt && !compact ? el('div', { text: wherePt }) : null, opts.where || null], reason: (compact && d.because) || d.why || fb.reason || rest[0],
+      reasonMore: (d.why ? rest : rest.slice(1)).map((p) => el('div', { text: p })), fix: d.fix || [], use: d.can_use_rows, extra: extra.length ? extra : null, label: opts.label, compact }));
     if (opts.onLoad) opts.onLoad(d);
   })();
   return host;
@@ -176,6 +216,10 @@ export function basicItemModal(id, { ctx } = {}) {
   const typeName = t0('ref.' + type) === 'ref.' + type ? type : t0('ref.' + type);
   const bar = decide ? el('div', { class: 'brief-decide' }, decisionBar(decide, id, { askContext: askCtx })) : null;
   modal({ title: `${typeName} ${id}`, body: el('div', { class: 'basic-item' }, praForItem(id, { extra: bar, actions: true, ctx: askCtx })), wide: true });
+}
+/** Basic mode shows ONE strip per page: how many more there are, and that Operator mode lists them. */
+export function basicMore(n) {
+  return n > 0 ? el('p', { class: 'small muted basic-more', text: vt('adv.moreBasic', { n: fmt.int(n) }) }) : null;
 }
 /** A capped list with "Show N more". make(i) builds item i lazily. */
 export function cappedList(n, cap, make, { cls = 'pra-list' } = {}) {
@@ -354,7 +398,7 @@ export function trustGrid(node, { batches, scores, verdicts, types, z, hover, co
   const nT = Math.max(1, types.length);
   // a narrow box (a phone, large text): short names for the kinds of checks (the hover keeps the full ones) and
   // turned batch names, or the names take the whole width
-  const narrow = (node.clientWidth || 800) < 560;
+  const narrow = (boxWidth(node) || 800) < 560;
   const seen = new Set();
   types = types.map((ty) => { let s = narrow && String(ty).length > 16 ? String(ty).slice(0, 15) + '…' : String(ty); while (seen.has(s)) s += ' '; seen.add(s); return s; });
   const gridShare = Math.min(0.66, 0.16 + 0.045 * nT);
@@ -381,10 +425,11 @@ export function stackedBar(node, labels, series, { height, xtitle, onClick } = {
   if (onClick && p && p.then) p.then(() => { if (node.on) node.on('plotly_click', (ev) => { const pt = ev.points && ev.points[0]; if (pt) onClick(pt.y); }); });
   return p;
 }
-/** The next-step buttons of an item brief ("Check X on site", "Ask ..."); `skipRef` drops the button that only points at the object itself. */
-export function briefActionButtons(actions, ctx, { skipRef } = {}) {
+/** The next-step buttons of an item brief ("Check X on site", "Ask ..."); `skipRef` drops the button that only points
+    at the object itself, `noAsk` the chat questions (a Basic-mode strip: they name the object's id). */
+export function briefActionButtons(actions, ctx, { skipRef, noAsk = false } = {}) {
   // the same behaviour as the next steps of a summary card (js/brief.js), Basic mode included
-  const acts = (actions || []).filter((a) => a && a.text && !(skipRef && a.ref === skipRef && !a.ask) && !hiddenInBasic(a));
+  const acts = (actions || []).filter((a) => a && a.text && !(skipRef && a.ref === skipRef && !a.ask) && !hiddenInBasic(a) && !(noAsk && a.ask && !a.view));
   if (!acts.length) return null;
   return el('div', { class: 'pra-btns' }, acts.map((a) => { const ask = !!(a.ask && !a.view); return el('button', { class: 'btn btn-sm' + (ask ? ' ask' : ''), type: 'button', onClick: () => runAction(a, ctx) }, el('span', { 'aria-hidden': 'true', text: ask ? '? ' : '→ ' }), a.text); }));
 }

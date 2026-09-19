@@ -297,8 +297,10 @@ def _mark_covered(rows: list[dict[str, Any]]) -> None:
 
 def best_cause(rows: list[dict[str, Any]]) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
     """The signature that explains the alarm best (occurring before imminent, documented sensors before generic,
-    higher score, more specific pattern) and the others that match too."""
-    active = [r for r in rows if r["status"] in ("occurring", "imminent")]
+    higher score, more specific pattern) and the others that match too. A generic row that another active signature
+    covers (``covered_by``) is only the vague version of that cause and never takes its place: while Fault 1 builds up
+    (imminent) the plain mean shift on its sensors may already be "occurring", and the cause is still Fault 1."""
+    active = [r for r in rows if r["status"] in ("occurring", "imminent") and not r.get("covered_by")]
     if not active:
         return None, []
     active.sort(key=lambda r: (r["status"] != "occurring", r["generic"], -r["score"], -r["matched"], -SPECIFICITY.get(r["pattern"], 0)))
