@@ -94,7 +94,8 @@ def test_points_get_one_diagnosis_without_onset_pattern_or_propagation(points_ru
     assert "glitch" in text and "manipulation" in text
     assert "no onset" in text.lower()
     assert ws.patterns() == []
-    assert not (ws.read_json("propagation.json", {}) or {})
+    assert ws.exists("propagation"), "detect writes the propagation artifact even when it is empty"
+    assert not (ws.read_json("propagation", {}) or {})
 
 
 def _flag(fid: str, group: str, sigs: list[tuple[str, float, int]]) -> Flag:
