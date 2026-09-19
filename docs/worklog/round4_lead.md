@@ -94,3 +94,11 @@ A rename existed only inside the Understanding detail pane and did not reach the
   to local); EV/INF/RULE item briefs are English-only; `router.agent_chat` has no "no local fallback" switch (one
   wasted local call in a rare path); the installed app has its own empty workspace (runs of the source checkout are
   not shown there).
+
+## Real Anthropic benchmark done (2026-09-19 evening)
+The user added ANTHROPIC_WORKSPACE_ID; real calls to claude-sonnet-5 work. `bench-llm --run bench_hybrid --n 2`:
+sensor_hypotheses 35.8 s local vs 19.6 s external; diagnosis_narrative 10.1 vs 14.6; critique 12.6 vs 17.8;
+report_narrative 16.2 vs 15.7; chat 31.7 vs 17.0; 4 external calls at once 19.5 s wall clock for 65 s of model time.
+16 calls, 88 k input / 22 k output tokens. Conclusion (in README): single short calls are not faster than the local
+GPU; the gain is concurrency and chat. `external_llm.thinking: disabled` was tried on 4 calls: no gain
+(16.0 s / 34.6 s), left at "default". The demo server (port 8000, ../norrin_demo) loads the project's .env.

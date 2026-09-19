@@ -66,6 +66,7 @@ class ExternalLLMConfig(BaseModel):
     base_url: Optional[str] = None
     max_tokens: int = 4096  # output cap per call; thinking tokens count toward it on Sonnet 5 / Opus 5
     effort: str = "low"  # output_config.effort: low | medium | high | xhigh | max (low = fastest)
+    thinking: str = "default"  # "disabled" sends thinking: disabled (fewer output tokens, faster answers)
     timeout_s: int = 60
     max_calls_per_run: int = 200  # successful external calls per run workspace (pipeline + chat)
     max_calls_per_chat_turn: int = 6

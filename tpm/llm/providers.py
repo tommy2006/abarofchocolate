@@ -453,6 +453,8 @@ class AnthropicProvider:
             kwargs["tool_choice"] = {"type": "tool", "name": self.TOOL_NAME}
             if not self.cfg.endpoint_is_first_party():
                 kwargs["thinking"] = {"type": "disabled"}  # Bedrock-hosted endpoints reject a forced tool call with thinking on
+        if str(getattr(self.cfg, "thinking", "default")).lower() == "disabled":
+            kwargs["thinking"] = {"type": "disabled"}
         client = self._client()
         t0 = time.time()
         try:

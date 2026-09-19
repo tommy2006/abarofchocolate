@@ -160,12 +160,28 @@ answer; when a limit is reached, or the guard or the API refuses, the task runs 
 Every attempt - sent, refused, over budget, failed - is in the egress ledger with the sanitised preview and token
 counts, shown on the Data-flow page. An organisation-level API key also needs `ANTHROPIC_WORKSPACE_ID` in `.env`.
 
-**What it speeds up (measured on the 6 GB practice file, this laptop: 1355 s in total).** 89 % of that time is
-number crunching on raw data (ingest, quality checks, detection), which must stay local and cannot be outsourced.
-The model calls were 149 s (5 calls of 25-37 s). In hybrid these run concurrently, so more findings get a written
-explanation in less time, and a chat answer no longer waits for several slow local calls in a row. Measure it on
-your own machine and run: `python -m tpm bench-llm --run <run_id> --profile hybrid` (writes `llm_benchmark.json`,
-shown on the Data-flow page).
+**What it speeds up - measured, not assumed.** On the 6 GB practice file (this laptop, 1355 s in total) 89 % of
+the time is number crunching on raw data (ingest, quality checks, detection). That must stay local and cannot be
+outsourced. The model calls were 149 s (5 calls, one after the other).
+
+Real benchmark on 2026-09-19 (`python -m tpm bench-llm`, RTX 4060 laptop, local `gemma4:e4b-it-qat` vs
+`claude-sonnet-5`, median of 2 calls, same sanitised payloads):
+
+| Task | Local | Claude Sonnet 5 | |
+|---|---|---|---|
+| Sensor hypotheses (largest payload) | 35.8 s | 19.6 s | 1.8x faster |
+| Diagnosis narrative | 10.1 s | 14.6 s | slower |
+| Critique | 12.6 s | 17.8 s | slower |
+| Report summary | 16.2 s | 15.7 s | same |
+| One chat answer (tool agent) | 31.7 s | 17.0 s | 1.9x faster |
+| **4 calls at once** | one after the other (about 65 s) | **19.5 s wall clock** | 3.3x faster |
+
+So a single short call is *not* faster over the network than on a local GPU. The gain is that external calls run
+side by side: the diagnose stage writes narratives and critiques for up to 12 findings concurrently instead of 2
+sequentially, and chat answers arrive in about half the time. For a full 6 GB analysis this saves roughly two of
+about twenty-two minutes; the rest is local computation by design. The benchmark used 16 calls
+(88 k input and 22 k output tokens). Repeat it on your machine:
+`python -m tpm bench-llm --run <run_id> --profile hybrid` (writes `llm_benchmark.json`, shown on the Data-flow page).
 
 Switch with `TPM_PROFILE=hybrid`, `--profile hybrid`, or on the Data-flow page. Details: [docs/DATAFLOW.md](docs/DATAFLOW.md),
 contract of the feature: [docs/HYBRID_SPEC.md](docs/HYBRID_SPEC.md).
