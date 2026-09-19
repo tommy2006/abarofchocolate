@@ -408,5 +408,11 @@
   "heatmap_title": "How the sensors move together",
   "heatmap_intro": "Correlation between the {n} most connected signals, measured on normal-looking rows.",
   "lag_summary": "Who moves first (lead and lag)",
-  "lag_line": "{lead} moves first; {follow} follows about {lag} samples later (correlation {r})."
+  "lag_line": "{lead} moves first; {follow} follows about {lag} samples later (correlation {r}).",
+  "trends_title": "Gradual drift and trends (per signal)",
+  "trends_intro": "{n} events were classified as gradual drift. For the strongest drifts (then the longest other events) the plot shows the leading signal through the event: the shaded band is its normal range (median +- 3 robust spreads on the normal rows), red dots are readings outside it.",
+  "trend_stats": "trend over the event: Kendall's tau {tau}, {sig} at the 1 % level; {outside} of the readings outside the normal band",
+  "trends_none": "No drift or long event to plot.",
+  "trend_sig_yes": "significant",
+  "trend_sig_no": "not significant"
 }

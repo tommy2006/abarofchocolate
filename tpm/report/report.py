@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+import numpy as np
 import math
 import os
 import re
@@ -399,6 +401,74 @@ def _trust_series(trust: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+MAX_TRENDS = 8
+
+
+def _drift_trends(ws: Workspace, flags: list[dict[str, Any]], signals: list[dict[str, Any]], baseline: Any) -> Optional[dict[str, Any]]:
+    """Gradual drift as its own output: for the strongest drift events (then the longest other events), the leading
+    signal's level through the event with its normal band (median +- 3 robust spreads on the baseline rows) and a
+    trend test (Kendall's tau on time, Theil-Sen slope). Reads dataset.parquet locally; nothing leaves the machine."""
+    if not ws.exists("dataset"):
+        return None
+    try:
+        from scipy.stats import kendalltau, theilslopes
+    except Exception:
+        return None
+    drift = [f for f in flags if f.get("kind") == "drift"]
+    others = [f for f in flags if f.get("kind") == "anomaly" and (int(f.get("row_end") or 0) - int(f.get("row_start") or 0)) >= 60]
+    pick = sorted(drift, key=lambda f: -float(f.get("severity") or 0))[:MAX_TRENDS]
+    if len(pick) < MAX_TRENDS:
+        pick += sorted(others, key=lambda f: -(int(f.get("row_end") or 0) - int(f.get("row_start") or 0)))[: MAX_TRENDS - len(pick)]
+    if not pick:
+        return {"items": [], "n_drift": 0}
+    col_of = {s.get("id"): s.get("source_column") or s.get("id") for s in signals}
+    name_of = {s.get("id"): s.get("display_name") or s.get("id") for s in signals}
+    try:
+        con = ws.duckdb().cursor()
+    except Exception:
+        con = ws.duckdb()
+    ranges = [(int(a), int(b)) for rr in ((baseline or {}).get("ranges") or {}).values() for a, b in rr][:400] if isinstance(baseline, dict) else []
+    items = []
+    for f in pick:
+        ranked = f.get("signals_ranked") or []
+        if not ranked:
+            continue
+        sig = ranked[0].get("signal")
+        col = col_of.get(sig)
+        if not col:
+            continue
+        a, b = int(f["row_start"]), int(f["row_end"])
+        lo = max(0, a - max(40, (b - a) // 4))
+        try:
+            q = f'SELECT "{col}" FROM dataset WHERE __row__ BETWEEN ? AND ? ORDER BY __row__'
+            vals = [r[0] for r in con.execute(q, [lo, b]).fetchall()]
+            band = None
+            if ranges:
+                cond = " OR ".join(f"(__row__ BETWEEN {s0} AND {e0})" for s0, e0 in ranges[:200])
+                base = [r[0] for r in con.execute(f'SELECT "{col}" FROM dataset WHERE {cond} USING SAMPLE 20000 ROWS').fetchall() if r[0] is not None]
+                if len(base) >= 30:
+                    med = float(np.median(base))
+                    mad = 1.4826 * float(np.median(np.abs(np.asarray(base, dtype=float) - med))) or float(np.std(base)) or 1e-9
+                    band = (med - 3 * mad, med + 3 * mad)
+        except Exception:
+            continue
+        v = np.asarray([x for x in vals if x is not None], dtype=float)
+        if len(v) < 10:
+            continue
+        step = max(1, len(v) // 300)
+        vs = v[::step]
+        inside = v[(a - lo):] if a - lo < len(v) else v
+        tau, p = kendalltau(np.arange(len(inside)), inside)
+        slope = theilslopes(inside[:: max(1, len(inside) // 400)])[0] * max(1, len(inside) // 400) if len(inside) >= 10 else 0.0
+        marks = [i for i, x in enumerate(vs) if band and (x < band[0] or x > band[1])]
+        sig_word = "significant" if (p is not None and p < 0.01 and abs(tau) >= 0.2) else "not significant"
+        items.append({"flag": f.get("id"), "kind": f.get("kind"), "group": f.get("group_id"), "signal": sig, "name": name_of.get(sig, sig), "rows": [a, b],
+                      "svg": charts.trend_plot(list(vs), band, marks, label=f"{name_of.get(sig, sig)} - {f.get('id')}", x_labels=(f"row {lo}", f"row {b}")),
+                      "tau": None if tau is None or np.isnan(tau) else round(float(tau), 2), "p": None if p is None or np.isnan(p) else float(p), "slope": round(float(slope), 6), "significance": sig_word,
+                      "outside_share": round(len(marks) / max(1, len(vs)), 3), "band": None if band is None else [round(band[0], 4), round(band[1], 4)]})
+    return {"items": items, "n_drift": len(drift)}
+
+
 def _diverse(diags: list[dict[str, Any]], sev: dict[int, float]) -> list[dict[str, Any]]:
     """A varied sample instead of the top-N of one artefact: diagnoses are grouped by (cause, pattern / fault type) and
     taken round-robin, the most severe of each group first."""
@@ -646,7 +716,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     flags_by_kind = [(t.kind(k), n) for k, n in Counter(str(f.get("kind")) for f in sustained).most_common(8)]
     flags_by_cause = [(t.cause(k), n) for k, n in Counter(str(f.get("likely_cause_class")) for f in sustained if f.get("likely_cause_class")).most_common(8)]
     suspicious = _suspicious(ws, point_flags, evidence, explain, t)
-    detect = {"baseline_why": _baseline_ctx(baseline), "heatmap": _heatmap_ctx(relations, signals), "flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
+    detect = {"trends": _drift_trends(ws, sustained, signals, baseline), "baseline_why": _baseline_ctx(baseline), "heatmap": _heatmap_ctx(relations, signals), "flags_by_kind": flags_by_kind, "flags_by_cause": flags_by_cause, "detector_legend": [d for d in det_cache.values() if d["full"] and d["short"] != d["full"]], "baseline": baseline, "baseline_items": _scalars(baseline), "baseline_assumptions": (baseline or {}).get("assumptions") if isinstance(baseline, dict) else None, "detect_meta": detect_meta, "detect_items": _scalars(detect_meta), "timelines": tl, "flags": flag_rows, "n_flags": len(sustained), "n_point_flags": len(point_flags), "group_summary": _group_summary(ws, sustained, schema), "patterns": [{**p, "name_label": p.get("name") or t("unnamed"), "signature_text": _short(json.dumps(p.get("signature"), ensure_ascii=False), 200)} for p in patterns], "threshold": (tl or {}).get("threshold")}
 
     # ---- diagnoses
     diag_rows = []

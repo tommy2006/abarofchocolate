@@ -408,5 +408,11 @@
   "heatmap_title": "Hur givarna rör sig tillsammans",
   "heatmap_intro": "Korrelation mellan de {n} mest sammankopplade signalerna, mätt på normalt utseende rader.",
   "lag_summary": "Vem rör sig först (ledning och fördröjning)",
-  "lag_line": "{lead} rör sig först; {follow} följer ungefär {lag} sampel senare (korrelation {r})."
+  "lag_line": "{lead} rör sig först; {follow} följer ungefär {lag} sampel senare (korrelation {r}).",
+  "trends_title": "Gradvis drift och trender (per signal)",
+  "trends_intro": "{n} händelser klassades som gradvis drift. För de starkaste drifterna (sedan de längsta andra händelserna) visar diagrammet den ledande signalen genom händelsen: det skuggade bandet är dess normala intervall (median +- 3 robusta spridningar på de normala raderna), röda punkter är avläsningar utanför det.",
+  "trend_stats": "trend under händelsen: Kendalls tau {tau}, {sig} på 1 %-nivån; {outside} av avläsningarna utanför det normala bandet",
+  "trends_none": "Ingen drift eller lång händelse att visa.",
+  "trend_sig_yes": "signifikant",
+  "trend_sig_no": "inte signifikant"
 }

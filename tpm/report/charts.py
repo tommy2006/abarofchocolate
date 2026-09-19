@@ -240,3 +240,37 @@ def heatmap(labels: Sequence[str], matrix: Sequence[Sequence[Optional[float]]], 
     out.append(f'<text x="{pad}" y="{ly}" font-size="9" fill="{PALETTE["muted"]}">blue = move in opposite directions, red = move together, white = unrelated</text>')
     out.append("</svg>")
     return "".join(out)
+
+
+def trend_plot(values: Sequence[float], band: Optional[tuple[float, float]], marks: Sequence[int] = (), width: int = 640, height: int = 110, label: str = "", x_labels: Optional[tuple[str, str]] = None) -> str:
+    """A signal's level over an event with its normal band (shaded) and markers where it is outside the band."""
+    vals = [float(v) for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    if len(vals) < 2:
+        return ""
+    lo_b, hi_b = band if band else (None, None)
+    vmin = min(vals + ([lo_b] if lo_b is not None else []))
+    vmax = max(vals + ([hi_b] if hi_b is not None else []))
+    span = (vmax - vmin) or 1.0
+    pad_l, pad_r, pad_t, pad_b = 52, 8, 14, 18
+    w, h = width - pad_l - pad_r, height - pad_t - pad_b
+    n = len(vals)
+    x = lambda i: pad_l + w * i / max(1, n - 1)  # noqa: E731
+    y = lambda v: pad_t + h - (v - vmin) / span * h  # noqa: E731
+    parts = [f'<svg class="spark" viewBox="0 0 {width} {height}" width="100%" preserveAspectRatio="none" role="img" aria-label="{escape(label)}">']
+    parts.append(f'<rect x="{pad_l}" y="{pad_t}" width="{w}" height="{h}" fill="#fff" stroke="{PALETTE["grid"]}"/>')
+    if lo_b is not None and hi_b is not None:
+        parts.append(f'<rect x="{pad_l}" y="{y(hi_b):.1f}" width="{w}" height="{max(1.0, y(lo_b) - y(hi_b)):.1f}" fill="{PALETTE["primary_soft"]}" opacity="0.55"><title>normal band</title></rect>')
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
+    parts.append(f'<polyline points="{pts}" fill="none" stroke="{PALETTE["primary"]}" stroke-width="1.4" vector-effect="non-scaling-stroke"/>')
+    for i in marks:
+        if 0 <= i < n:
+            parts.append(f'<circle cx="{x(i):.1f}" cy="{y(vals[i]):.1f}" r="2.2" fill="{PALETTE["fail"]}"/>')
+    parts.append(f'<text x="{pad_l - 4}" y="{pad_t + 4}" font-size="10" text-anchor="end" fill="{PALETTE["muted"]}">{_fmt(vmax)}</text>')
+    parts.append(f'<text x="{pad_l - 4}" y="{pad_t + h}" font-size="10" text-anchor="end" fill="{PALETTE["muted"]}">{_fmt(vmin)}</text>')
+    if x_labels:
+        parts.append(f'<text x="{pad_l}" y="{height - 4}" font-size="10" fill="{PALETTE["muted"]}">{escape(str(x_labels[0]))}</text>')
+        parts.append(f'<text x="{pad_l + w}" y="{height - 4}" font-size="10" text-anchor="end" fill="{PALETTE["muted"]}">{escape(str(x_labels[1]))}</text>')
+    if label:
+        parts.append(f'<text x="{pad_l + 4}" y="{pad_t + 12}" font-size="11" fill="{PALETTE["ink"]}" font-weight="600">{escape(label)}</text>')
+    parts.append("</svg>")
+    return "".join(parts)

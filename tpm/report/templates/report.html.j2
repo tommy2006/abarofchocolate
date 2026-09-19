@@ -334,6 +334,14 @@ details > summary { cursor: pointer; }
     </div>
   </div>
 
+  {% if detect.trends %}
+  <h3>{{ t('trends_title') }}</h3>
+  <p class="intro">{{ t('trends_intro', n=detect.trends.n_drift) }}</p>
+  {% for it in detect.trends['items'] %}
+  <div class="timeline-card">{{ it.svg|safe }}<span class="small">{{ it.kind }} <a class="ref mono" href="#{{ it.flag }}">{{ it.flag }}</a> · {{ t('group') }} {{ it.group }} · {{ t('trend_stats', tau=(it.tau if it.tau is not none else '-'), sig=(t('trend_sig_yes') if it.significance == 'significant' else t('trend_sig_no')), outside=it.outside_share|pct) }}</span></div>
+  {% endfor %}
+  {% if not detect.trends['items'] %}<p class="na">{{ t('trends_none') }}</p>{% endif %}
+  {% endif %}
   <h3>{{ t('s3_timelines') }}{% if detect.timelines and detect.timelines.threshold is not none %} — {{ t('threshold') }} {{ detect.timelines.threshold|num }}{% endif %}</h3>
   {% if detect.timelines and detect.timelines.timelines %}
   {% for tl in detect.timelines.timelines %}

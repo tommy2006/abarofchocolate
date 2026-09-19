@@ -408,5 +408,11 @@
   "heatmap_title": "Miten anturit liikkuvat yhdessä",
   "heatmap_intro": "Korrelaatio {n} eniten kytkeytyneen signaalin välillä, mitattuna normaalilta näyttävillä riveillä.",
   "lag_summary": "Kuka liikkuu ensin (johto ja viive)",
-  "lag_line": "{lead} liikkuu ensin; {follow} seuraa noin {lag} näytettä myöhemmin (korrelaatio {r})."
+  "lag_line": "{lead} liikkuu ensin; {follow} seuraa noin {lag} näytettä myöhemmin (korrelaatio {r}).",
+  "trends_title": "Hidas ajautuminen ja trendit (signaaleittain)",
+  "trends_intro": "{n} tapahtumaa luokiteltiin hitaaksi ajautumiseksi. Voimakkaimmista ajautumista (sitten pisimmistä muista tapahtumista) kuva näyttää johtavan signaalin tapahtuman läpi: varjostettu alue on sen normaali vaihteluväli (mediaani +- 3 robustia hajontaa normaaleilla riveillä), punaiset pisteet ovat lukemia sen ulkopuolella.",
+  "trend_stats": "trendi tapahtuman aikana: Kendallin tau {tau}, {sig} 1 %:n tasolla; {outside} lukemista normaalin alueen ulkopuolella",
+  "trends_none": "Ei piirrettävää ajautumista tai pitkää tapahtumaa.",
+  "trend_sig_yes": "merkitsevä",
+  "trend_sig_no": "ei merkitsevä"
 }
