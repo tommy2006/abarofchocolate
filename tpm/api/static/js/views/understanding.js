@@ -66,7 +66,7 @@ export async function render(main, params = {}) {
     clear(detail);
     detail.append(el('div', { class: 'row between' }, el('h3', {}, `${t('und.detail')}: ${s.id}`, s.source_column ? el('span', { class: 'muted small', text: ` (${t('und.sourceName')}: ${s.source_column})` }) : null), el('button', { class: 'btn btn-sm', type: 'button', onClick: () => openChat(signalContext(s)) }, t('common.ask'))));
     const fp = s.fingerprint || {};
-    if (SP[s.id]) detail.append(el('p', { class: 'plain-sig', style: 'margin:6px 0 10px;padding:10px 12px;border-left:3px solid var(--accent, #2bb5a0);background:var(--bg-2, rgba(127,127,127,.08));border-radius:0 6px 6px 0;overflow-wrap:anywhere', text: SP[s.id] }));
+    if (SP[s.id]) detail.append(el('p', { class: 'plain-sig', style: { margin: '6px 0 10px', padding: '10px 12px', borderLeft: '3px solid var(--accent, #2bb5a0)', background: 'var(--bg-2, rgba(127,127,127,.08))', borderRadius: '0 6px 6px 0', overflowWrap: 'anywhere' }, text: SP[s.id] }));
     detail.append(kv([
       [t('und.role'), el('span', {}, (s.human_role_override || s.structural_role).replace(/_/g, ' '), ' ', conf(s.structural_confidence))],
       [t('und.instrument'), s.instrument_hypothesis ? el('span', {}, s.instrument_hypothesis, ' ', conf(s.instrument_confidence)) : null],
