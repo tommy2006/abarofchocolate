@@ -251,6 +251,15 @@ _KIND_STEP = {
            "changepoint": "Leta efter en plötslig orsak i början av stället ({where}): en brytare, en ändrad inställning, en utlösning, en ventil.",
            "cascade": "Börja här: {sensor}. Störningen startade där; de andra givarna följde bara efter."},
 }
+# the first step for a sensor that is probably faulty: the same kind of event points at the instrument, not the process
+_KIND_STEP_SENSOR = {
+    "en": {"drift": "A slow drift of one sensor usually means fouling, calibration drift or a failing transmitter: check those first.",
+           "changepoint": "A sudden jump of one sensor alone usually means a replaced or re-calibrated instrument, a loose connection or a changed range: check what was done to it at the start of {where}."},
+    "fi": {"drift": "Yhden anturin hidas ajautuminen johtuu yleensä likaantumisesta, kalibroinnin ryöminnästä tai vikaantuvasta lähettimestä: tarkista ne ensin.",
+           "changepoint": "Yhden anturin äkillinen hyppy johtuu yleensä vaihdetusta tai uudelleen kalibroidusta mittalaitteesta, löysästä liitoksesta tai muutetusta mittausalueesta: tarkista, mitä sille tehtiin kohdan ({where}) alussa."},
+    "sv": {"drift": "En långsam drift hos en enskild givare beror oftast på nedsmutsning, kalibreringsdrift eller en felande transmitter: kontrollera dem först.",
+           "changepoint": "Ett plötsligt hopp hos en enskild givare beror oftast på ett utbytt eller omkalibrerat instrument, en glapp anslutning eller ett ändrat mätområde: kontrollera vad som gjordes med den i början av stället ({where})."},
+}
 _CAUSE_USE = {"process": "yes", "sensor": "partly", "data": "no", "mixed": "partly", "unknown": "partly"}
 
 _BATCH = {
@@ -285,15 +294,18 @@ def _build() -> dict[str, dict[str, dict[str, Any]]]:
         for cause in CAUSES:
             for kind in FLAG_KINDS:
                 what = _KIND_WHAT[lang][kind]
+                # "because": the cause sentence alone (the first sentence of "why" only says what happened again); the
+                # short Basic-mode strip shows it as the reason
                 if kind == "point":
-                    e = {"why": what + " " + _CAUSE_WHY[lang]["point"], "fix": list(spike["fix"]), "use": "partly"}
+                    e = {"why": what + " " + _CAUSE_WHY[lang]["point"], "because": _CAUSE_WHY[lang]["point"], "fix": list(spike["fix"]), "use": "partly"}
                 elif kind == "dq":
-                    e = {"why": what + " " + _CAUSE_WHY[lang]["data"], "fix": list(data_fix), "use": "partly"}
+                    e = {"why": what + " " + _CAUSE_WHY[lang]["data"], "because": _CAUSE_WHY[lang]["data"], "fix": list(data_fix), "use": "partly"}
                 elif kind == "rule":
-                    e = {"why": what + " " + _CAUSE_WHY[lang][cause], "fix": list(rule["fix"]), "use": "yes"}
+                    e = {"why": what + " " + _CAUSE_WHY[lang][cause], "because": _CAUSE_WHY[lang][cause], "fix": list(rule["fix"]), "use": "yes"}
                 else:
-                    step = _KIND_STEP[lang].get(kind)
-                    e = {"why": what + " " + _CAUSE_WHY[lang][cause], "fix": (([step] if step else []) + list(_CAUSE_FIX[lang][cause]))[:MAX_FIX], "use": _CAUSE_USE[cause]}
+                    # the kind's first step fits the cause: a faulty sensor gets the instrument version, a data problem none
+                    step = None if cause == "data" else (_KIND_STEP_SENSOR[lang].get(kind) if cause == "sensor" else None) or _KIND_STEP[lang].get(kind)
+                    e = {"why": what + " " + _CAUSE_WHY[lang][cause], "because": _CAUSE_WHY[lang][cause], "fix": (([step] if step else []) + list(_CAUSE_FIX[lang][cause]))[:MAX_FIX], "use": _CAUSE_USE[cause]}
                 d[f"diagnosis.{cause}.{kind}"] = e
         for bk, (why, fix, use) in _BATCH[lang].items():
             d["batch." + bk] = {"why": why, "fix": list(fix), "use": use}
@@ -365,7 +377,10 @@ def advice_for(kind: str, subtype: Any, facts: Optional[dict[str, Any]] = None, 
         f["sensors"] = ", ".join(str(x) for x in f["sensors"][:3])
     if not f.get("sensors") and f.get("sensor"):
         f["sensors"] = f["sensor"]
-    return {"why": _fill(e["why"], f, lang), "fix": [_fill(s, f, lang) for s in e["fix"]][:MAX_FIX], "can_use_rows": e["use"], "key": key}
+    out = {"why": _fill(e["why"], f, lang), "fix": [_fill(s, f, lang) for s in e["fix"]][:MAX_FIX], "can_use_rows": e["use"], "key": key}
+    if e.get("because"):
+        out["because"] = _fill(e["because"], f, lang)
+    return out
 
 
 # ------------------------------------------------------------------------------------------------ objects of a run

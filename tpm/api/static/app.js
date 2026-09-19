@@ -131,9 +131,26 @@ function renderRail() {
   for (const v of VIEWS) {
     if (v.unnumbered) rail.append(el('div', { class: 'rail-sep' }));
     const b = el('button', { class: 'rail-item' + (v.unnumbered ? ' rail-settings' : ''), type: 'button', dataset: { view: v.id }, 'aria-current': state.view === v.id ? 'page' : 'false', onClick: () => navigate(v.id) }, el('span', { class: 'rail-num', text: v.num }), el('span', { class: 'rail-label' }, t(v.key) === v.key && v.id === 'settings' ? 'Settings' : t(v.key), v.level && !roleAllows(v.level) ? el('span', { class: 'badge', title: t('role.tag.' + v.level), text: v.level[0] }) : null), el('span', { class: 'rail-lock' }), el('span', { class: 'rail-prog', 'aria-hidden': 'true' }, el('i')));
+    if (v.id === 'live' && liveAlarm) b.dataset.alarm = liveAlarm;
     rail.append(b);
   }
   updateRailLocks(false);
+}
+
+// ---------------------------------------------------------------- live alarms on every page
+// Page 7 polls the monitor every few seconds. On every page a light poll (GET /api/live/alarm) raises the same toast
+// once per alarm (live.noteAlarm remembers the last alarm id) and puts a dot on rail item 7, so an alarm is not missed
+// while the person reads another page.
+const LIVE_POLL_MS = 10000;
+let liveAlarm = '';
+async function watchLive() {
+  const r = await api('/api/live/alarm');
+  if (!r.ok || !r.data) return;
+  const a = r.data.alarm;
+  liveAlarm = a ? (a.kind === 'imminent' || a.kind === 'quality' ? 'warn' : 'fail') : '';
+  const b = document.querySelector('#rail .rail-item[data-view="live"]');
+  if (b) { if (liveAlarm) b.dataset.alarm = liveAlarm; else delete b.dataset.alarm; }
+  if (r.data.running) live.noteAlarm(a);
 }
 /** Lock state of every rail item for the selected run, updated in place on each status event. An item that was
     locked a moment ago and is open now gets a brief highlight (never when the run itself was just switched). */
@@ -295,6 +312,7 @@ async function boot() {
   bus.on('status', () => { const r = state.runs.find((x) => x.run_id === state.run); if (r && state.runStatus) { r.state = state.runStatus.state; r.stages = state.runStatus.stages; renderRunSelect(); } });
   bus.on('run.changed', () => { route(); });
   setInterval(refreshSettings, 30000);
+  setInterval(watchLive, LIVE_POLL_MS);
   // The event stream drives the rail and the locked pages; when it is not delivering (proxy, sleeping tab) fall
   // back to polling the status of a run that is still being analysed.
   setInterval(async () => {
@@ -309,6 +327,7 @@ async function boot() {
   const saved = store.get('run', null);
   const initial = saved && state.runs.some((r) => r.run_id === saved) ? saved : (state.runs[0] ? state.runs[0].run_id : null);
   if (initial) await selectRun(initial); else route();
+  watchLive();
   // A computer without Ollama or without any chat model: offer the setup panel once per browser session.
   try {
     if (!sessionStorage.getItem('tpm.modelsOffered')) {

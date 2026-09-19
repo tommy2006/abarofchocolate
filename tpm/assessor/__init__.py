@@ -238,8 +238,8 @@ def apply_override(ws: Any, settings: Any, decision: Any) -> dict[str, Any]:
     new_value = getattr(decision, "new_value", None) or {}
     assessor = ws.read_json("assessor", None) or {}
     act = new_value.get("action") if isinstance(new_value.get("action"), dict) else None
+    rec = next((r for r in assessor.get("recommendations", []) if r["id"] == getattr(decision, "object_id", None)), None)
     if act is None:
-        rec = next((r for r in assessor.get("recommendations", []) if r["id"] == getattr(decision, "object_id", None)), None)
         act = rec["action"] if rec else None
     if action_name in ("dismiss", "reject", "question"):
         ws.log.record(actor, f"assessor_{action_name}", "assessor", getattr(decision, "object_id", "?"), {"note": getattr(decision, "note", None)})
@@ -250,6 +250,9 @@ def apply_override(ws: Any, settings: Any, decision: Any) -> dict[str, Any]:
         return {"applied": False, "error": "no action to apply: give new_value.action or a recommendation id as object_id"}
     if act.get("type") not in ACTION_TYPES:
         return {"applied": False, "error": f"unknown action type {act.get('type')!r}"}
+    if rec is not None and rec.get("status") == "applied":
+        # a second Apply of the same suggestion (its other button, another tab): the curated data is not rebuilt twice
+        return {"applied": False, "already_applied": True, "status": "applied", "applied_by": rec.get("applied_by")}
     result = apply_action(ws, settings, act, actor=actor)
     if result.get("applied"):
         for r in assessor.get("recommendations", []):

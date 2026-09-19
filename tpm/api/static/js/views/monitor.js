@@ -4,7 +4,7 @@
    ?flag=FLAG-000001 selects the flag's group, highlights it and opens its detail; ?group=3 filters;
    ?rows=312632-312999&signals=S09,S01 zooms on those rows and plots the signals there (row links of Data quality). */
 import { state, t, el, clear, runApi, fmt, conf, sev, chip, kindChip, causeChip, section, table, viewHead, needRun, empty, evidenceButton, evidencePanel, decisionBar, hiddenHint, kv, roleAllows, bus, st, infStatus, unavailableNote, meter, linkifyRefs, cleanText, proseList, refLink, refChips, confWords, sevWords, timesThreshold, addPlainBox, flash, navigate, notice, rowsLink } from '../core.js';
-import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praForItem, timeline, binnedTimeline, hbar, kindColors, kindOfSignal, sensorKindColor, sensorKindLegend } from '../charts.js';
+import { plot, purge, tokens, colorFor, vt, vizBox, chartNode, praForItem, timeline, binnedTimeline, hbar, kindColors, kindOfSignal, sensorKindColor, sensorKindLegend, basicMore } from '../charts.js';
 import { openChat, flagContext, setChatContext } from '../chat.js';
 import { summaryCard, techDetails, techNested, itemBrief, itemBriefLocal, bt, openBasicItem } from '../brief.js';
 
@@ -137,11 +137,13 @@ export async function render(main, params = {}) {
     const inGroup = !focus && params.group ? placed.filter((f) => String(f.group_id) === String(params.group)) : [];
     const pool = inFocus.length ? inFocus : inGroup.length ? inGroup : placed;
     const ranked = pool.slice().sort((a, b) => (b.severity || 0) - (a.severity || 0) || (b.confidence || 0) - (a.confidence || 0));
+    // Basic mode: the strongest one only, as a short strip, and how many more Operator mode lists
     const top = [];
-    for (const f of ranked) { if (top.length >= 3) break; if (!top.some((g) => String(g.group_id) === String(f.group_id) && f.row_start <= g.row_end && f.row_end >= g.row_start)) top.push(f); }
+    for (const f of ranked) { if (top.length >= (basic ? 1 : 3)) break; if (!top.some((g) => String(g.group_id) === String(f.group_id) && f.row_start <= g.row_end && f.row_end >= g.row_start)) top.push(f); }
     const topTitle = inFocus.length ? tm('mon.topHere') : inGroup.length ? tm('mon.topGroup', { g: params.group }) : vt('mon.top');
-    plainHost.append(el('h2', { class: 'viz-title pra-title', text: topTitle }), el('p', { class: 'viz-help', text: vt('adv.topHelp') }),
-      ...top.map((f) => praForItem(f.id, { label: [refLink('flag', f.id), ' · ', kindWord(f.kind)], where: el('div', {}, rowsLink(f.row_start, f.row_end, { signals: (f.signals_ranked || []).slice(0, 4).map((x) => x.signal), label: vt('adv.showRows') })), extra: flagDecisions(f), fallback: { problem: cleanText(f.statement || f.id) } })));
+    plainHost.append(...[el('h2', { class: 'viz-title pra-title', text: topTitle }), basic ? null : el('p', { class: 'viz-help', text: vt('adv.topHelp') }),
+      ...top.map((f) => praForItem(f.id, { label: [refLink('flag', f.id), ' · ', kindWord(f.kind)], where: el('div', {}, rowsLink(f.row_start, f.row_end, { signals: (f.signals_ranked || []).slice(0, 4).map((x) => x.signal), label: vt('adv.showRows') })), extra: flagDecisions(f), fallback: { problem: cleanText(f.statement || f.id) }, compact: basic })),
+      basic ? basicMore(pool.length - top.length) : null].filter(Boolean));   // native append() would print "null"
   }
   // the suspicious-rows list is optional: an older server (404) or a run without it ({available:false}) hides the section
   const susData = sus.ok && sus.data && sus.data.available ? sus.data : null;

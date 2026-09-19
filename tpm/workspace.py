@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .config import Settings, get_settings
 from .contracts import Evidence, Inference, RunStatus, StageStatus, now_iso
@@ -272,6 +272,16 @@ class Workspace:
                 for o in objs:
                     f.write(dumps(o) + "\n")
             _replace_with_retry(tmp, p)
+
+    def filter_jsonl(self, artifact: str, keep: Callable[[Any], bool]) -> int:
+        """Keep only the records for which ``keep`` is true; returns how many were removed. Read, filter and rewrite
+        hold the lock, so a record appended by another thread meanwhile is never lost."""
+        with self._lock:
+            rows = self.read_jsonl(artifact)
+            kept = [r for r in rows if keep(r)]
+            if len(kept) != len(rows):
+                self.rewrite_jsonl(artifact, kept)
+            return len(rows) - len(kept)
 
     # ---------- typed helpers ----------
     def schema(self):

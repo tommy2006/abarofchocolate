@@ -1,7 +1,7 @@
 /* View 2: data quality. Round 5 (agent A): the faulty data FIRST - batches x kinds of checks in ONE figure, the worst
    pieces as Problem -> Reason -> Answer strips (what / where, why, what to do, can the rows be used), then "What was
    checked" and the % score in plain words. The trust banner, the batch rows, the checks table with rule traceability
-   and the rule composer stay under "Show technical analyses". Basic mode: the figure and three strips only.
+   and the rule composer stay under "Show technical analyses". Basic mode: the figure and ONE short strip only.
    ?batch=B00008 selects the batch and lists its checks; ?check=CHK-000029 highlights one; ?rule=RULE-001
    scrolls to the rule. */
 import { state, t, el, clear, runApi, cachedRunApi, fmt, conf, st, chip, section, table, viewHead, needRun, empty, evidenceButton, toast, errText, hiddenHint, actorName, actorRole, unavailableNote, bus, linkifyRefs, cleanText, refLink, refChips, rowsLink, sev, sevWords, confWords, addPlainBox, flash, navigate, checkCard, roleAllows } from '../core.js';
@@ -10,26 +10,40 @@ import { summaryCard, techDetails, techNested, itemBrief, itemBriefLocal, bt, op
 import { vt, vizBox, chartNode, praStrip, fetchItemBrief, trustGrid, stackedBar, briefActionButtons } from '../charts.js';
 
 const TRUST_FAIL = 0.5;     // config/settings.yaml quality.trust_fail_threshold; the verdict itself always comes from the server
-const PIECES = 8;           // worst pieces shown as strips (basic mode: 3)
+const PIECES = 8;           // worst pieces shown as strips (basic mode: 1)
 const GRID_BATCHES = 120;   // more batches than this: only the worst ones are drawn
 const GRID_KINDS = 14;
 const CATEGORIES = ['completeness', 'validity', 'consistency', 'timeliness', 'rule'];
+// the kinds of checks behind each question (mirrors tpm/quality/checks.py CATEGORY_OF; a test keeps the two in step)
+const KINDS_OF = {
+  completeness: ['missing', 'dropout', 'empty_rows'],
+  validity: ['out_of_range', 'impossible_value', 'unit_shift', 'quantization_change', 'local_spike'],
+  consistency: ['duplicate_rows', 'duplicate_key', 'stuck', 'saturation', 'sign_violation', 'relation_break'],
+  timeliness: ['gap', 'out_of_order', 'duplicate_timestamp', 'irregular_sampling', 'stale'],
+};
+// problems of the whole batch rather than of a sensor (mirrors tpm/quality/trust.py BATCH_LEVEL)
+const BATCH_LEVEL = new Set(['duplicate_rows', 'duplicate_key', 'gap', 'out_of_order', 'duplicate_timestamp', 'irregular_sampling', 'empty_rows']);
 // English fallbacks of this page's own keys (the i18n files are edited by several people at once)
 const FB = {
   'dq.piece.count': '{n} checks of this kind in this batch', 'dq.piece.rows': '{n} rows', 'dq.piece.open': 'Open this check',
-  'dq.checked.passed': '{n} checks passed', 'dq.checked.on': 'Checks run on the batches shown above', 'dq.checked.kinds': 'Kinds of checks in each question, with the batches where they found something:',
+  'dq.checked.passed': '{n} checks passed', 'dq.checked.on': 'Checks run on the batches shown above', 'dq.checked.kinds': 'Every check behind each question: ✕ failed / ! smaller problem, with the number of batches; ✓ found nothing in any batch.',
   'dq.checked.batches': 'batches', 'dq.viz.none': 'The data checks have not run yet.', 'dq.score.exampleLead': 'Example: batch', 'dq.score.exampleRated': 'is rated {pct}.',
   'dq.viz.noProblem': 'nothing found by any check',
   'dq.faulty.moreBasic': '{n} further problems are listed in Operator mode.',
+  'dq.checked.ran': 'Checked: {list}', 'dq.score.lowered': 'Lowered by: {list}.', 'dq.score.part.sensors': '{n} of {total} sensors unusable ({list})',
+  'dq.score.part.batch': '{list} in the whole batch', 'dq.score.part.small': 'smaller problems ({list})',
 };
 const tq = (k, vars) => { let v = t(k, vars); if (!v || v === k) { v = FB[k] || k; for (const [a, b] of Object.entries(vars || {})) v = v.replaceAll(`{${a}}`, String(b)); } return v; };
 /** 'stuck' | 'rule:RULE-003' -> 'rule' : the kind of a check, rule violations together. */
 export const typeKey = (ct) => (/^rule/.test(String(ct || '')) ? 'rule' : String(ct || ''));
-/** '87 %' in words: what is lost to data problems, what can still be used. */
-export function scoreWords(score, verdict) {
+/** '87 %' in words. The score is a grade (tpm/quality/trust.py): it starts at 100 % when every check passed and drops
+    with each problem found, most for unusable sensors. It is NOT a share of data that is lost. `parts`: what lowered it
+    in this batch (scoreParts in render). */
+export function scoreWords(score, verdict, parts = []) {
   const x = Math.max(0, Math.min(1, Number(score) || 0));
-  const means = x >= 0.995 ? vt('dq.score.full') : vt('dq.score.means', { pct: fmt.pct(x), lost: fmt.pct(1 - x) });
-  return means + ' ' + vt(verdict === 'untrusted' ? 'dq.score.rest.untrusted' : 'dq.score.rest.trusted');
+  if (x >= 0.995) return vt('dq.score.full');
+  return [vt('dq.score.means', { pct: fmt.pct(x) }), parts.length ? tq('dq.score.lowered', { list: parts.join('; ') }) : '',
+    vt(verdict === 'untrusted' ? 'dq.score.rest.untrusted' : 'dq.score.rest.trusted')].filter(Boolean).join(' ');
 }
 
 export async function render(main, params = {}) {
@@ -61,23 +75,51 @@ export async function render(main, params = {}) {
   const whyType = (ct) => { const key = 'dq.why.' + ct; return t(key) === key ? String(ct || '').replace(/^rule:/, 'rule ').replace(/_/g, ' ') : t(key); };
   const typeWord = (ct) => (typeKey(ct) === 'rule' ? t('dq.rule') : whyType(ct));
   const revealTech = () => { const det = page.querySelector('details.tech-details:not(.nested)'); if (det && !det.hidden) det.open = true; };
-  /** The checks that ran on one batch, per kind: worst status + count; the *_ok records count as passed. */
+  const catOf = (c) => (typeKey(c.check_type) === 'rule' ? 'rule' : (CATEGORIES.includes(c.category) ? c.category : 'validity'));
+  /** The checks that ran on one batch, per kind (worst status, count, sensors) and per question (passed, or the kinds
+      that found something); the *_ok records count as passed. */
+  const checksBy = new Map();
+  for (const c of allChecks) { if (!checksBy.has(c.batch_id)) checksBy.set(c.batch_id, []); checksBy.get(c.batch_id).push(c); }
   const checksOfBatch = (bid) => {
-    const kinds = new Map(); let passed = 0;
-    for (const c of allChecks) {
-      if (c.batch_id !== bid) continue;
+    const kinds = new Map(); const groups = new Map(); let passed = 0;
+    for (const c of checksBy.get(bid) || []) {
+      const cat = catOf(c); const gr = groups.get(cat) || { status: 'pass', kinds: new Map() }; groups.set(cat, gr);
       if (isOk(c)) { passed++; continue; }
-      const k = typeKey(c.check_type); const g = kinds.get(k) || { key: k, label: typeWord(c.check_type), status: 'warn', n: 0, category: c.category };
-      g.n++; if (c.status === 'fail') g.status = 'fail'; kinds.set(k, g);
+      const k = typeKey(c.check_type); const g = kinds.get(k) || { key: k, label: typeWord(c.check_type), status: 'warn', n: 0, category: c.category, signals: new Set() };
+      g.n++; if (c.status === 'fail') g.status = 'fail'; (c.signals || []).forEach((s) => g.signals.add(s)); kinds.set(k, g);
+      gr.kinds.set(k, g); gr.status = c.status === 'fail' || gr.status === 'fail' ? 'fail' : 'warn';
     }
-    return { kinds: [...kinds.values()].sort((a, b) => (b.status === 'fail') - (a.status === 'fail') || b.n - a.n), passed };
+    return { kinds: [...kinds.values()].sort((a, b) => (b.status === 'fail') - (a.status === 'fail') || b.n - a.n), passed, groups };
   };
+  /** What was checked on one batch: the questions every batch is asked, each passed (✓) or naming the kinds of check
+      that found something (✕ failed, ! smaller problem); hovering a question names every check behind it. */
   const checkChips = (bid) => {
-    const { kinds, passed } = checksOfBatch(bid);
-    return el('div', { class: 'dq-chips' },
-      kinds.map((k) => el('span', { class: 'dq-chip ' + k.status, title: `${k.label}: ${k.n} × ${vt('dq.viz.cell.' + k.status)}` }, k.label, k.n > 1 ? el('b', { text: ` ×${k.n}` }) : null)),
-      passed ? el('span', { class: 'dq-chip ok' }, tq('dq.checked.passed', { n: passed })) : null,
-      !kinds.length && !passed ? el('span', { class: 'dim small', text: t('common.notYet') }) : null);
+    const { groups } = checksOfBatch(bid);
+    const cats = CATEGORIES.filter((cat) => groups.has(cat));
+    return el('div', { class: 'dq-chips dq-questions' },
+      cats.map((cat) => {
+        const g = groups.get(cat);
+        const title = cat === 'rule' ? vt('dq.group.rule') : tq('dq.checked.ran', { list: KINDS_OF[cat].map(whyType).join(', ') });
+        return el('span', { class: 'dq-chip ' + (g.status === 'pass' ? 'ok' : g.status), title }, el('span', { class: 'q', text: vt('dq.group.' + cat) }), ' ',
+          g.status === 'pass' ? el('b', { text: '✓' }) : [el('b', { text: g.status === 'fail' ? '✕ ' : '! ' }), [...g.kinds.values()].map((k) => k.label + (k.n > 1 ? ` ×${k.n}` : '')).join(' · ')]);
+      }),
+      !cats.length ? el('span', { class: 'dim small', text: t('common.notYet') }) : null);
+  };
+  /** What lowered the score of one batch, in the order the score weighs it (tpm/quality/trust.py): sensors that cannot
+      be used, problems of the whole batch, smaller problems. */
+  const bare = (s) => String(s).replace(/\s*\([^)]*\)\s*$/, '');
+  const scoreParts = (x) => {
+    if (!x) return [];
+    const bad = new Set(x.untrusted_signals || []);
+    const { kinds } = checksOfBatch(x.batch_id);
+    const wide = (k) => BATCH_LEVEL.has(k.key) && k.status === 'fail';
+    const ofSensors = kinds.filter((k) => !wide(k) && [...k.signals].some((s) => bad.has(s)));
+    const small = kinds.filter((k) => !wide(k) && !ofSensors.includes(k));
+    const out = [];
+    if (bad.size) out.push(tq('dq.score.part.sensors', { n: bad.size, total: Math.max(bad.size, sigList.length), list: ofSensors.map((k) => bare(k.label)).join(', ') || '–' }));
+    if (kinds.some(wide)) out.push(tq('dq.score.part.batch', { list: kinds.filter(wide).map((k) => bare(k.label)).join(', ') }));
+    if (small.length) out.push(tq('dq.score.part.small', { list: small.map((k) => bare(k.label)).join(', ') }));
+    return out;
   };
 
   // ---- banner
@@ -90,7 +132,7 @@ export async function render(main, params = {}) {
   if (tr.ok && tr.data.available) {
     view.append(el('div', { class: 'trust-banner ' + bannerCls, role: 'status' },
       el('div', { class: 'score' }, fmt.pct(trust.overall), el('small', { text: t('dq.trustScore') })),
-      el('div', { class: 'banner-text' }, el('div', { class: 'big' }, linkifyRefs(bannerText)), el('div', { class: 'small muted', text: t('dq.trustHelp') }), trust.overall !== null && trust.overall !== undefined ? el('div', { class: 'dq-scorewords', text: scoreWords(trust.overall, untrusted.length ? 'untrusted' : 'trusted') }) : null, untrusted.length ? el('ul', { class: 'list small', style: { marginTop: '6px' } }, untrusted.slice(0, 4).map((x) => el('li', {}, refLink('batch', x.batch_id), ': ', linkifyRefs(cleanText(x.statement))))) : null),
+      el('div', { class: 'banner-text' }, el('div', { class: 'big' }, linkifyRefs(bannerText)), el('div', { class: 'small muted', text: t('dq.trustHelp', { pct: fmt.pct(TRUST_FAIL) }) }), trust.overall !== null && trust.overall !== undefined ? el('div', { class: 'dq-scorewords', text: scoreWords(trust.overall, untrusted.length ? 'untrusted' : 'trusted') }) : null, untrusted.length ? el('ul', { class: 'list small', style: { marginTop: '6px' } }, untrusted.slice(0, 4).map((x) => el('li', {}, refLink('batch', x.batch_id), ': ', linkifyRefs(cleanText(x.statement))))) : null),
       untrusted.length ? el('button', { class: 'btn', type: 'button', onClick: () => openChat({ object_type: 'trust', object_id: untrusted[0].batch_id, batch_id: untrusted[0].batch_id, title: untrusted[0].statement, autoAsk: t('chat.quick.why') }) }, t('common.ask')) : null));
   } else view.append(tr.unavailable ? unavailableNote(tr) : el('div', { class: 'notice', text: t('common.notYet') }));
 
@@ -139,11 +181,11 @@ export async function render(main, params = {}) {
     const lastRow = b.row_end !== undefined ? (endExclusive ? b.row_end - 1 : b.row_end) : null;
     row.append(el('div', { class: 'batchrow-head' },
       el('div', { class: 'batchrow-id' }, refLink('batch', x.batch_id), ' ', st(verdict === 'untrusted' ? 'untrusted' : verdict === 'caution' ? 'warn' : 'trusted', t('dq.verdict.' + verdict))),
-      el('div', { class: 'batchrow-score', title: scoreWords(x.trust_score, verdict) }, el('b', { text: fmt.pct(x.trust_score) }), el('span', { class: 'bar' }, el('i', { style: { width: Math.max(0, Math.min(1, x.trust_score)) * 100 + '%' } })), el('span', { class: 'small dim', text: t('dq.trustScore') })),
+      el('div', { class: 'batchrow-score', title: scoreWords(x.trust_score, verdict, scoreParts(x)) }, el('b', { text: fmt.pct(x.trust_score) }), el('span', { class: 'bar' }, el('i', { style: { width: Math.max(0, Math.min(1, x.trust_score)) * 100 + '%' } })), el('span', { class: 'small dim', text: t('dq.trustScore') })),
       el('div', { class: 'batchrow-meta small dim' }, b.row_start !== undefined ? el('span', {}, t('dq.rowsWord'), ' ', rowsLink(b.row_start, lastRow)) : null, groups.length ? el('span', { text: groups.length === 1 ? `${t('common.group').toLowerCase()} ${groups[0]}` : t('dq.nGroups', { n: fmt.int(groups.length) }) }) : null, (x.check_ids || []).length ? el('span', { text: t('dq.nChecks', { n: x.check_ids.length }) }) : null),
       selected ? el('button', { class: 'btn btn-sm btn-quiet', type: 'button', onClick: () => pickBatch('') }, t('common.clearFilter')) : el('button', { class: 'btn btn-sm', type: 'button', onClick: () => pickBatch(x.batch_id) }, t('dq.showChecks')),
       // round 5: the score in words and the checks that ran on this batch, right under the number
-      el('div', { class: 'dq-scorewords', text: scoreWords(x.trust_score, verdict) })));
+      el('div', { class: 'dq-scorewords', text: scoreWords(x.trust_score, verdict, scoreParts(x)) })));
     row.append(el('div', { class: 'batchrow-checks' }, checkChips(x.batch_id)));
     // reasons: whole-batch signals first, then structural reasons, then row-scoped problems
     const why = el('div', { class: 'batchrow-why' });
@@ -218,7 +260,7 @@ export async function render(main, params = {}) {
     loadChecks();
   }
   for (const x of items) {
-    const b = el('button', { type: 'button', dataset: { batch: x.batch_id }, class: (x.trusted ? (hasIssue(x) ? 'warn' : '') : 'fail') + (selBatch === x.batch_id ? ' sel' : ''), style: { height: Math.max(8, x.trust_score * 100) + '%' }, title: `${x.batch_id}: ${fmt.pct(x.trust_score)} — ${scoreWords(x.trust_score, verdictOf(x))}`, 'aria-label': `${x.batch_id} ${fmt.pct(x.trust_score)}` });
+    const b = el('button', { type: 'button', dataset: { batch: x.batch_id }, class: (x.trusted ? (hasIssue(x) ? 'warn' : '') : 'fail') + (selBatch === x.batch_id ? ' sel' : ''), style: { height: Math.max(8, x.trust_score * 100) + '%' }, title: `${x.batch_id}: ${fmt.pct(x.trust_score)} — ${scoreWords(x.trust_score, verdictOf(x), scoreParts(x))}`, 'aria-label': `${x.batch_id} ${fmt.pct(x.trust_score)}` });
     b.addEventListener('click', () => pickBatch(selBatch === x.batch_id ? '' : x.batch_id));
     bar.append(b);
   }
@@ -370,27 +412,31 @@ export async function render(main, params = {}) {
     if (c.status === 'fail') p.status = 'fail';
     if (!p.best || (c.status === 'fail' && p.best.status !== 'fail') || (c.status === p.best.status && (Number(c.severity) || 0) > (Number(p.best.severity) || 0))) p.best = c;
   }
-  const untrustedSet = new Set(untrusted.map((x) => x.batch_id));
+  // worst first = the batch with the lowest trust score first (the one the summary and the lowest bar name), the pieces
+  // of one batch together, failed before smaller problems
   const scoreOfBatch = (bid) => (byBatch[bid] && byBatch[bid].trust_score !== undefined ? byBatch[bid].trust_score : 1);
-  const pieces = [...pieceMap.values()].sort((p, q) => (untrustedSet.has(q.batch_id) - untrustedSet.has(p.batch_id)) || ((q.status === 'fail') - (p.status === 'fail')) || (q.sev - p.sev) || (scoreOfBatch(p.batch_id) - scoreOfBatch(q.batch_id)));
-  const cap = full ? PIECES : 3;
-  const pieceStrip = (p) => {
+  const pieces = [...pieceMap.values()].sort((p, q) => (scoreOfBatch(p.batch_id) - scoreOfBatch(q.batch_id)) || String(p.batch_id).localeCompare(String(q.batch_id)) || ((q.status === 'fail') - (p.status === 'fail')) || (q.sev - p.sev));
+  // Basic mode: ONE short strip, the worst batch; its question chips name every kind of problem found in it
+  const cap = full ? PIECES : 1;
+  const pieceStrip = (p, { batchInfo = true } = {}) => {
     const x = byBatch[p.batch_id] || null; const verdict = x ? verdictOf(x) : 'caution';
     const host = el('div', { class: 'pra-host', dataset: { piece: p.batch_id + '|' + p.kind } }, el('div', { class: 'dim small', text: vt('adv.loading') + '…' }));
     const ctx = checkCtx(p.best);
     const label = [refLink('batch', p.batch_id), ' · ', st(p.status, t('dq.' + p.status)), p.checks.length > 1 ? el('span', { class: 'dim', text: ' · ' + tq('dq.piece.count', { n: p.checks.length }) }) : null];
-    const where = [el('div', { class: 'dq-piece-where' }, p.a !== null ? [t('dq.rowsWord'), ' ', rowsLink(p.a, p.b, { signals: p.signals }), p.b > p.a ? el('span', { class: 'dim', text: ' (' + tq('dq.piece.rows', { n: fmt.int(p.b - p.a + 1) }) + ')' }) : null] : vt('dq.faulty.wholeBatch'), p.signals.length ? [' · ', refChips('signal', p.signals, { max: 4 })] : null),
-      x ? el('div', { class: 'dq-scorewords', text: scoreWords(x.trust_score, verdict) }) : null,
-      checkChips(p.batch_id)];   // which checks ran on this batch and what they found: every mode shows it
+    // the score in words and the checks of the batch once per batch (a second piece of the same batch leaves them out)
+    const where = [el('div', { class: 'dq-piece-where' }, p.a !== null ? [t('dq.rowsWord'), ' ', rowsLink(p.a, p.b, { signals: p.signals }), p.b > p.a ? el('span', { class: 'dim', text: ' (' + tq('dq.piece.rows', { n: fmt.int(p.b - p.a + 1) }) + ')' }) : null] : vt('dq.faulty.wholeBatch'), p.signals.length && full ? [' · ', refChips('signal', p.signals, { max: 4 })] : null),
+      x && batchInfo ? el('div', { class: 'dq-scorewords', text: scoreWords(x.trust_score, verdict, scoreParts(x)) }) : null,
+      batchInfo ? checkChips(p.batch_id) : null];   // which checks ran on this batch and what they found: every mode shows it
     const open = el('button', { class: 'btn btn-sm btn-primary', type: 'button', onClick: () => { pickBatch(p.batch_id); revealTech(); showCheck(p.best); } }, tq('dq.piece.open'));
     (async () => {
       const b = await fetchItemBrief(p.best.check_id);
       const problem = b ? linkifyRefs(b.headline) : el('span', {}, el('b', { text: typeWord(p.kind) }), p.signals.length ? ' — ' + listNames(p.signals, 3) : '');
       const pts = b ? (b.points || []).filter((s) => !/^(Where|Missä|Var)\b/.test(s)) : [];
-      const reason = b && b.why ? linkifyRefs(b.why) : linkifyRefs(cleanText(p.best.statement || ''));
+      // Basic mode: the reason as text (the compact strip keeps its first sentence), no engine statement, no ids
+      const reason = !full ? (b && b.why ? b.why : cleanText(p.best.statement || '')) : b && b.why ? linkifyRefs(b.why) : linkifyRefs(cleanText(p.best.statement || ''));
       const reasonMore = [pts.map((s) => el('div', { text: s })), b && b.why ? el('div', { class: 'dim' }, linkifyRefs(cleanText(p.best.statement || ''))) : null];
       // "Open this check" leads into the technical part, which Basic mode does not show
-      host.replaceChildren(praStrip({ verdict: p.status === 'fail' && verdict === 'untrusted' ? 'problem' : 'attention', problem, where, reason, reasonMore, fix: b ? b.fix || [] : [], use: b ? b.can_use_rows : undefined, extra: [b ? briefActionButtons(b.actions, ctx, { skipRef: p.best.check_id }) : null, full ? el('div', { class: 'pra-btns' }, open) : null], label }));
+      host.replaceChildren(praStrip({ verdict: p.status === 'fail' && verdict === 'untrusted' ? 'problem' : 'attention', problem, where, reason, reasonMore, fix: b ? b.fix || [] : [], use: b ? b.can_use_rows : undefined, extra: [b ? briefActionButtons(b.actions, ctx, { skipRef: p.best.check_id, noAsk: !full }) : null, full ? el('div', { class: 'pra-btns' }, open) : null], label, compact: !full }));
     })();
     return host;
   };
@@ -399,14 +445,13 @@ export async function render(main, params = {}) {
   else {
     const list = el('div', { class: 'pra-list' });
     plain.append(list);
-    pieces.slice(0, cap).forEach((p) => list.append(pieceStrip(p)));
+    pieces.slice(0, cap).forEach((p, i, arr) => list.append(pieceStrip(p, { batchInfo: i === 0 || arr[i - 1].batch_id !== p.batch_id })));
     if (pieces.length > cap) plain.append(el('p', { class: 'small muted', text: full ? vt('dq.faulty.more', { n: pieces.length - cap }) : tq('dq.faulty.moreBasic', { n: pieces.length - cap }) }));
   }
 
   // (iii) what was checked (operator +): the questions every batch was asked, with the kinds of checks behind them
   if (full && allChecks.length) {
     const nB = Math.max(1, items.length || new Set(allChecks.map((c) => c.batch_id)).size);
-    const catOf = (c) => (typeKey(c.check_type) === 'rule' ? 'rule' : (CATEGORIES.includes(c.category) ? c.category : 'validity'));
     const perCat = Object.fromEntries(CATEGORIES.map((cat) => [cat, { fail: new Set(), warn: new Set(), kinds: new Map() }]));
     for (const c of problems) { const cat = perCat[catOf(c)]; (c.status === 'fail' ? cat.fail : cat.warn).add(c.batch_id); const k = typeKey(c.check_type); const g = cat.kinds.get(k) || { label: typeWord(c.check_type), fail: new Set(), warn: new Set() }; (c.status === 'fail' ? g.fail : g.warn).add(c.batch_id); cat.kinds.set(k, g); }
     const cats = CATEGORIES.filter((cat) => cat !== 'rule' || perCat.rule.kinds.size || allChecks.some((c) => c.category === 'rule'));
@@ -414,7 +459,10 @@ export async function render(main, params = {}) {
     const warnN = cats.map((cat) => [...perCat[cat].warn].filter((b) => !perCat[cat].fail.has(b)).length);
     const passN = cats.map((cat, i) => Math.max(0, nB - failN[i] - warnN[i]));
     const node = chartNode('short');
-    const kindsBox = el('div', { class: 'dq-kinds' }, el('div', { class: 'small muted', text: tq('dq.checked.kinds') }), cats.map((cat) => el('div', {}, el('span', { class: 'q', text: vt('dq.group.' + cat) }), el('span', { class: 'dq-chips' }, [...perCat[cat].kinds.values()].sort((a, b) => b.fail.size - a.fail.size || b.warn.size - a.warn.size).map((g) => el('span', { class: 'dq-chip ' + (g.fail.size ? 'fail' : 'warn') }, g.label, el('b', { text: ` ${g.fail.size ? '✕' + g.fail.size : ''}${g.fail.size && g.warn.size ? ' ' : ''}${g.warn.size ? '!' + g.warn.size : ''}` }))), !perCat[cat].kinds.size ? el('span', { class: 'dq-chip ok', text: vt('dq.viz.cell.pass') }) : null))));
+    const kindsBox = el('div', { class: 'dq-kinds' }, el('div', { class: 'small muted', text: tq('dq.checked.kinds') }), cats.map((cat) => el('div', {}, el('span', { class: 'q', text: vt('dq.group.' + cat) }), el('span', { class: 'dq-chips' }, [...perCat[cat].kinds.values()].sort((a, b) => b.fail.size - a.fail.size || b.warn.size - a.warn.size).map((g) => el('span', { class: 'dq-chip ' + (g.fail.size ? 'fail' : 'warn') }, g.label, el('b', { text: ` ${g.fail.size ? '✕' + g.fail.size : ''}${g.fail.size && g.warn.size ? ' ' : ''}${g.warn.size ? '!' + g.warn.size : ''}` }))),
+      // every other check behind the question ran too and found nothing in any batch
+      (KINDS_OF[cat] || []).filter((k) => !perCat[cat].kinds.has(k)).map((k) => el('span', { class: 'dq-chip ok' }, whyType(k), el('b', { text: ' ✓' }))),
+      !perCat[cat].kinds.size && !KINDS_OF[cat] ? el('span', { class: 'dq-chip ok', text: vt('dq.viz.cell.pass') }) : null))));
     const presented = [...new Set(pieces.slice(0, cap).map((p) => p.batch_id))].concat(selBatch && !pieces.slice(0, cap).some((p) => p.batch_id === selBatch) ? [selBatch] : []);
     const perBatch = presented.length ? el('div', {}, el('h4', { class: 'small muted', style: { margin: '12px 0 4px' }, text: tq('dq.checked.on') }), el('div', { class: 'dq-batchchecks' }, presented.map((bid) => [refLink('batch', bid), checkChips(bid)]))) : null;
     plain.append(vizBox(vt('dq.checked.title'), vt('dq.checked.help') + ' ' + vt('dq.checked.total', { n: fmt.int(allChecks.length), b: fmt.int(nB) }), node, el('div', { class: 'viz-note' }, kindsBox, perBatch)));
@@ -428,7 +476,7 @@ export async function render(main, params = {}) {
     const worstB = items.slice().sort((a, b) => a.trust_score - b.trust_score)[0];
     plain.append(vizBox(vt('dq.score.title'), vt('dq.score.how'),
       el('ul', { class: 'dq-legend' }, [['ok', vt('dq.score.legend.ok')], ['warn', vt('dq.score.legend.warn')], ['fail', vt('dq.score.legend.fail', { pct: fmt.pct(TRUST_FAIL) })]].map(([cls, txt]) => el('li', {}, el('span', { class: 'viz-sw ' + cls, 'aria-hidden': 'true' }), txt))),
-      worstB ? el('p', { class: 'dq-example' }, tq('dq.score.exampleLead'), ' ', refLink('batch', worstB.batch_id), ' ', tq('dq.score.exampleRated', { pct: fmt.pct(worstB.trust_score) }), ' ', scoreWords(worstB.trust_score, verdictOf(worstB))) : null));
+      worstB ? el('p', { class: 'dq-example' }, tq('dq.score.exampleLead'), ' ', refLink('batch', worstB.batch_id), ' ', tq('dq.score.exampleRated', { pct: fmt.pct(worstB.trust_score) }), ' ', scoreWords(worstB.trust_score, verdictOf(worstB), scoreParts(worstB))) : null));
   }
   return view;
 }

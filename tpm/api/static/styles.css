@@ -155,21 +155,28 @@ body { container: page / inline-size; }
 .langs button[aria-pressed="true"] { background: var(--bg-4); color: var(--ink); font-weight: 600; }
 
 /* ---------- frame: rail + main + drawer ---------- */
-.frame { display: grid; grid-template-columns: var(--rail-w) 1fr; min-height: calc(100vh - var(--topbar-h)); }
+/* Text size (A+ / A-) is CSS zoom on <body>, and inside it a viewport unit is multiplied by the zoom as well: every
+   100vh is divided by --zoom again, or the rail, the chat drawer and popups grow taller than the window. */
+.frame { display: grid; grid-template-columns: var(--rail-w) 1fr; min-height: calc(100vh / var(--zoom, 1) - var(--topbar-h)); }
 .frame.with-drawer { grid-template-columns: var(--rail-w) 1fr var(--drawer-w); }
-.rail { position: sticky; top: var(--topbar-h); align-self: start; height: calc(100vh - var(--topbar-h)); overflow: auto; padding: 14px 0; border-right: 1px solid var(--line); background: var(--bg-2); }
+.rail { position: sticky; top: var(--topbar-h); align-self: start; height: calc(100vh / var(--zoom, 1) - var(--topbar-h)); overflow: auto; padding: 14px 0; border-right: 1px solid var(--line); background: var(--bg-2); }
 .rail-item { display: grid; grid-template-columns: 34px 1fr; align-items: center; width: 100%; padding: 9px 12px 9px 14px; border: 0; border-left: 3px solid transparent; background: transparent; text-align: left; cursor: pointer; color: var(--ink-2); }
 .rail-item:hover { background: var(--bg-3); color: var(--ink); }
 .rail-item[aria-current="page"] { border-left-color: var(--accent); color: var(--ink); background: var(--bg-3); font-weight: 500; }
 .rail-num { color: var(--ink-3); font-size: 12.5px; }
 .rail-item[aria-current="page"] .rail-num { color: var(--accent); }
+/* a live alarm while the person is on another page (app.js watchLive): a dot on rail item 7 */
+.rail-item[data-alarm] .rail-num { position: relative; }
+.rail-item[data-alarm] .rail-num::after { content: ''; position: absolute; top: -3px; left: 10px; width: 9px; height: 9px; border-radius: 50%; background: var(--fail); }
+.rail-item[data-alarm="warn"] .rail-num::after { background: var(--warn); }
+.rail-item[data-alarm="fail"] .rail-num::after { animation: alarm-blink 1.2s ease-in-out infinite; }
 .rail-item .badge { margin-left: 6px; }
 .rail-tag { padding: 14px 16px 4px; color: var(--ink-3); font-size: 12px; }
 .main { padding: 22px 28px 60px; min-width: 0; }
 .main > .view { max-width: 1320px; }
 
 /* ---------- drawer (chat) ---------- */
-.drawer { position: sticky; top: var(--topbar-h); align-self: start; height: calc(100vh - var(--topbar-h)); display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg-2); }
+.drawer { position: sticky; top: var(--topbar-h); align-self: start; height: calc(100vh / var(--zoom, 1) - var(--topbar-h)); display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg-2); }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .drawer-ctx { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--bg-3); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .drawer-quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0; }
@@ -365,6 +372,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 /* ---------- charts ---------- */
 .chart { width: 100%; min-height: 260px; min-width: 0; max-width: 100%; }
+/* Plotly does not know CSS zoom: under the text size (zoom on <body>) its hover and click land on the wrong bar or on
+   nothing. A chart is drawn outside the zoom (1 / --zoom here) and charts.js plot() scales its fonts, margins and
+   height by the text size instead, so it still grows and shrinks with the page. */
+.tpm-plot { zoom: calc(1 / var(--zoom, 1)); }
 .chartbox { min-width: 0; }
 .chartnote { margin-top: 6px; overflow-wrap: anywhere; }
 .chartnote > div + div { margin-top: 3px; }
@@ -455,11 +466,11 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .profile .name .st { white-space: normal; font-weight: 400; font-size: 12.5px; }
 .profile .desc { display: block; color: var(--ink-2); font-size: 12.5px; }
 .statement { font-size: 15px; line-height: 1.55; max-width: 80ch; padding: 14px 18px; border-left: 4px solid var(--accent); background: var(--bg-2); border-radius: 0 var(--radius) var(--radius) 0; overflow-wrap: anywhere; }
-.report-frame { width: 100%; max-width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 4px; background: #fff; display: block; }
+.report-frame { width: 100%; max-width: 100%; height: calc(70vh / var(--zoom, 1)); border: 1px solid var(--line); border-radius: 4px; background: #fff; display: block; }
 
 /* ---------- modal + toasts ---------- */
-.modal-back { position: fixed; inset: 0; background: rgba(10, 14, 18, 0.55); z-index: 50; display: grid; place-items: center; padding: 16px; }
-.modal { width: min(640px, 100%); max-height: 90vh; overflow: auto; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow); }
+.modal-back { position: fixed; inset: 0; background: rgba(10, 14, 18, 0.55); z-index: 50; display: grid; place-items: center; padding: 16px; overflow: auto; }
+.modal { width: min(640px, 100%); max-height: calc(90vh / var(--zoom, 1)); overflow: auto; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow); }
 .modal.wide { width: min(900px, 100%); }
 .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
 .modal-body { padding: 16px 18px; }
@@ -493,7 +504,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   .rail-item { grid-template-columns: auto auto; gap: 6px; padding: 10px 12px; border-left: 0; border-bottom: 3px solid transparent; white-space: nowrap; }
   .rail-item[aria-current="page"] { border-bottom-color: var(--accent); }
   .main { padding: 16px 16px 80px; }
-  .drawer { top: 0; height: 100vh; width: 100%; }
+  .drawer { top: 0; height: calc(100vh / var(--zoom, 1)); width: 100%; }
   .trust-banner { grid-template-columns: 1fr; }
   .stage { grid-template-columns: 22px 90px 1fr; }
   .stage .msg { display: none; }
@@ -776,6 +787,11 @@ details.tech-details.nested.inline > .tech-body { padding: 4px 0 2px 8px; font-s
 .basic-wrap { margin: 10px 0 18px; }
 .basic-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border: 1px dashed var(--line-2); border-radius: 6px; color: var(--ink-2); font-size: 13px; }
 .basic-hidden { display: none !important; }
+/* Basic mode shows the least: no technical lamps in the top bar (profile, model, route, calls live in Settings) */
+:root[data-role="basic"] .lamps { display: none; }
+:root[data-role="basic"] .tools { justify-self: end; }          /* the tools keep their place at the right */
+.pra.compact .pra-fix li + li { margin-top: 2px; }
+.basic-more { margin: 6px 0 0; }
 /* ---------- settings page ---------- */
 .settings-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
 .settings-tab { padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2); color: var(--ink-2); cursor: pointer; }

@@ -6,11 +6,13 @@ chat() returns (text, parsed_json_or_None, latency_ms) and raises ProviderError 
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import httpx
 import numpy as np
@@ -148,6 +150,23 @@ def normalize_turns(messages: list[dict[str, str]]) -> list[dict[str, str]]:
 
 _CLIENTS: dict[str, "httpx.Client"] = {}
 _CLIENTS_LOCK = threading.Lock()
+
+
+# The Stop button of a chat turn (tpm.llm.agent): while a check is set, the local model is asked in streaming mode and
+# the request is dropped as soon as the check says stop. Closing the connection makes Ollama stop generating, so the
+# next question does not wait behind a step nobody wants any more.
+_CANCEL: contextvars.ContextVar[Optional[Callable[[], bool]]] = contextvars.ContextVar("tpm_llm_cancel", default=None)
+STOPPED = "stopped by the operator"
+
+
+@contextlib.contextmanager
+def cancellable(check: Callable[[], bool]) -> Iterator[None]:
+    """Local model calls made inside this block end as soon as ``check()`` returns True (ProviderError STOPPED)."""
+    token = _CANCEL.set(check)
+    try:
+        yield
+    finally:
+        _CANCEL.reset(token)
 
 
 def _client_for(base_url: str) -> "httpx.Client":
@@ -308,11 +327,71 @@ class OllamaProvider:
         if "thinking" in self.capabilities(model):
             body["think"] = False  # keep JSON clean for reasoning models (qwen3, deepseek-r1)
         t0 = time.time()
-        data = self._post_with_retry("/api/chat", body)
+        cancel = _CANCEL.get()
+        if cancel is None:
+            data = self._post_with_retry("/api/chat", body)
+        else:
+            try:
+                data = self._chat_stream(body, cancel)
+            except TransientError:
+                if cancel():
+                    raise ProviderError(STOPPED)
+                time.sleep(0.5)                                  # once more, like the non-streaming call
+                data = self._chat_stream(body, cancel)
         latency = int((time.time() - t0) * 1000)
         text = (data.get("message") or {}).get("content", "") or ""
         parsed = extract_json(text) if schema else None
         return text, parsed, latency
+
+    def _chat_stream(self, body: dict[str, Any], cancel: Callable[[], bool]) -> dict[str, Any]:
+        """/api/chat in streaming mode for a call that can be stopped: the answer is read piece by piece and the
+        connection is closed as soon as ``cancel()`` says so; a watcher covers the wait before the first piece (the
+        model reading the prompt). Returns the same shape as the non-streaming call."""
+        if cancel():
+            raise ProviderError(STOPPED)
+        try:
+            return self._read_stream(body, cancel)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:   # before the first byte
+            if cancel():
+                raise ProviderError(STOPPED) from e
+            raise TransientError(f"ollama unreachable: {e}") from e
+
+    def _read_stream(self, body: dict[str, Any], cancel: Callable[[], bool]) -> dict[str, Any]:
+        parts: list[str] = []
+        done = threading.Event()
+        with _client_for(self.base_url).stream("POST", f"{self.base_url}/api/chat", json={**body, "stream": True}, timeout=self.timeout) as r:
+            def watch() -> None:
+                while not done.wait(0.2):
+                    if cancel():
+                        with contextlib.suppress(Exception):
+                            r.close()                        # the blocked read below fails; Ollama sees the client go
+                        return
+            threading.Thread(target=watch, name="ollama-stop", daemon=True).start()
+            try:
+                if r.status_code >= 400:
+                    r.read()
+                    err = f"ollama HTTP {r.status_code}: {r.text[:300]}"
+                    raise TransientError(err) if r.status_code >= 500 or r.status_code == 429 else ProviderError(err)
+                for line in r.iter_lines():
+                    if cancel():
+                        raise ProviderError(STOPPED)
+                    if not line.strip():
+                        continue
+                    chunk = json.loads(line)
+                    if chunk.get("error"):
+                        raise ProviderError(f"ollama: {chunk['error']}")
+                    parts.append((chunk.get("message") or {}).get("content") or "")
+                    if chunk.get("done"):
+                        break
+            except ProviderError:
+                raise
+            except Exception as e:                            # the watcher closed the stream, or the connection broke
+                if cancel():
+                    raise ProviderError(STOPPED) from e
+                raise TransientError(f"ollama stream failed: {e}") from e
+            finally:
+                done.set()
+        return {"message": {"content": "".join(parts)}}
 
     def _post_with_retry(self, path: str, body: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
         last: Optional[Exception] = None

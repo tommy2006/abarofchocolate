@@ -49,6 +49,22 @@ def test_doctor_runs(tmp_path):
     assert r.returncode in (0, 1), r.stderr
     assert "doctor" in r.stdout and "Python" in r.stdout and "problem(s)" in r.stdout
     assert "report e-mail not configured" in r.stdout  # the test environment never sees the developer's .env
+    assert "known failure types loaded from failure_signatures.yaml" in r.stdout
+
+
+def test_doctor_fails_when_the_live_monitor_has_no_known_failure_types(monkeypatch, tmp_path):
+    """An app built without config/failure_signatures.yaml would only ever raise generic drift alarms: doctor (run by
+    the Windows build's smoke test) calls that a problem."""
+    from tpm import cli
+    from tpm.live import signatures
+
+    msgs: list[tuple[str, str]] = []
+    ok = lambda m: msgs.append(("ok", m))  # noqa: E731
+    bad = lambda m, fix="": msgs.append(("bad", m + " / " + fix))  # noqa: E731
+    assert cli._check_live_catalogue(ok, bad) >= 20 and msgs[0][0] == "ok"
+    monkeypatch.setattr(signatures, "CONFIG_FILE", tmp_path / "missing.yaml")
+    msgs.clear()
+    assert cli._check_live_catalogue(ok, bad) == 0 and msgs[0][0] == "bad" and "norrin_tpm.spec" in msgs[0][1]
 
 
 def test_doctor_checks_the_mail_settings(monkeypatch):

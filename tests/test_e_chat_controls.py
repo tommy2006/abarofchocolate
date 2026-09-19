@@ -208,3 +208,179 @@ def test_drawer_keeps_one_context_line_each_chats_draft_and_every_answer_after_i
     for needle in ("function byTurn(", "c.messages.pop()", "inputEl.value = draft", "if (!b && was) inputEl.focus()", "chat.run || state.run",
                    "ctx.object_id || ctx.diagnosis_id", "function sysText(", "setChatContext(null, { cleared: true })"):
         assert needle in js, needle
+
+
+# ------------------------------------------------------------------------------------------ finishing pass
+def test_clear_in_one_run_never_stops_a_chat_of_the_same_name_in_another_run(client):
+    """Every run's first chat is "default": Clear / Delete / Stop by chat id in run B must leave run A's answer alone."""
+    agent_mod._turn_begin("CHAT-runA1", "default", "run_a")
+    agent_mod._turn_begin("CHAT-runB1", "default", "run_chat")
+    try:
+        c = client.post("/api/runs/run_chat/chat/clear", json={"chat_id": "default", "actor": "Bob"})
+        assert c.status_code == 200
+        assert agent_mod.is_stopped("CHAT-runB1") and not agent_mod.is_stopped("CHAT-runA1")
+        assert agent_mod.request_stop(None, "default", "run_other") == []
+    finally:
+        agent_mod._turn_end("CHAT-runA1")
+        agent_mod._turn_end("CHAT-runB1")
+
+
+def test_an_invalid_chat_id_is_refused_instead_of_clearing_the_default_chat(client, monkeypatch):
+    _no_ollama(monkeypatch)
+    client.post("/api/runs/run_chat/chat", json={"message": "kept in the default chat", "chat_id": "default"})
+    n = len(client.get("/api/runs/run_chat/chat", params={"chat_id": "default"}).json()["items"])
+    assert n >= 2
+    for bad in ("chat two", "../x", "x" * 100, ""):
+        assert client.post("/api/runs/run_chat/chat/clear", json={"chat_id": bad, "delete": True}).status_code == 400, bad
+    assert client.delete("/api/runs/run_chat/chat", params={"chat_id": "x" * 100}).status_code == 400
+    assert client.post("/api/runs/run_chat/chat/stop", json={"chat_id": "chat two"}).status_code == 400
+    assert len(client.get("/api/runs/run_chat/chat", params={"chat_id": "default"}).json()["items"]) == n
+
+
+def test_clear_keeps_a_turn_of_another_chat_saved_while_it_runs(tmp_path):
+    """Read, filter and rewrite happen under the workspace lock: an answer of another chat appended at that moment
+    (another tab) is not lost."""
+    import threading
+
+    from tpm.api import fallback
+    from tpm.workspace import Workspace
+
+    ws = Workspace(run_id="clear_race", root=tmp_path)
+    ws.rewrite_jsonl("chat", [{"chat_id": "keep", "role": "user", "content": "q"}, {"chat_id": "drop", "role": "user", "content": "x"}])
+    real_read = Workspace.read_jsonl
+    appended = threading.Event()
+
+    def slow_read(self, artifact):
+        rows = real_read(self, artifact)
+        th = threading.Thread(target=lambda: (self.append_jsonl("chat", {"chat_id": "keep", "role": "assistant", "content": "a"}), appended.set()))
+        th.start()
+        th.join(0.3)                      # the append waits for the lock the clear holds
+        return rows
+
+    Workspace.read_jsonl = slow_read
+    try:
+        for fn in (fallback.clear_chat, agent_mod.clear_chat):
+            appended.clear()
+            ws.append_jsonl("chat", {"chat_id": "drop", "role": "user", "content": "y"})
+            assert fn(ws, "drop") >= 1
+            assert appended.wait(5)
+    finally:
+        Workspace.read_jsonl = real_read
+    rows = ws.read_jsonl("chat")
+    assert [r["role"] for r in rows if r["chat_id"] == "keep"] == ["user", "assistant", "assistant"] and not [r for r in rows if r["chat_id"] == "drop"]
+
+
+def test_a_turn_stopped_by_clear_history_is_not_saved_back_into_the_cleared_chat(demo, monkeypatch):
+    ws, s = demo
+    turn = "CHAT-late"
+
+    def clear_while_the_model_works():
+        agent_mod.clear_chat(ws, "c-late")
+        agent_mod.discard_running("c-late", ws.run_id)            # Clear history pressed while the model works
+        return {"action": "final", "answer": "an answer nobody wants any more", "citations": []}
+    _fake_model(monkeypatch, [clear_while_the_model_works])
+    out = agent_mod.chat(ws, s, "a slow question", chat_id="c-late", client_turn_id=turn, max_steps=2)
+    assert out["stopped"] is True
+    assert agent_mod.chat_history(ws, chat_id="c-late") == [], "the cleared chat stays empty"
+    assert turn not in agent_mod._DISCARD and not agent_mod.is_stopped(turn)
+
+
+def test_the_answers_follow_up_questions_are_saved_with_it(demo, monkeypatch):
+    ws, s = demo
+    _no_ollama(monkeypatch)
+    out = agent_mod.chat(ws, s, "Why was FLAG-000001 raised?", context={"flag_id": "FLAG-000001"}, chat_id="c-fu")
+    saved = agent_mod.chat_history(ws, chat_id="c-fu")[-1]
+    assert out["suggested_followups"] and saved["followups"] == out["suggested_followups"]
+
+
+@pytest.mark.parametrize("first_piece_after", [0.1, 5.0])
+def test_stop_ends_the_local_model_call_itself_and_closes_the_connection(first_piece_after):
+    """Stop during a model step: the local model is asked in streaming mode inside a chat turn, and the connection is
+    dropped as soon as Stop is pressed, while it writes (0.1 s) or while it still reads the prompt (5 s). Ollama stops
+    generating when its client goes away, so a question asked right after Stop does not wait behind the old step."""
+    import http.server
+    import threading
+    import time
+
+    from tpm.config import load_settings
+    from tpm.llm import providers
+
+    seen = {"disconnected": threading.Event(), "body": None}
+
+    class Slow(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):  # quiet
+            pass
+
+        def do_POST(self):
+            seen["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            time.sleep(first_piece_after)
+            try:
+                for i in range(100):
+                    line = (json.dumps({"message": {"content": f"word{i} "}, "done": False}) + "\n").encode()
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+                    self.wfile.flush()
+                    time.sleep(0.2)
+            except OSError:
+                seen["disconnected"].set()
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        s = load_settings(profile="no-egress")
+        s.local_llm.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
+        p = providers.OllamaProvider(s)
+        p.capabilities = lambda model: []
+        t0 = time.time()
+        with providers.cancellable(lambda: time.time() - t0 > 0.6):
+            with pytest.raises(providers.ProviderError, match=providers.STOPPED):
+                p.chat([{"role": "user", "content": "hi"}], model="m")
+        assert time.time() - t0 < 3.0, "the call ended soon after Stop"
+        assert seen["body"]["stream"] is True
+        assert seen["disconnected"].wait(8), "the model server saw the client go away"
+    finally:
+        srv.shutdown()
+
+
+def test_a_streamed_model_step_that_is_not_stopped_returns_the_whole_answer():
+    import http.server
+    import threading
+
+    from tpm.config import load_settings
+    from tpm.llm import providers
+
+    pieces = ['{"action": "final", ', '"answer": "All ', 'good."}']
+
+    class Quick(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            body = "".join(json.dumps({"message": {"content": c}, "done": False}) + "\n" for c in pieces) + json.dumps({"message": {"content": ""}, "done": True}) + "\n"
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quick)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        s = load_settings(profile="no-egress")
+        s.local_llm.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
+        p = providers.OllamaProvider(s)
+        p.capabilities = lambda model: []
+        with providers.cancellable(lambda: False):
+            text, parsed, _ = p.chat([{"role": "user", "content": "hi"}], schema={"type": "object"}, model="m")
+        assert text == "".join(pieces) and parsed == {"action": "final", "answer": "All good."}
+    finally:
+        srv.shutdown()

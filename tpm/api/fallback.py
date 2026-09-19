@@ -98,13 +98,26 @@ def clean_chat_id(chat_id: Any) -> str:
     return s if s and _TURN_ID_RE.match(s) else DEFAULT_CHAT_ID
 
 
+def valid_chat_id(chat_id: Any) -> Optional[str]:
+    """The chat id when it is a safe id, else None. Clear / Delete / Stop refuse an invalid id instead of falling back
+    to "default" (which would silently clear the first chat)."""
+    s = str(chat_id or "").strip()
+    return s if s and _TURN_ID_RE.match(s) else None
+
+
 def turn_chat_id(turn: dict[str, Any]) -> str:
     return str(turn.get("chat_id") or DEFAULT_CHAT_ID)
 
 
-def request_stop(turn_id: Optional[str], chat_id: Optional[str]) -> list[str]:
+def request_stop(turn_id: Optional[str], chat_id: Optional[str], run_id: Optional[str] = None) -> list[str]:
     a = _agent_mod()
-    return list(a.request_stop(turn_id, chat_id)) if a is not None else []
+    return list(a.request_stop(turn_id, chat_id, run_id)) if a is not None else []
+
+
+def discard_running(chat_id: str, run_id: Optional[str] = None) -> list[str]:
+    """Stop the running turns of a chat that is being cleared or deleted, and save nothing more of them."""
+    a = _agent_mod()
+    return list(a.discard_running(chat_id, run_id)) if a is not None else []
 
 
 def is_stopped(turn_id: Optional[str]) -> bool:
@@ -113,14 +126,11 @@ def is_stopped(turn_id: Optional[str]) -> bool:
 
 
 def clear_chat(ws: Workspace, chat_id: str) -> int:
-    """Remove the persisted turns of one chat. Returns how many were removed."""
+    """Remove the persisted turns of one chat (under the workspace lock: a turn of another chat saved meanwhile stays).
+    Returns how many were removed."""
     if not ws.exists("chat"):
         return 0
-    turns = ws.read_jsonl("chat")
-    keep = [t for t in turns if turn_chat_id(t) != chat_id]
-    if len(keep) != len(turns):
-        ws.rewrite_jsonl("chat", keep)
-    return len(turns) - len(keep)
+    return ws.filter_jsonl("chat", lambda t: turn_chat_id(t) != chat_id)
 
 
 def _pct(x: Any) -> str:

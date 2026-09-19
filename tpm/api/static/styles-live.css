@@ -19,7 +19,9 @@
 .drawer-quick.followups .btn { text-align: left; }                  /* the answer's follow-up questions: long ones wrap */
 
 /* ---------- live monitor: alarm card (alarm -> problem -> cause -> suggestion) ---------- */
-.alarm-card { border: 2px solid var(--fail); border-radius: 8px; background: var(--bg-2); padding: 10px 12px; margin: 8px 0 12px; }
+/* the card and the failure-type list are size containers: their layouts follow the width they really have (a larger
+   text size, the chat drawer open), which a media query never sees */
+.alarm-card { border: 2px solid var(--fail); border-radius: 8px; background: var(--bg-2); padding: 10px 12px; margin: 8px 0 12px; container: alarmcard / inline-size; }
 .alarm-card.imminent { border-color: var(--warn); }
 .alarm-card.quality { border-color: var(--warn); }
 .alarm-card .alarm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -43,13 +45,13 @@
 .alarm-step .step-sug { font-weight: 500; }
 .alarm-step ul { margin: 4px 0 0; padding-left: 18px; }
 .alarm-card .alarm-foot { margin-top: 8px; font-size: 12px; color: var(--ink-3); }
-@media (max-width: 900px) {
+@container alarmcard (max-width: 680px) {
   .alarm-steps { grid-template-columns: 1fr; }
   .alarm-step + .alarm-step::before { content: '↓'; left: 50%; top: -12px; transform: translateX(-50%); }
 }
 
 /* ---------- live monitor: known failure types ---------- */
-.sig-list { display: flex; flex-direction: column; gap: 6px; }
+.sig-list { display: flex; flex-direction: column; gap: 6px; container: siglist / inline-size; }
 .sig-row { display: grid; grid-template-columns: minmax(0, 2fr) 110px minmax(0, 1.4fr) 90px; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); font-size: 13px; }
 .sig-row.occurring { border-color: var(--fail); background: color-mix(in srgb, var(--fail) 8%, var(--bg-2)); }
 .sig-row.imminent { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--bg-2)); }
@@ -65,6 +67,6 @@
 .sig-row.covered .sig-bar i { background: var(--ink-3); }
 .sig-row .sig-cols { font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
 .sig-row .sig-dir { font-size: 12px; color: var(--ink-3); text-align: right; white-space: nowrap; }
-@media (max-width: 900px) { .sig-row { grid-template-columns: 1fr 1fr; } .sig-row .sig-dir { text-align: left; } }
+@container siglist (max-width: 640px) { .sig-row { grid-template-columns: 1fr 1fr; } .sig-row .sig-dir { text-align: left; } }
 .live-basic-chart { margin-top: 10px; }
 .live-sig-note { font-size: 12px; color: var(--ink-3); margin: 4px 0 0; }

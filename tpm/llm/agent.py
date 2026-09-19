@@ -18,6 +18,7 @@ external model fails mid-turn the turn is restarted on the local agent, then ans
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import re
@@ -33,6 +34,7 @@ from . import ledger as ledger_mod
 from . import prompts as prompts_mod
 from . import router as router_mod
 from .embeddings import LocalIndex
+from .providers import cancellable
 
 SQL_LIMIT = 200
 TOOL_RESULT_CHARS = 4000
@@ -736,7 +738,8 @@ _PLACEHOLDER_RE = re.compile(r"^\s*(<[^>]*>|answer(\s+for)?\s+the\s+(question|op
 # ----------------------------------------------------------------------------------------------
 _STOP_LOCK = threading.Lock()
 _STOP: dict[str, threading.Event] = {}          # turn_id -> set when a stop was requested
-_ACTIVE: dict[str, str] = {}                    # turn_id -> chat_id of the turns running right now
+_ACTIVE: dict[str, tuple[str, Optional[str]]] = {}   # turn_id -> (chat_id, run_id) of the turns running right now
+_DISCARD: set[str] = set()                      # running turns whose chat was cleared / deleted: nothing more is saved
 _TURN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 DEFAULT_CHAT_ID = "default"
 
@@ -754,20 +757,34 @@ def stop_event(turn_id: str) -> threading.Event:
         return ev
 
 
-def request_stop(turn_id: Optional[str] = None, chat_id: Optional[str] = None) -> list[str]:
-    """Ask a running turn (by id) or every running turn of a chat to stop. Returns the ids that were flagged."""
+def _running(chat_id: str, run_id: Optional[str]) -> list[str]:
+    """Running turns of a chat. Chat ids repeat across runs (every run's first chat is "default"): with ``run_id`` only
+    that run's turns count (a turn registered without a run matches any run)."""
+    with _STOP_LOCK:
+        return [t for t, (c, r) in _ACTIVE.items() if c == chat_id and (run_id is None or r is None or r == run_id)]
+
+
+def request_stop(turn_id: Optional[str] = None, chat_id: Optional[str] = None, run_id: Optional[str] = None) -> list[str]:
+    """Ask a running turn (by id) or every running turn of a chat (of one run) to stop. Returns the ids that were flagged."""
     flagged: list[str] = []
     if turn_id:
         stop_event(str(turn_id)).set()
         flagged.append(str(turn_id))
     if chat_id:
-        with _STOP_LOCK:
-            ids = [t for t, c in _ACTIVE.items() if c == chat_id]
-        for t in ids:
+        for t in _running(chat_id, run_id):
             stop_event(t).set()
             if t not in flagged:
                 flagged.append(t)
     return flagged
+
+
+def discard_running(chat_id: str, run_id: Optional[str] = None) -> list[str]:
+    """Clear history / Delete chat: stop every running turn of the chat and save nothing more of it (the answer of a
+    stopped turn arrives only when the model step in flight returns, after the history is gone)."""
+    ids = request_stop(None, chat_id, run_id)
+    with _STOP_LOCK:
+        _DISCARD.update(ids)
+    return ids
 
 
 def is_stopped(turn_id: Optional[str]) -> bool:
@@ -778,15 +795,16 @@ def is_stopped(turn_id: Optional[str]) -> bool:
     return bool(ev and ev.is_set())
 
 
-def _turn_begin(turn_id: str, chat_id: str) -> None:
+def _turn_begin(turn_id: str, chat_id: str, run_id: Optional[str] = None) -> None:
     with _STOP_LOCK:
-        _ACTIVE[turn_id] = chat_id
+        _ACTIVE[turn_id] = (chat_id, run_id)
 
 
 def _turn_end(turn_id: str) -> None:
     with _STOP_LOCK:
         _ACTIVE.pop(turn_id, None)
         _STOP.pop(turn_id, None)
+        _DISCARD.discard(turn_id)
 
 
 def clean_turn_id(turn_id: Any) -> Optional[str]:
@@ -873,7 +891,9 @@ def run_agent(ws: Any, settings: Settings, message: str, loaded: dict[str, Any],
                 ext_error = res.error or "no JSON from the external model"
                 break
         else:
-            res = router_mod.local_chat(messages, task=task, purpose=purpose, ws=ws, settings=settings, schema=prompts_mod.AGENT_STEP_SCHEMA, max_tokens=900, artifact_types=["chat", "tool_results"])
+            # with a Stop button, the local model call itself ends when Stop is pressed (not only the next step)
+            with cancellable(stopped) if stop else contextlib.nullcontext():
+                res = router_mod.local_chat(messages, task=task, purpose=purpose, ws=ws, settings=settings, schema=prompts_mod.AGENT_STEP_SCHEMA, max_tokens=900, artifact_types=["chat", "tool_results"])
             if not res.ok or not isinstance(res.data, dict):
                 trace.append({"step": step, "tool": None, "ok": False, "error": res.error or "no JSON from model"})
                 if res.route == "none":
@@ -955,7 +975,7 @@ def chat(ws: Any, settings: Optional[Settings] = None, message: str = "", contex
     tb = Toolbox(ws, settings)
     loaded = load_context(ws, settings, context, message, tb)
     _persist(ws, {"turn_id": turn_id, "chat_id": chat_id, "ts": now_iso(), "role": "user", "actor": actor_str, "content": message, "context": loaded.get("context"), "task": task})
-    _turn_begin(turn_id, chat_id)
+    _turn_begin(turn_id, chat_id, getattr(ws, "run_id", None))
     try:
         return _chat_turn(ws, settings, message, history, actor_str, task, language, max_steps, use_model, chat_id, turn_id, t_start, tb, loaded)
     finally:
@@ -1049,7 +1069,7 @@ def _chat_turn(ws: Any, settings: Settings, message: str, history: Optional[list
         "context": loaded.get("context"),
         "latency_ms": int((time.time() - t_start) * 1000),
     }
-    _persist(ws, {"turn_id": turn_id, "chat_id": chat_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "route": route, "external_calls": external_calls, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"]})
+    _persist(ws, {"turn_id": turn_id, "chat_id": chat_id, "ts": now_iso(), "role": "assistant", "actor": source, "content": answer, "citations": citations, "source": source, "route": route, "external_calls": external_calls, "tool_trace": trace, "task": task, "latency_ms": out["latency_ms"], "followups": followups})
     try:
         if ws is not None:
             ws.log.record(actor_str, "chat", "chat", turn_id, {"task": task, "chat_id": chat_id, "question": message[:500], "source": source, "route": route, "external_calls": external_calls, "n_tools": len(trace), "context": loaded.get("context")}, evidence_ids=[c for c in citations if c.startswith("EV-")])
@@ -1088,6 +1108,9 @@ def _known_ids(ws: Any, ids: list[str], loaded: dict[str, Any]) -> list[str]:
 def _persist(ws: Any, turn: dict[str, Any]) -> None:
     if ws is None:
         return
+    with _STOP_LOCK:
+        if turn.get("turn_id") in _DISCARD:        # its chat was cleared while it ran: the history stays empty
+            return
     try:
         turn.setdefault("chat_id", DEFAULT_CHAT_ID)
         ws.append_jsonl("chat", turn)
@@ -1114,11 +1137,8 @@ def chat_history(ws: Any, limit: int = 50, chat_id: Optional[str] = None) -> lis
 
 
 def clear_chat(ws: Any, chat_id: str) -> int:
-    """Remove the persisted turns of one chat (the UI's "Clear history" / "Delete chat"). Returns how many were removed."""
+    """Remove the persisted turns of one chat (the UI's "Clear history" / "Delete chat"). Returns how many were removed.
+    Read, filter and rewrite happen under the workspace lock, so a turn of another chat saved meanwhile is kept."""
     if ws is None or not ws.exists("chat"):
         return 0
-    turns = ws.read_jsonl("chat")
-    keep = [t for t in turns if turn_chat_id(t) != chat_id]
-    if len(keep) != len(turns):
-        ws.rewrite_jsonl("chat", keep)
-    return len(turns) - len(keep)
+    return ws.filter_jsonl("chat", lambda t: turn_chat_id(t) != chat_id)

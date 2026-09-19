@@ -453,7 +453,9 @@ export function installRefHandler() {
 export function confWords(v) {
   if (v === null || v === undefined || isNaN(v)) return t('plain.conf.unknown');
   const x = Math.max(0, Math.min(1, Number(v)));
-  const key = x >= 0.9 ? 'veryHigh' : x >= 0.7 ? 'high' : x >= 0.5 ? 'medium' : x >= 0.3 ? 'low' : 'veryLow';
+  // the same scale as the server's summaries (tpm/api/brief.py _sure: 0.85 / 0.65 / 0.45), so one number never gets
+  // two different words on the same screen
+  const key = x >= 0.85 ? 'veryHigh' : x >= 0.65 ? 'high' : x >= 0.45 ? 'low' : 'veryLow';
   return `${t('plain.conf.' + key)} (${fmt.pct(x)})`;
 }
 /** Severity in words + percent: "serious (78 %)". */

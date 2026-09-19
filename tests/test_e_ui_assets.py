@@ -80,6 +80,26 @@ def test_index_has_no_inline_widths_that_overflow():
     assert "minmax(0, 1.2fr) minmax(0, 2fr)" in css  # side-by-side columns
 
 
+def test_text_size_keeps_charts_clickable_and_window_heights_right():
+    """Text size (A+ / A-) is CSS zoom on <body>. Plotly's hover and click do not know zoom (at 125 % a click on one
+    sensor's bar opened another sensor, at 160 % nothing), and inside the zoom 100vh is taller than the window (the chat
+    question box fell off the screen). So every chart is drawn outside the zoom and plot() scales it instead, every
+    viewport height is divided by --zoom again, and layouts follow container widths, never a width media query (which
+    does not see the zoom). Checked in a headless browser at 100 / 125 / 160 %: every bar's hover and click right."""
+    css = {p.name: re.sub(r"/\*.*?\*/", "", p.read_text(encoding="utf-8"), flags=re.S) for p in STATIC.glob("*.css")}
+    assert re.search(r"\.tpm-plot\s*\{\s*zoom:\s*calc\(1 / var\(--zoom, 1\)\)", css["styles.css"])
+    for name, text in css.items():
+        for m in re.finditer(r"[\d.]+v[hw]\b[^;}]*", text):
+            assert "var(--zoom" in m.group(0), f"{name}: '{m.group(0)[:60]}' ignores the text size"
+        assert not re.search(r"@media\s*\([^)]*width", text), f"{name}: a width media query does not follow the text size; use @container"
+    charts = (STATIC / "js" / "charts.js").read_text(encoding="utf-8")
+    assert "node.classList.add('tpm-plot')" in charts and "zoomLayout(lay, z)" in charts and "bus.on('zoom.changed'" in charts
+    assert "bus.emit('zoom.changed'" in (STATIC / "js" / "views" / "settings.js").read_text(encoding="utf-8")
+    for p in JS_FILES:                                        # every chart goes through plot(): nothing draws with Plotly directly
+        if p.name != "charts.js":
+            assert not re.search(r"Plotly\.(newPlot|react|plot)\(", p.read_text(encoding="utf-8")), p.name
+
+
 # ------------------------------------------------------------------------------------------ POST /api/demo
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
