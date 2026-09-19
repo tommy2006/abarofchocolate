@@ -6,8 +6,8 @@ rights. Everything still runs on the computer itself.
 
 ## For the person installing
 
-1. Get `dist/NorrinTPM-Setup.exe` from the repository (about 190 MB; it is stored with git LFS: use GitHub's
-   Download button on the file, or `git lfs pull` after cloning). Run it (Windows may show "Windows protected your PC" because the file is not code-signed:
+1. Download `NorrinTPM-Setup.exe` (about 180 MB) from the latest release:
+   https://github.com/tommy2006/abarofchocolate/releases/latest - it is a release asset, so cloning the repository never downloads it. Run it (Windows may show "Windows protected your PC" because the file is not code-signed:
    choose *More info > Run anyway*).
 2. Keep the defaults and press **Install**. The app starts when setup finishes; later start it from the Start menu:
    *Norrin Trustworthy Process Monitor*.
@@ -45,8 +45,9 @@ Steps: icon + plotly.min.js, freeze the app (`packaging/windows/norrin_tpm.spec`
 smoke test of the frozen app (doctor, which also lists the known failure types of the live monitor and fails when
 the build ships none, + a full analysis of a bundled sample), zip the payload, build the setup
 program (`packaging/windows/installer.py`, a small wizard that carries the payload). Output:
-`dist\NorrinTPM-Setup.exe` (about 190 MB, committed through git LFS - `.gitattributes` tracks it - so the team repo
-always carries the current installer; GitHub's 100 MB limit for ordinary files does not apply to LFS objects).
+`dist\NorrinTPM-Setup.exe` (about 180 MB). Publish it as an asset of a GitHub release (Releases > Draft a new
+release > attach the file), not as a commit: a release asset costs no LFS storage or bandwidth, and a clone of
+the repository stays small. `.gitattributes` still routes the file to git LFS should anyone add it on purpose.
 
 How it fits together:
 

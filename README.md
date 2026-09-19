@@ -34,8 +34,8 @@ What we changed after an expert reviewed our first output: [What changed after t
 
 ## Install on Windows (no Python needed)
 
-1. Download **`dist/NorrinTPM-Setup.exe`** from this repository (about 190 MB; stored with git LFS - use the
-   "Download" button on GitHub or `git lfs pull` after cloning).
+1. Download **NorrinTPM-Setup.exe** (about 180 MB) from the latest release:
+   [https://github.com/tommy2006/abarofchocolate/releases/latest](https://github.com/tommy2006/abarofchocolate/releases/latest). Nothing else is needed, and cloning this repository does not download it.
 2. Run it. Windows may show "Windows protected your PC" because the file is not code-signed: choose
    *More info > Run anyway*. Keep the defaults and press **Install** (per user, no administrator rights).
 3. The app starts by itself and appears in the Start menu and on the desktop as
@@ -309,9 +309,10 @@ and latency.
 
 ## Windows app (installer)
 
-`dist/NorrinTPM-Setup.exe` installs the monitor like any Windows program (Start menu, desktop shortcut,
+The setup file of the [latest release](https://github.com/tommy2006/abarofchocolate/releases/latest) installs the monitor like any Windows program (Start menu, desktop shortcut,
 "Installed apps" entry with uninstaller; per user, no administrator rights, no Python needed). Build it with
-`powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1`. Details: [docs/WINDOWS_APP.md](docs/WINDOWS_APP.md).
+`powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1`, which writes `dist\NorrinTPM-Setup.exe`;
+that file is published as a release asset, not committed. Details: [docs/WINDOWS_APP.md](docs/WINDOWS_APP.md).
 
 ---
 

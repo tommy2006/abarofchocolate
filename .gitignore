@@ -17,7 +17,6 @@ pair_*_answers.txt
 .DS_Store
 Thumbs.db
 
-# Windows packaging output (packaging/windows/build.ps1); the setup file itself is tracked with git LFS
+# Windows packaging output (packaging/windows/build.ps1); the setup file is published as a release asset
 build/
-dist/*
-!dist/NorrinTPM-Setup.exe
+dist/

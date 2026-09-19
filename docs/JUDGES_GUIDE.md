@@ -21,7 +21,8 @@ fault types and six data-quality defects, no labels, no documentation), runs the
 each stage with progress and elapsed time versus the time budget, then the workspace path and the report path.
 
 To use your own file instead: drop it on the **Runs** page (or `python -m tpm run <file>`). Headers may be absent;
-nothing needs to be labelled. No Python? Install the Windows app from `dist/NorrinTPM-Setup.exe` (see the README).
+nothing needs to be labelled. No Python? Install the Windows app from the
+latest release: https://github.com/tommy2006/abarofchocolate/releases/latest (see the README).
 
 Then, on the finished run, let the app demonstrate the parts that need a person or a rule:
 
