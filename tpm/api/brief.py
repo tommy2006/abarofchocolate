@@ -735,6 +735,64 @@ T: dict[str, dict[str, str]] = {
 }
 
 
+# The list of flagged places is capped for readability, findings are ranked by more than peak height, and a score is
+# only honest when it says what it measures: these lines replace or add the sentences that say so.
+T["en"].update({
+    "mon.h.eventsMore": "Unusual behaviour was found in more than {k} places. The strongest is at {where}, mainly on {sensor}.",
+    "mon.h.eventsMore.short": "Unusual behaviour was found in more than {k} places. The strongest is at {where}.",
+    "mon.p.capped": "That list stops at the {cap} strongest places; in all, {total} stretches in {over} of {g} runs rose above the normal range.",
+    "mon.p.openFirst": "Open the top finding on the Diagnoses page first: findings are ranked by how much they explain and whether they held up, not by height.",
+    "dq.h.caution": "The data can be used, but {k} of {n} batches are affected, mostly {top}.",
+    "dq.p.systemic": "Every batch is affected, so this is systematic rather than incidental: treat it as a property of the recording, not of one run.",
+    "dg.p.coverage": "{n} findings name the causes behind {ev} flagged places; each finding groups the places that share one cause.",
+    "dg.p.shakyTop": "The finding above is the one our own challenge weakened, so treat its cause as provisional.",
+    "dg.p.shaky": "The one the challenge weakened is {what}, at {where}.",
+    "dg.ask": "What should I check on site for this finding?",
+    "as.h.good": "This data rates {pct} as a basis for fault finding: the monitor learns well, conditions are evenly covered, rows are sound.",
+    "as.h.fair": "This data rates {pct} as a basis for fault finding: what the monitor can learn, how evenly conditions are covered, data quality.",
+    "as.h.weak": "This data rates only {pct} as a basis for fault finding: what the monitor can learn, how evenly conditions are covered, data quality.",
+    "as.p.notdq": "This is not the data-quality verdict: that page judges whether the rows can be trusted, this score judges what can be learned from them.",
+    "as.p.less.yes": "Rows the quality stage set aside are already out of the analysis; dropping more of the weakest data would probably help.",
+    "as.p.less.no": "Rows the quality stage set aside are already out of the analysis; dropping more data would probably not help.",
+})
+T["fi"].update({
+    "mon.h.eventsMore": "Poikkeavaa toimintaa loytyi yli {k} kohdassa. Voimakkain on kohdassa {where}, paaasiassa anturilla {sensor}.",
+    "mon.h.eventsMore.short": "Poikkeavaa toimintaa loytyi yli {k} kohdassa. Voimakkain on kohdassa {where}.",
+    "mon.p.capped": "Luettelo katkeaa {cap} voimakkaimpaan; kaikkiaan {total} jaksoa {over} ajossa ({g}) nousi yli tavanomaisen.",
+    "mon.p.openFirst": "Avaa ensin Diagnoosit-sivun tarkein loydos: jarjestys perustuu siihen, kuinka paljon loydos selittaa ja kestiko se haastamisen, ei piikin korkeuteen.",
+    "dq.h.caution": "Dataa voi kayttaa, mutta {k}/{n} erassa on ongelmia, useimmiten {top}.",
+    "dq.p.systemic": "Ongelma koskee jokaista eraa, joten se on jarjestelmallinen eika satunnainen: se on tallennuksen ominaisuus, ei yhden ajon.",
+    "dg.p.coverage": "{n} loydosta nimeaa syyt {ev} merkitylle kohdalle; kukin loydos kokoaa saman syyn kohdat yhteen.",
+    "dg.p.shakyTop": "Yllaoleva loydos on juuri se, jota oma haastomme heikensi, joten pida syyta alustavana.",
+    "dg.p.shaky": "Haastaminen heikensi loydosta {what}, kohdassa {where}.",
+    "dg.ask": "Mita minun pitaisi tarkistaa paikan paalla taman loydoksen osalta?",
+    "as.h.good": "Vianetsinnan pohjana tama data saa arvon {pct}: valvonta oppii hyvin, ajotilat kattavat tasaisesti ja rivit ovat kunnossa.",
+    "as.h.fair": "Vianetsinnan pohjana tama data saa arvon {pct}: mita valvonta voi oppia, kuinka tasaisesti ajotilat kattavat ja datan peruslaatu.",
+    "as.h.weak": "Vianetsinnan pohjana tama data saa vain arvon {pct}: mita valvonta voi oppia, kuinka tasaisesti ajotilat kattavat ja datan peruslaatu.",
+    "as.p.notdq": "Tama ei ole datan laatutuomio: laatusivu arvioi, voiko riveihin luottaa, tama luku sita, mita niista voi oppia.",
+    "as.p.less.yes": "Laatuvaihe on jo jattanyt heikot rivit analyysin ulkopuolelle; heikoimman datan poistaminen auttaisi todennakoisesti lisaa.",
+    "as.p.less.no": "Laatuvaihe on jo jattanyt heikot rivit analyysin ulkopuolelle; lisaa poistaminen ei todennakoisesti auttaisi.",
+})
+T["sv"].update({
+    "mon.h.eventsMore": "Avvikande beteende hittades pa mer an {k} stallen. Det starkaste ar vid {where}, framst pa {sensor}.",
+    "mon.h.eventsMore.short": "Avvikande beteende hittades pa mer an {k} stallen. Det starkaste ar vid {where}.",
+    "mon.p.capped": "Listan stannar vid de {cap} starkaste; totalt {total} strackor i {over} av {g} korningar steg over det normala.",
+    "mon.p.openFirst": "Oppna det viktigaste fyndet pa Diagnoser-sidan forst: fynden rangordnas efter hur mycket de forklarar och om de holl, inte efter toppens hojd.",
+    "dq.h.caution": "Data gar att anvanda, men {k} av {n} satser ar berorda, mestadels {top}.",
+    "dq.p.systemic": "Varje sats ar berord, sa detta ar systematiskt och inte tillfalligt: det ar en egenskap hos inspelningen, inte hos en korning.",
+    "dg.p.coverage": "{n} fynd namner orsakerna bakom {ev} markerade stallen; varje fynd samlar de stallen som delar en orsak.",
+    "dg.p.shakyTop": "Fyndet ovan ar just det som var egen granskning forsvagade, sa behandla orsaken som preliminar.",
+    "dg.p.shaky": "Det som granskningen forsvagade ar {what}, vid {where}.",
+    "dg.ask": "Vad bor jag kontrollera pa plats for det har fyndet?",
+    "as.h.good": "Som underlag for felsokning far dessa data {pct}: overvakningen lar sig val, driftlagena tacks jamnt och raderna ar sunda.",
+    "as.h.fair": "Som underlag for felsokning far dessa data {pct}: vad overvakningen kan lara sig, hur jamnt driftlagena tacks, och datakvalitet.",
+    "as.h.weak": "Som underlag for felsokning far dessa data bara {pct}: vad overvakningen kan lara sig, hur jamnt driftlagena tacks, och datakvalitet.",
+    "as.p.notdq": "Detta ar inte datakvalitetsomdomet: kvalitetssidan bedomer om raderna gar att lita pa, det har talet vad man kan lara av dem.",
+    "as.p.less.yes": "Rader som kvalitetssteget lagt at sidan ar redan utanfor analysen; att slappa mer av de svagaste data skulle troligen hjalpa.",
+    "as.p.less.no": "Rader som kvalitetssteget lagt at sidan ar redan utanfor analysen; att slappa mer data skulle troligen inte hjalpa.",
+})
+
+
 def tr(lang: str, key: str, **kw: Any) -> str:
     """Template `key` in `lang` (English when the language lacks it); `key + '.1'` is used when n / k / b == 1."""
     one = any(kw.get(name) in (1, "1") for name in ("n", "k", "b"))
@@ -1043,7 +1101,12 @@ def _facts_monitor(ws: Any) -> dict[str, Any]:
         n_points = int(sus.get("n_rows") or 0) if isinstance(sus, dict) and sus.get("n_rows") else sum(1 for f in flags if f.get("kind") == "point")
         ev = meta.get("events") if isinstance(meta.get("events"), dict) else {}
         n_groups = ev.get("n_groups") or gs.get("n_groups") or schema.get("n_groups") or 1
-        return {"n_places": len(places), "causes": Counter(str(p["best"].get("likely_cause_class") or "unknown") for p in places), "top": top,
+        ev_pts = ev.get("points") if isinstance(ev.get("points"), dict) else {}
+        n_total = int(ev_pts.get("n_sustained_stretches") or 0) or len(places)
+        cap = int(ev.get("flag_cap") or 0)
+        truncated = bool(ev.get("flags_truncated") or ev.get("groups_skipped_for_cap") or n_total > len(places))
+        return {"n_places": len(places), "n_places_total": n_total, "truncated": truncated, "cap": cap or len(places),
+                "groups_over": int(ev.get("n_groups_over_threshold") or 0), "causes": Counter(str(p["best"].get("likely_cause_class") or "unknown") for p in places), "top": top,
                 "n_points": n_points, "n_dq": sum(1 for f in flags if f.get("kind") == "dq"), "n_groups": n_groups,
                 "groups_hit": len({p["group"] for p in places}), "has_sus": bool(isinstance(sus, dict) and sus.get("n_rows")), "have": bool(meta or flags)}
 
@@ -1071,7 +1134,9 @@ def _facts_diagnoses(ws: Any) -> dict[str, Any]:
         weight = {"process": 1.0, "sensor": 1.0, "mixed": 1.0, "data": 0.8}
         ranked = sorted(diags, key=lambda d: (verdict(d) == "rejected", -sev(d) * weight.get(str(d.get("cause_class")), 0.7), -float(d.get("confidence") or 0)))
         top = ranked[0] if ranked else None
-        return {"n": len(diags), "top": top, "top_points": bool(top and _is_points_diag(top, flags_by_id)), "top_place": _diag_place(top, flags_by_id) if top else None,
+        shaky = [x for x in ranked if verdict(x) in ("weakened", "rejected")]
+        return {"n": len(diags), "top": top, "shaky": shaky[:3],
+                "n_places": len({(str(x.get("group_id")), int(x.get("row_start") or 0)) for x in flags_by_id.values() if x.get("kind") in ("anomaly", "drift", "changepoint", "cascade")}), "top_points": bool(top and _is_points_diag(top, flags_by_id)), "top_place": _diag_place(top, flags_by_id) if top else None,
                 "top_n_flags": len(top.get("flag_ids") or []) if top else 0, "top_sev": sev(top) if top else 0.0,
                 "causes": Counter(str(d.get("cause_class") or "unknown") for d in diags), "critique": Counter(verdict(d) for d in diags),
                 "reviewed": sum(1 for d in diags if d.get("human_status")), "exists": (ws.dir / "diagnoses.jsonl").exists()}
@@ -1140,6 +1205,8 @@ def _brief_quality(ws: Any, settings: Any, lang: str) -> dict[str, Any]:
     points = []
     if len(F["problems"]) > 1 or (F["problems"] and level == "ok"):
         points.append(_pick([tr(lang, "dq.p.top", list=_problem_list(F["problems"], lang, 3)), tr(lang, "dq.p.top", list=_problem_list(F["problems"], lang, 2)), tr(lang, "dq.p.top", list=_problem_list(F["problems"], lang, 2, counts=False))], MAX_POINT_WORDS))
+    if level != "ok" and F["n"] and (F["n_bad"] + F["n_caution"]) >= int(F["n"]):
+        points.append(tr(lang, "dq.p.systemic"))   # present everywhere = a property of the recording, not of one run
     if F["sensors"]:
         points.append(_pick([tr(lang, "dq.p.sensors", list=_join([names.get(s, s) for s in F["sensors"]], lang, m)) for m in (3, 2, 1)], MAX_POINT_WORDS))
     points.append(tr(lang, "dq.p.setaside") if level != "ok" else tr(lang, "dq.p.batch"))
@@ -1175,9 +1242,10 @@ def _monitor_headline(ws: Any, lang: str) -> tuple[str, str]:
         sig = _top_signal(top, "signals_ranked")
         k = _cnt(F["n_places"], lang)
         cands = []
+        key = "mon.h.eventsMore" if F.get("truncated") else "mon.h.events"
         if sig:
-            cands.append(tr(lang, "mon.h.events", k=k, where=where, sensor=_sensor(names, sig, lang)))
-        cands.append(tr(lang, "mon.h.events.short", k=k, where=where))
+            cands.append(tr(lang, key, k=k, where=where, sensor=_sensor(names, sig, lang)))
+        cands.append(tr(lang, key + ".short", k=k, where=where))
         verdict = "problem" if float(top.get("severity") or 0) >= 0.7 else "attention"
         return verdict, _pick(cands, MAX_HEADLINE_WORDS)
     if F["n_points"]:
@@ -1193,6 +1261,11 @@ def _brief_monitor(ws: Any, settings: Any, lang: str) -> dict[str, Any]:
     if F["n_places"]:
         top = F["top"] or {}
         where = _flag_where(top, lang)
+        if F.get("truncated"):   # the list stops at a cap, so the number in the headline is a floor, not a count
+            points.append(tr(lang, "mon.p.capped", cap=_int(F["cap"], lang), total=_int(F["n_places_total"], lang),
+                             over=_int(F["groups_over"] or F["groups_hit"], lang), g=_int(F["n_groups"], lang)))
+        if _facts_diagnoses(ws)["n"]:
+            points.append(tr(lang, "mon.p.openFirst"))
         cause_bits = [tr(lang, "mon.cause." + (c if c in ("process", "sensor", "data", "mixed") else "unknown"), n=_cnt(n, lang)) for c, n in F["causes"].most_common(3)]
         points.append(tr(lang, "mon.p.causes", list=_join(cause_bits, lang, 3)))
         if (F["n_groups"] or 1) > 1:
@@ -1249,13 +1322,28 @@ def _diag_what_where(ws: Any, lang: str) -> tuple[str, str]:
     return what, where
 
 
+def _sure_of(d: dict[str, Any], lang: str) -> str:
+    """How sure we say we are, after our own critique has had its say: a finding the challenge weakened cannot be
+    called "very sure", a rejected one cannot be called sure at all, and a finding with more than one cause loses a
+    step because the confidence is about the cause, not about the event."""
+    v = float(d.get("confidence") or 0)
+    verdict = str((d.get("critique") or {}).get("verdict") or "") if isinstance(d.get("critique"), dict) else ""
+    if verdict == "rejected":
+        v = min(v, 0.3)
+    elif verdict == "weakened":
+        v = min(v, 0.6)
+    if str(d.get("cause_class")) == "mixed":
+        v = min(v, 0.8)
+    return _sure_sentence(v, lang)
+
+
 def _brief_diagnoses(ws: Any, settings: Any, lang: str) -> dict[str, Any]:
     F = _facts_diagnoses(ws)
     if not F["n"]:
         return {"verdict": "ok", "headline": tr(lang, "dg.h.none"), "points": [tr(lang, "mon.p.learned")], "actions": [action(tr(lang, "mon.a.chart"), "monitor", "section:timeline"), action(tr(lang, "mon.ask.none"), ask=tr(lang, "mon.ask.none"))]}
     d = F["top"]
     what, where = _diag_what_where(ws, lang)
-    sure = _cap(_sure_sentence(d.get("confidence"), lang))
+    sure = _cap(_sure_of(d, lang))
     explained = str(d.get("cause_class") or "unknown") in ("process", "sensor", "data", "mixed") and not F["top_points"]
     head = _pick([_tidy(tr(lang, "dg.h.top", what=what, where=where, sure=sure)) if explained else "", _tidy(tr(lang, "dg.h.top.short", what=what, where=where)), _tidy(tr(lang, "dg.h.top.min", what=what.rstrip(",")))], MAX_HEADLINE_WORDS)
     norm = lambda c: c if c in ("process", "sensor", "data", "mixed") else "unknown"  # noqa: E731
@@ -1264,16 +1352,26 @@ def _brief_diagnoses(ws: Any, settings: Any, lang: str) -> dict[str, Any]:
     else:
         bits = [tr(lang, "dg.count." + norm(c), n=_cnt(n, lang)) for c, n in F["causes"].most_common(4)]
         points = [tr(lang, "dg.p.count", n=_int(F["n"], lang), list=_join(bits, lang, 4))]
+    if F.get("n_places"):
+        points.append(tr(lang, "dg.p.coverage", n=_int(F["n"], lang), ev=_int(F["n_places"], lang)))
     cr = F["critique"]
     checked = [(v, cr.get(v, 0)) for v in ("supported", "weakened", "rejected") if cr.get(v)]
     if checked and len(checked) == 1 and checked[0][0] == "supported":
         points.append(tr(lang, "dg.p.challenge.all", n=_cnt(checked[0][1], lang)))
     elif checked:
-        points.append(tr(lang, "dg.p.challenge", list=_join([tr(lang, "dg.ch." + v, n=_cnt(c, lang)) for v, c in checked], lang, 3)))
+        said = tr(lang, "dg.p.challenge", list=_join([tr(lang, "dg.ch." + v, n=_cnt(c, lang)) for v, c in checked], lang, 3))
+        shaky = F.get("shaky") or []
+        if shaky and str(shaky[0].get("id")) == str(d.get("id")):
+            said += " " + tr(lang, "dg.p.shakyTop")   # naming it matters more than counting it
+        elif len(shaky) == 1:
+            pl = _diag_place(shaky[0], {f.get("id"): f for f in (_read(ws, "flags.jsonl", []) or []) if isinstance(f, dict)})
+            said += " " + tr(lang, "dg.p.shaky", what=str(shaky[0].get("fault_type") or shaky[0].get("cause_label") or "").strip() or tr(lang, "pw.other"),
+                             where=_flag_where(pl or {}, lang))
+        points.append(said)
     points.append(tr(lang, "dg.p.review", k=_int(F["reviewed"], lang), n=_int(F["n"], lang)) if F["reviewed"] else tr(lang, "dg.p.review.none"))
     cause = str(d.get("cause_class") or "unknown")
     serious = cause in ("process", "sensor", "mixed") and float(d.get("confidence") or 0) >= 0.65 and not F["top_points"]
-    acts = [action(tr(lang, "dg.a.open"), "diagnoses", d.get("id")), action(tr(lang, "dg.ask", id=d.get("id")), ask=tr(lang, "dg.ask", id=d.get("id")))]
+    acts = [action(tr(lang, "dg.a.open"), "diagnoses", d.get("id")), action(tr(lang, "dg.ask"), ask=tr(lang, "dg.ask"))]
     return {"verdict": "problem" if serious else "attention", "headline": head, "points": points, "actions": acts}
 
 
@@ -1288,7 +1386,7 @@ def _brief_assessor(ws: Any, settings: Any, lang: str) -> dict[str, Any]:
     tri = lambda v: "yes" if v is True else "no" if v is False else "unclear"  # noqa: E731
     more = a.get("more_data_verdict") if isinstance(a.get("more_data_verdict"), dict) else {}
     less = a.get("less_data_verdict") if isinstance(a.get("less_data_verdict"), dict) else {}
-    points = [tr(lang, "as.p.more." + tri(more.get("would_help"))), tr(lang, "as.p.less." + tri(less.get("would_help")))]
+    points = [tr(lang, "as.p.notdq"), tr(lang, "as.p.more." + tri(more.get("would_help"))), tr(lang, "as.p.less." + tri(less.get("would_help")))]
     cov = a.get("coverage") if isinstance(a.get("coverage"), dict) else {}
     thin, regimes = cov.get("thin_regimes") or [], cov.get("regimes") or []
     recs = a.get("recommendations") or []

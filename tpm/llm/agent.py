@@ -423,12 +423,18 @@ class Toolbox:
             groups = {f.group_id for f in flags if f.group_id}
             rows_reported = sum(int(f.row_end) - int(f.row_start) + 1 for f in flags if f.kind in ("anomaly", "drift", "changepoint"))
             top_ev = sorted(flags, key=lambda f: -float(f.score or 0))[:3]
-            out["flags"] = {"total": len(flags), "by_kind": kinds, "groups_with_findings": len(groups),
+            ev = ((ws.read_json("detect_meta.json", {}) or {}).get("events") or {}) or {}
+            pts = ev.get("points") if isinstance(ev.get("points"), dict) else {}
+            detected = int(pts.get("n_sustained_stretches") or 0)
+            out["flags"] = {"total": len(flags), "listed": len(flags), "detected_stretches_total": detected or len(flags),
+                            "list_truncated": bool(ev.get("flags_truncated") or ev.get("groups_skipped_for_cap") or detected > len(flags)),
+                            "list_cap": int(ev.get("flag_cap") or 0) or None,
+                            "groups_over_threshold": int(ev.get("n_groups_over_threshold") or 0) or None, "by_kind": kinds, "groups_with_findings": len(groups),
                             "groups_in_file": (out.get("dataset") or {}).get("groups"),
                             "rows_in_reported_events": rows_reported,
                             "strongest": [{"id": f.id, "score": round(float(f.score or 0), 3), "times_the_threshold": round(float(f.score or 0), 2), "group": f.group_id,
                                            "rows": [int(f.row_start), int(f.row_end)], "signals": [r.signal for r in (f.signals_ranked or [])[:3]]} for f in top_ev],
-                            "note": "a group is one run / batch of the file; a finding covers a stretch of rows. rows_in_reported_events counts the rows of the findings the pages show; the evaluation's flagged_fraction counts every stretch the rule marks, which is more"}
+                            "note": "total/listed is how many findings the pages list; when list_truncated is true that number is the cap, not a count - say 'more than N' and give detected_stretches_total instead. a group is one run / batch of the file; a finding covers a stretch of rows. rows_in_reported_events counts the rows of the findings the pages show; the evaluation's flagged_fraction counts every stretch the rule marks, which is more"}
         except Exception:
             pass
         try:
