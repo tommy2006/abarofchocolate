@@ -63,6 +63,8 @@ export async function render(main, params = {}) {
   let selected = null; let listTable = null;
   const STATUS_OF = { accept: 'accepted', question: 'questioned', override: 'overridden', dismiss: 'dismissed' };
   const decisions = (d) => decisionBar('diagnosis', d.id, { current: d.human_status, note: d.human_note, overrideFields: [{ key: 'cause_class', label: t('diag.cause'), type: 'select', options: ['process', 'sensor', 'data', 'mixed', 'unknown'], value: d.cause_class }, { key: 'fault_type', label: t('diag.faultType'), type: 'text', value: d.fault_type }], askContext: diagnosisContext(d), onDone: (a) => { d.human_status = STATUS_OF[a]; renderList(); } });
+  // "Finding 2", not "DIAG-000002": the id stays as the link target and the tooltip
+  const labelOf = (d) => td('diag.label', { n: Number(String(d && d.id || '').replace(/\D+/g, '')) || '?' });
   const titleOf = (d) => { const p = d.pattern_id && patterns[d.pattern_id]; return p && p.name ? p.name : d.fault_type; };
   /** The strongest flag with rows behind a finding: where it is on the timeline. */
   const placeOf = (d) => { const fs = (d.flag_ids || []).map((id) => flagsById[id]).filter((f) => f && f.row_start !== undefined && f.row_start !== null); return fs.length ? fs.reduce((a, b) => (b.severity > a.severity ? b : a)) : null; };
@@ -140,7 +142,7 @@ export async function render(main, params = {}) {
     }
     if (full) {
       const legend = Object.fromEntries(CAUSE_ORDER.map((c) => [c, causeWord(c)]));
-      const items = all.map((d) => { const p = placeOf(d); if (!p) return null; const c = causeOf(d); const s = sevOf(d); return { x: p.row_start, y: Math.round(s * 100), series: c, color: cc[c], size: 7 + 10 * s, id: d.id, text: `<b>${d.id}</b>: ${titleOf(d)}<br>${causeWord(c)} · ${t('common.group')} ${d.group_id ?? '–'} · ${t('mon.rows')} ${p.row_start}–${p.row_end}` }; }).filter(Boolean);
+      const items = all.map((d) => { const p = placeOf(d); if (!p) return null; const c = causeOf(d); const s = sevOf(d); return { x: p.row_start, y: Math.round(s * 100), series: c, color: cc[c], size: 7 + 10 * s, id: d.id, text: `<b>${labelOf(d)}</b>: ${titleOf(d)}<br>${causeWord(c)} · ${t('common.group')} ${d.group_id ?? '–'} · ${t('mon.rows')} ${p.row_start}–${p.row_end}` }; }).filter(Boolean);
       if (items.length) {
         const tNode = chartNode();
         const many = items.length > MANY;
@@ -159,7 +161,7 @@ export async function render(main, params = {}) {
     if (!rows.length) { list.append(empty(patternFilter ? t('diag.noneForPattern', { p: patternFilter }) : t('diag.none'))); return; }
     listTable = table({
       columns: [
-        { label: '', render: (d) => refLink('diagnosis', d.id, d.id.replace('DIAG-', '')) },
+        { label: '', render: (d) => refLink('diagnosis', d.id, labelOf(d)) },
         { label: td('diag.col.what'), cls: 'wrap', render: (d) => el('span', {}, el('b', { text: titleOf(d) }), d.human_status ? el('span', { class: 'small', style: { marginLeft: '6px' } }, infStatus(null, { human: d.human_status })) : null) },
         { label: t('diag.cause'), render: (d) => causeChip(d.cause_class) },
         { label: t('common.group'), render: (d) => (d.group_id !== null && d.group_id !== undefined ? refLink('group', String(d.group_id)) : '–') },
@@ -181,7 +183,7 @@ export async function render(main, params = {}) {
     const nested = techNested();
     detail.append(nested);
     const T = nested.body;
-    T.append(el('div', { class: 'row small muted', style: { marginTop: '4px' } }, el('span', { text: d.id }), el('span', {}, `${t('common.group')} `, d.group_id !== null && d.group_id !== undefined ? refLink('group', String(d.group_id)) : '–'), d.pattern_id ? refLink('pattern', d.pattern_id) : null, d.narrative_source ? el('span', { text: `${t('common.source')}: ${d.narrative_source}` }) : null));
+    T.append(el('div', { class: 'row small muted', style: { marginTop: '4px' } }, el('span', { text: labelOf(d), title: d.id }), el('span', {}, `${t('common.group')} `, d.group_id !== null && d.group_id !== undefined ? refLink('group', String(d.group_id)) : '–'), d.pattern_id ? refLink('pattern', d.pattern_id) : null, d.narrative_source ? el('span', { text: `${t('common.source')}: ${d.narrative_source}` }) : null));
     // plain verdict line: what, how sure, how serious
     T.append(el('p', { class: 'verdictline' }, el('b', {}, t('diag.howSure')), ' ', confWords(d.confidence), ' · ', el('b', {}, t('common.severity')), ' ', sevWords(sevOf(d))));
     // summary as prose
@@ -248,7 +250,7 @@ export async function render(main, params = {}) {
   const shownDiags = diags.filter((d) => !(d.critique && d.critique.verdict === 'rejected'));
   const topN = shownDiags.slice(0, full ? 3 : 1);
   if (topN.length) topHost.append(...[el('h2', { class: 'brief-top-title', text: bt('brief.topFindings') }), el('p', { class: 'small muted brief-top-help', text: full ? bt('brief.topFindingsHelp') + ' ' + vt('adv.topHelp') : td('brief.topFindingsHelpBasic') }),
-    ...topN.map((d) => el('div', { class: 'brief-top-item', dataset: { diag: d.id } }, full ? el('div', { class: 'brief-top-name small muted' }, refLink('diagnosis', d.id), ' · ', titleOf(d)) : null, stripHost(d))),
+    ...topN.map((d) => el('div', { class: 'brief-top-item', dataset: { diag: d.id } }, full ? el('div', { class: 'brief-top-name small muted' }, refLink('diagnosis', d.id, labelOf(d)), ' · ', titleOf(d)) : null, stripHost(d))),
     full ? null : basicMore(shownDiags.length - topN.length)].filter(Boolean));
   const want = params.diag || params.diagnosis;
   const first = want ? diags.find((d) => d.id === want) || all.find((d) => d.id === want) : diags[0];

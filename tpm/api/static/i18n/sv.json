@@ -1329,5 +1329,6 @@
   "flow.keys.with": "tillsammans med",
   "flow.keys.optional": "valfri",
   "flow.keys.get": "hämta en nyckel",
-  "flow.keys.after": "Lägg till de rader som saknas i filen, spara den och starta appen igen."
+  "flow.keys.after": "Lägg till de rader som saknas i filen, spara den och starta appen igen.",
+  "diag.label": "Fynd {n}"
 }

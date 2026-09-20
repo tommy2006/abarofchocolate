@@ -1329,5 +1329,6 @@
   "flow.keys.with": "yhdessä muuttujien kanssa",
   "flow.keys.optional": "valinnainen",
   "flow.keys.get": "hanki avain",
-  "flow.keys.after": "Lisää puuttuvat rivit tiedostoon, tallenna se ja käynnistä sovellus uudelleen."
+  "flow.keys.after": "Lisää puuttuvat rivit tiedostoon, tallenna se ja käynnistä sovellus uudelleen.",
+  "diag.label": "Loydos {n}"
 }

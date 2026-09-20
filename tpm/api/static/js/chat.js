@@ -88,7 +88,8 @@ function short(s, n) {
     flag a diagnosis explains). */
 function ctxText(ctx) {
   if (!ctx) return t('chat.noContext');
-  const id = ctx.object_id || ctx.diagnosis_id || ctx.flag_id || ctx.signal_id;
+  const raw = ctx.object_id || ctx.diagnosis_id || ctx.flag_id || ctx.signal_id;
+  const id = /^DIAG-/.test(String(raw || '')) ? t('diag.label', { n: Number(String(raw).replace(/\D+/g, '')) || '?' }) : raw;
   const title = cleanText(ctx.title || '');
   return title ? `${id} · ${short(title, 60)}` : String(id);
 }
