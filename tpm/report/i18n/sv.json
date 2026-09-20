@@ -420,5 +420,6 @@
   "trend_stats": "trend under händelsen: Kendalls tau {tau}, {sig} på 1 %-nivån; {outside} av avläsningarna utanför det normala bandet",
   "trends_none": "Ingen drift eller lång händelse att visa.",
   "trend_sig_yes": "signifikant",
-  "trend_sig_no": "inte signifikant"
+  "trend_sig_no": "inte signifikant",
+  "diagnosis_label": "Fynd {n}"
 }

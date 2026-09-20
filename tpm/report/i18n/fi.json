@@ -420,5 +420,6 @@
   "trend_stats": "trendi tapahtuman aikana: Kendallin tau {tau}, {sig} 1 %:n tasolla; {outside} lukemista normaalin alueen ulkopuolella",
   "trends_none": "Ei piirrettävää ajautumista tai pitkää tapahtumaa.",
   "trend_sig_yes": "merkitsevä",
-  "trend_sig_no": "ei merkitsevä"
+  "trend_sig_no": "ei merkitsevä",
+  "diagnosis_label": "Löydös {n}"
 }

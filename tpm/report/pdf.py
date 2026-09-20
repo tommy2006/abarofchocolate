@@ -903,7 +903,7 @@ class _Doc:
         t = self.t
         out: list[Any] = []
         crit = d.get("critique") or None
-        head = f"<b>{esc(d.get('id'))}</b> — {esc(t('fault_type'))}: <b>{esc(fit_text(d.get('fault_type'), 90)[0])}</b>"
+        head = f"<b>{esc(d.get('label') or d.get('id'))}</b> — {esc(t('fault_type'))}: <b>{esc(fit_text(d.get('fault_type'), 90)[0])}</b>"
         out += self.H(head, 2, markup=True, need_mm=62.0)
         meta = [f"{t('cause_class')}: {d.get('cause_label')}", f"{t('confidence')} {_pct(d.get('confidence'))}", f"{t('group')} {d.get('group_id') or t('na_short')}"]
         if d.get("flag_ids"):

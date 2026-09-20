@@ -5,6 +5,7 @@ artifact into the shape the UI and report expect (summary / assumptions / uncert
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -57,6 +58,12 @@ def _read(ws, name: str, default: Any = None) -> Any:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return default
+
+
+def _finding_label(did: Any) -> str:
+    """"Finding 2" for DIAG-000002; the raw identifier only where a machine reads it."""
+    n = re.sub(r"\D+", "", str(did or ""))
+    return f"Finding {int(n)}" if n else str(did or "")
 
 
 def _conf_words(c: Optional[float]) -> str:
@@ -260,7 +267,7 @@ def _plain_diagnoses(ws) -> list[str]:
     lines = []
     for d in top:
         sig = ", ".join(r.get("signal") for r in (d.get("ranked_signals") or [])[:2])
-        lines.append(f"{d['id']}: {d.get('fault_type')} (group {d.get('group_id')}, signals {sig}, {_conf_words(d.get('confidence'))})")
+        lines.append(f"{_finding_label(d.get('id'))}: {d.get('fault_type')} (group {d.get('group_id')}, signals {sig}, {_conf_words(d.get('confidence'))})")
     p2 = "Most confident: " + "; ".join(lines) + "." if lines else ""
     crit = Counter((d.get("critique") or {}).get("verdict") for d in diags)
     p3 = f"Every diagnosis was challenged before being shown: {crit.get('supported', 0)} held up, {crit.get('weakened', 0)} were weakened, {crit.get('rejected', 0)} rejected. Each one lists the steps of its reasoning, what it assumed, what stays uncertain, and the evidence it relies on. You can accept, question or override any of them; your decision is logged."

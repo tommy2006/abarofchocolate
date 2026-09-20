@@ -513,6 +513,12 @@ def _drift_trends(ws: Workspace, flags: list[dict[str, Any]], signals: list[dict
     return {"items": items, "n_drift": len(drift)}
 
 
+def diagnosis_label(t: Any, did: Any) -> str:
+    """"Finding 2" for DIAG-000002: what a person says out loud. The identifier stays on the row for the anchor."""
+    n = re.sub(r"\D+", "", str(did or ""))
+    return t("diagnosis_label", n=int(n)) if n else str(did or "")
+
+
 def _diverse(diags: list[dict[str, Any]], sev: dict[int, float]) -> list[dict[str, Any]]:
     """A varied sample instead of the top-N of one artefact: diagnoses are grouped by (cause, pattern / fault type) and
     taken round-robin, the most severe of each group first."""
@@ -775,7 +781,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
     for i_d, d in enumerate(diags_sorted[:MAX_DIAGNOSES]):
         if i_d >= MAX_DIAG_CARDS:  # compact row: what, where, how sure, and the first whole sentences of the summary
             crit_c = d.get("critique") or None
-            diag_rows.append({"id": d.get("id"), "compact": True, "group_id": d.get("group_id"), "pattern_id": d.get("pattern_id"), "flag_ids": (d.get("flag_ids") or [])[:6], "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "cause_label": t.cause(d.get("cause_class")), "confidence": d.get("confidence"), "severity": diag_sev[id(d)], "critique": {"verdict": crit_c.get("verdict")} if crit_c else None, "verdict_label": t.verdict(crit_c.get("verdict")) if crit_c else "", "human_status": d.get("human_status"), "summary": whole_sentences(clean_text(d.get("summary")), 260) or _short(clean_text(d.get("summary")), 260)})
+            diag_rows.append({"id": d.get("id"), "label": diagnosis_label(t, d.get("id")), "compact": True, "group_id": d.get("group_id"), "pattern_id": d.get("pattern_id"), "flag_ids": (d.get("flag_ids") or [])[:6], "fault_type": d.get("fault_type"), "cause_class": d.get("cause_class"), "cause_label": t.cause(d.get("cause_class")), "confidence": d.get("confidence"), "severity": diag_sev[id(d)], "critique": {"verdict": crit_c.get("verdict")} if crit_c else None, "verdict_label": t.verdict(crit_c.get("verdict")) if crit_c else "", "human_status": d.get("human_status"), "summary": whole_sentences(clean_text(d.get("summary")), 260) or _short(clean_text(d.get("summary")), 260)})
             continue
         ranked = d.get("ranked_signals") or []
         svg = charts.hbars([(str(s.get("signal")), float(s.get("contribution") or 0), f"{_pct(s.get('contribution'))}{' ' + str(s.get('direction')) if s.get('direction') else ''}") for s in ranked[:8]])
@@ -789,7 +795,7 @@ def collect(ws: Workspace, settings: Optional[Settings] = None, lang: str = "en"
         if point_only:
             d = {**d, "propagation": [], "pattern_id": None}
             steps = [x for x in steps if not _ONSET_STEP_RE.match(x)]
-        diag_rows.append({**d, "compact": False, "point_only": point_only, "summary": clean_text(d.get("summary")), "steps": steps, "uncertainty": [x for x in (clean_text(x) for x in (d.get("uncertainty") or [])) if x], "cause_label": t.cause(d.get("cause_class")), "severity": severity, "ranked_svg": svg, "ranked": ranked[:8], "critique": crit, "verdict_label": t.verdict(crit.get("verdict")) if crit else "", "ev": _ev_items(d.get("evidence_ids"), evidence, explain, 5)})
+        diag_rows.append({**d, "label": diagnosis_label(t, d.get("id")), "compact": False, "point_only": point_only, "summary": clean_text(d.get("summary")), "steps": steps, "uncertainty": [x for x in (clean_text(x) for x in (d.get("uncertainty") or [])) if x], "cause_label": t.cause(d.get("cause_class")), "severity": severity, "ranked_svg": svg, "ranked": ranked[:8], "critique": crit, "verdict_label": t.verdict(crit.get("verdict")) if crit else "", "ev": _ev_items(d.get("evidence_ids"), evidence, explain, 5)})
     crit_counts = Counter((d.get("critique") or {}).get("verdict") for d in diags)
 
     # ---- humans / log

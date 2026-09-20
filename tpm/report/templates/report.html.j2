@@ -390,7 +390,7 @@ details > summary { cursor: pointer; }
   {% if n_diag_total > diagnoses|length %}<p class="stmt small">{{ t('capped_diagnoses', shown=diagnoses|length, total=n_diag_total|thousands(lang)) }}</p>{% endif %}
   {% for d in diagnoses if not d.compact %}
   <div class="card" id="{{ d.id }}">
-    <h4><span class="mono">{{ d.id }}</span> — {{ t('fault_type') }}: <b>{{ d.fault_type }}</b> · {{ t('cause_class') }}: {{ d.cause_label }} · <span class="conf">{{ t('confidence') }} {{ d.confidence|pct }}</span>
+    <h4><span title="{{ d.id }}">{{ d.label or d.id }}</span> — {{ t('fault_type') }}: <b>{{ d.fault_type }}</b> · {{ t('cause_class') }}: {{ d.cause_label }} · <span class="conf">{{ t('confidence') }} {{ d.confidence|pct }}</span>
       {% if d.critique %}<span class="badge {{ 'b-pass' if d.critique.verdict == 'supported' else ('b-fail' if d.critique.verdict == 'rejected' else 'b-warn') }}">{{ t('critique') }}: {{ d.verdict_label }}</span>{% endif %}
       {% if d.human_status %}<span class="badge b-primary">{{ t('human_status') }}: {{ d.human_status }}</span>{% endif %}
     </h4>
@@ -436,7 +436,7 @@ details > summary { cursor: pointer; }
     <thead><tr><th>{{ t('id') }}</th><th>{{ t('group') }}</th><th>{{ t('fault_type') }}</th><th>{{ t('cause_class') }}<br>{{ t('confidence') }}</th><th>{{ t('critique') }}</th><th>{{ t('summary') }}</th></tr></thead>
     <tbody>
     {% for d in compact %}
-    <tr id="{{ d.id }}"><td class="mono id">{{ d.id }}{% if d.pattern_id %}<br><span class="small">{{ d.pattern_id }}</span>{% endif %}</td><td class="mono small">{{ d.group_id or '' }}</td><td>{{ d.fault_type }}</td><td>{{ d.cause_label }}<br><span class="conf small">{{ d.confidence|pct }}</span></td><td>{% if d.critique %}<span class="badge {{ 'b-pass' if d.critique.verdict == 'supported' else ('b-fail' if d.critique.verdict == 'rejected' else 'b-warn') }}">{{ d.verdict_label }}</span>{% endif %}{% if d.human_status %} <span class="badge b-primary">{{ d.human_status }}</span>{% endif %}</td><td>{{ d.summary }}<span class="tech">{{ t('flags_ref') }}: {% for fid in d.flag_ids %}<a class="ref mono" href="#{{ fid }}">{{ fid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span></td></tr>
+    <tr id="{{ d.id }}"><td class="id" title="{{ d.id }}">{{ d.label or d.id }}{% if d.pattern_id %}<br><span class="small">{{ d.pattern_id }}</span>{% endif %}</td><td class="mono small">{{ d.group_id or '' }}</td><td>{{ d.fault_type }}</td><td>{{ d.cause_label }}<br><span class="conf small">{{ d.confidence|pct }}</span></td><td>{% if d.critique %}<span class="badge {{ 'b-pass' if d.critique.verdict == 'supported' else ('b-fail' if d.critique.verdict == 'rejected' else 'b-warn') }}">{{ d.verdict_label }}</span>{% endif %}{% if d.human_status %} <span class="badge b-primary">{{ d.human_status }}</span>{% endif %}</td><td>{{ d.summary }}<span class="tech">{{ t('flags_ref') }}: {% for fid in d.flag_ids %}<a class="ref mono" href="#{{ fid }}">{{ fid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span></td></tr>
     {% endfor %}
     </tbody>
   </table>

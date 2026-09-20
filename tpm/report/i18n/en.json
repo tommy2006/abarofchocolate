@@ -420,5 +420,6 @@
   "trend_stats": "trend over the event: Kendall's tau {tau}, {sig} at the 1 % level; {outside} of the readings outside the normal band",
   "trends_none": "No drift or long event to plot.",
   "trend_sig_yes": "significant",
-  "trend_sig_no": "not significant"
+  "trend_sig_no": "not significant",
+  "diagnosis_label": "Finding {n}"
 }

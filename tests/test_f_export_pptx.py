@@ -98,7 +98,8 @@ def test_deck_structure(fake_ws, deck_en):
     titles = [next((s.text_frame.text for s in sl.shapes if s.name.startswith("tpm-title")), "") for sl in prs.slides]
     for key in ("px_summary", "px_analysed", "px_sensors", "px_trust", "px_monitoring", "px_patterns", "px_human", "px_dataflow", "px_assessor", "px_evaluation", "px_next"):
         assert t(key) in titles, key
-    assert sum(1 for sl in prs.slides if any(s.name.startswith("tpm-kicker") and "DIAG-" in s.text_frame.text for s in sl.shapes)) == 3
+    assert sum(1 for sl in prs.slides if any(s.name.startswith("tpm-kicker") and "FINDING " in s.text_frame.text.upper() for s in sl.shapes)) == 3, "a slide per finding, named the way a person says it"
+    assert not any(s.name.startswith("tpm-kicker") and "DIAG-" in s.text_frame.text for sl in prs.slides for s in sl.shapes), "no identifiers on a slide someone reads"
 
 
 def test_every_text_frame_fits_its_budget(deck_en):
@@ -143,7 +144,7 @@ def test_long_texts_are_cut_at_sentence_boundaries(fake_ws):
     assert 10 <= len(prs.slides) <= 16
     assert_every_text_fits(prs)
     t = Translator("en")
-    diag = next(sl for sl in prs.slides if any(s.name.startswith("tpm-kicker") and "DIAG-" in s.text_frame.text for s in sl.shapes))
+    diag = next(sl for sl in prs.slides if any(s.name.startswith("tpm-kicker") and "FINDING " in s.text_frame.text.upper() for s in sl.shapes))
     body = [p.text for s in diag.shapes if s.name.startswith("tpm-body") for p in s.text_frame.paragraphs if p.text]
     cut = [x for x in body if x.endswith(ELLIPSIS)]
     assert cut and all(x.endswith(f". {ELLIPSIS}") for x in cut)  # whole sentences, then the ellipsis

@@ -88,7 +88,7 @@ def render_summary(ctx: dict[str, Any]) -> bytes:
         rows = [[P(W["problem"], "cellh"), P(W["reason"], "cellh"), P(W["todo"], "cellh")]]
         for d in diags:
             steps = d.get("steps") or []
-            rows.append([P(f"{d.get('id')}: {d.get('fault_type')} ({d.get('cause_label')}, {round(100 * float(d.get('confidence') or 0))} %)", "cell"),
+            rows.append([P(f"{d.get('label') or d.get('id')}: {d.get('fault_type')} ({d.get('cause_label')}, {round(100 * float(d.get('confidence') or 0))} %)", "cell"),
                          P(whole_sentences(_why(steps) or str(d.get("summary") or ""), 240), "cell"),
                          P(whole_sentences(_todo(steps), 240), "cell")])
         tbl = Table(rows, colWidths=[52 * mm, 64 * mm, 58 * mm])

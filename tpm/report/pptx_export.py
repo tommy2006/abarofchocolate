@@ -741,7 +741,7 @@ class _Deck:
 
     def slide_diagnosis(self, n: int, d: dict[str, Any], i: int, total: int) -> None:
         t = self.t
-        slide = self.new_slide(fit_text(str(d.get("fault_type") or t("unknown")), 62)[0], f"{t('px_diagnosis', i=i, n=total)} · {d.get('id')} · {d.get('cause_label') or ''}".rstrip(" ·"))
+        slide = self.new_slide(fit_text(str(d.get("fault_type") or t("unknown")), 62)[0], f"{t('px_diagnosis', i=i, n=total)} · {d.get('label') or d.get('id')} · {d.get('cause_label') or ''}".rstrip(" ·"))
         lw = 6.7
         y = self.heading(slide, MARGIN, CONTENT_TOP - 0.05, lw, t("px_what_happened"))
         self.text(slide, MARGIN - INSET, y, lw + INSET, 1.75, [{"text": d.get("summary") or t("not_available"), "size": 12, "after": 0}], role="body")
