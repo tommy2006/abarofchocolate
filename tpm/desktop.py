@@ -51,6 +51,7 @@ def prepare_environment() -> Path:
     d = data_dir()
     for sub in ("workspace", "logs"):
         (d / sub).mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TPM_DATA_DIR", str(d))   # so the rest of the app can name this folder to the person
     os.environ.setdefault("TPM_WORKSPACE", str(d / "workspace"))
     # user settings: a private copy of the shipped defaults, so choices made in the UI survive an upgrade
     user_settings = d / "settings.yaml"

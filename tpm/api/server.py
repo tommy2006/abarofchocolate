@@ -12,6 +12,9 @@ import asyncio
 import csv
 import functools
 import importlib
+import os
+import subprocess
+import sys
 import io
 import json
 import re
@@ -40,6 +43,42 @@ ARTIFACT_JSONL = {"checks", "trust", "flags", "diagnoses", "egress_ledger", "cha
 
 
 # --------------------------------------------------------------------------------------- helpers
+def _keys_file() -> Path:
+    from ..config import keys_file
+
+    return keys_file()
+
+
+def _key_slots(s: Any) -> list[dict[str, Any]]:
+    """Every key this app can use - one per external profile, plus the one that e-mails a report. Says which variable
+    it is read from, whether that variable has a value, and where a key comes from; never the value itself."""
+    from ..config import ExternalLLMConfig
+
+    def has(v: str) -> bool:
+        return bool((os.environ.get(v or "") or "").strip())
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name, prof in (s.profiles or {}).items():
+        if not prof.allow_external:
+            continue
+        cfg = ExternalLLMConfig(**{**s.base_external_llm.model_dump(), **dict(prof.external_llm or {})})
+        var = (cfg.api_key_env or "").strip()
+        if not var or var in seen:
+            continue
+        seen.add(var)
+        extra = ([{"variable": cfg.workspace_id_env, "set": has(cfg.workspace_id_env), "optional": True}]
+                 if cfg.provider == "anthropic" and cfg.workspace_id_env else [])
+        rows.append({"kind": "profile", "profile": name, "variable": var, "set": has(var), "also": extra,
+                     "model": cfg.model, "host": cfg.host or "api.anthropic.com", "url": cfg.key_url})
+    sm = s.report.smtp
+    rows.append({"kind": "email", "variable": sm.password_env, "set": has(sm.host_env) and has(sm.password_env),
+                 "provider": sm.provider, "url": sm.key_url,
+                 "also": [{"variable": v, "set": has(v), "optional": v == sm.port_env}
+                          for v in (sm.host_env, sm.port_env, sm.user_env, sm.from_env)]})
+    return rows
+
+
 def _lazy(dotted: str) -> Optional[Callable[..., Any]]:
     mod_name, _, fn_name = dotted.partition(":")
     try:
@@ -408,6 +447,10 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
             "guard_strict": prof.guard_strict,
             "routing": prof.routing,
             "models": models,
+            "keys_file": str(_keys_file()),
+            "keys_file_exists": _keys_file().exists(),
+            "key_variable": s.external_llm.api_key_env,
+            "keys": _key_slots(s),
             "local_model": s.local_llm.model,
             "local_base_url": s.local_llm.base_url,
             "external_model": s.external_llm.model,
@@ -1845,6 +1888,26 @@ def create_app(settings_path: Optional[str | Path] = None, workspace_dir: Option
         except Exception:
             pass
         return out
+
+    @app.post("/api/keys-folder/open")
+    def open_keys_folder(request: Request) -> dict[str, Any]:
+        """Open the folder that holds this app's key file in the file manager. Local request only; the file itself is
+        never read, sent or logged - only its folder is shown to the person sitting at the machine."""
+        host = (request.client.host if request.client else "") or ""
+        if host not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(403, "only from this computer")
+        folder = _keys_file().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(str(folder))  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as e:
+            raise HTTPException(500, f"could not open {folder}: {e}")
+        return {"ok": True, "folder": str(folder)}
 
     @app.get("/api/runs/{run_id}/egress")
     def get_egress(run_id: str, lang: str = Query("en")) -> dict[str, Any]:

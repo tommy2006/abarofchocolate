@@ -430,6 +430,12 @@
   "flow.localModel": "Local model",
   "flow.externalModel": "External model",
   "flow.keyConfigured": "API key configured",
+  "flow.keys.where": "Keys are read from one file on this computer, and travel nowhere else:",
+  "flow.keys.copy": "Copy the path",
+  "flow.keys.open": "Open the folder",
+  "flow.keys.copied": "Path copied.",
+  "flow.keys.opened": "The folder is open.",
+  "flow.keys.openFailed": "Could not open the folder; the path is above.",
   "flow.routeExists": "External route exists",
   "flow.guard": "Egress guard",
   "flow.strict": "strict",
@@ -1314,5 +1320,14 @@
   "live.msg.src.link.waiting": "Connected to {url}. Waiting for new rows (checking every second).",
   "live.msg.src.link.checked": "Connected to {url}. Last check {time}.",
   "live.msg.src.watching": "Watching {path} for new rows.",
-  "live.msg.src.stopped": "Stopped by the operator."
+  "live.msg.src.stopped": "Stopped by the operator.",
+  "flow.keys.title": "Keys for the full experience",
+  "flow.keys.introAll": "All {total} keys are on this computer: both external profiles and the e-mailed report can be tried.",
+  "flow.keys.introMissing": "{n} of {total} keys are missing. Nothing breaks without them - the app runs end to end on this computer - but the parts below stay switched off.",
+  "flow.keys.forProfile": "the {profile} profile — {model} at {host}",
+  "flow.keys.forEmail": "e-mailing a report from the app ({provider})",
+  "flow.keys.with": "with",
+  "flow.keys.optional": "optional",
+  "flow.keys.get": "get a key",
+  "flow.keys.after": "Add the missing lines to that file, save it, and start the app again."
 }

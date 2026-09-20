@@ -430,6 +430,12 @@
   "flow.localModel": "Lokal modell",
   "flow.externalModel": "Extern modell",
   "flow.keyConfigured": "API-nyckel konfigurerad",
+  "flow.keys.where": "Nycklar läses från en fil på den här datorn och färdas ingen annanstans:",
+  "flow.keys.copy": "Kopiera sökvägen",
+  "flow.keys.open": "Öppna mappen",
+  "flow.keys.copied": "Sökvägen kopierad.",
+  "flow.keys.opened": "Mappen är öppen.",
+  "flow.keys.openFailed": "Kunde inte öppna mappen; sökvägen finns ovan.",
   "flow.routeExists": "Extern väg finns",
   "flow.guard": "Utgångsskydd",
   "flow.strict": "strikt",
@@ -1314,5 +1320,14 @@
   "live.msg.src.link.waiting": "Ansluten till {url}. Väntar på nya rader (kontroll varje sekund).",
   "live.msg.src.link.checked": "Ansluten till {url}. Senaste kontroll {time}.",
   "live.msg.src.watching": "Bevakar {path} efter nya rader.",
-  "live.msg.src.stopped": "Stoppad av operatören."
+  "live.msg.src.stopped": "Stoppad av operatören.",
+  "flow.keys.title": "Nycklar för hela upplevelsen",
+  "flow.keys.introAll": "Alla {total} nycklar finns på den här datorn: båda de externa profilerna och rapporten via e-post kan provas.",
+  "flow.keys.introMissing": "{n} av {total} nycklar saknas. Ingenting går sönder - appen kör hela vägen på den här datorn - men delarna nedan förblir avstängda.",
+  "flow.keys.forProfile": "profilen {profile} — {model} hos {host}",
+  "flow.keys.forEmail": "att skicka en rapport med e-post ({provider})",
+  "flow.keys.with": "tillsammans med",
+  "flow.keys.optional": "valfri",
+  "flow.keys.get": "hämta en nyckel",
+  "flow.keys.after": "Lägg till de rader som saknas i filen, spara den och starta appen igen."
 }

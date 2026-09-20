@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SETTINGS_PATH = ROOT / "config" / "settings.yaml"
 
 
+def keys_file() -> Path:
+    """The file this app reads its keys from: the per-user data folder when it runs as the Windows app (it sets
+    TPM_DATA_DIR), otherwise the .env next to the project. Named in the UI so nobody has to be told where it is."""
+    d = os.environ.get("TPM_DATA_DIR", "").strip()
+    return (Path(d) if d else ROOT) / ".env"
+
+
 def _settings_path() -> Path:
     """TPM_SETTINGS points the app at a settings file outside the program folder (the installed desktop app keeps
     the user's copy under %LOCALAPPDATA%, so an upgrade does not reset choices made in the UI)."""
@@ -87,6 +94,7 @@ class ExternalLLMConfig(BaseModel):
     operator: str = ""  # who runs the endpoint, for the data-flow statement (e.g. "the hackathon organisers on Verda")
     location: str = ""  # where the model runs, for the data-flow statement (e.g. "Finland (EU)")
 
+    key_url: str = ""  # where a key of your own comes from; the app shows it beside the variable name
     workspace_id_env: str = "ANTHROPIC_WORKSPACE_ID"  # only for API keys that are not tied to one workspace
 
     @property
@@ -213,6 +221,8 @@ class SmtpConfig(BaseModel):
     user_env: str = "TPM_SMTP_USER"
     password_env: str = "TPM_SMTP_PASSWORD"
     from_env: str = "TPM_SMTP_FROM"
+    provider: str = ""   # the service these variables are meant for, named in the app (e.g. "Resend")
+    key_url: str = ""
 
 
 class ReportConfig(BaseModel):

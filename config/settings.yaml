@@ -48,6 +48,7 @@ profiles:
       base_url: https://containers.datacrunch.io/data-sovereignty-mistral-large-3/v1
       model: mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4
       api_key_env: TPM_EU_API_KEY
+      key_url: https://console.verda.com   # the hackathon key comes from the organisers; this is Verda's own console
       allowed_model_patterns: [mistral]
       operator: the hackathon organisers (Verda serverless containers)
       location: Finland (EU)
@@ -82,6 +83,7 @@ external_llm:
   allowed_model_patterns: [sonnet, opus]  # a model id must contain one of these ...
   blocked_model_patterns: [fable, mythos] # ... and none of these (checked on the lower-cased id)
   api_key_env: ANTHROPIC_API_KEY
+  key_url: https://console.anthropic.com/settings/keys   # where a key of your own comes from (shown in the app)
   base_url: null                    # set to an EU-hosted endpoint for the eu-hosted profile
   max_tokens: 4096                  # output cap per call (thinking tokens count toward it)
   effort: low                       # low | medium | high | xhigh | max; low is the fastest
@@ -167,6 +169,8 @@ report:
     user_env: TPM_SMTP_USER
     password_env: TPM_SMTP_PASSWORD
     from_env: TPM_SMTP_FROM
+    provider: Resend, or any other SMTP server   # named in the app when it asks for the key
+    key_url: https://resend.com/api-keys
 
 workspace_dir: workspace
 time_budget_s: 1200                 # 20 minutes for a full pass on a 6 GB file

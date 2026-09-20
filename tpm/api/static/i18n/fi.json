@@ -430,6 +430,12 @@
   "flow.localModel": "Paikallinen malli",
   "flow.externalModel": "Ulkoinen malli",
   "flow.keyConfigured": "API-avain määritetty",
+  "flow.keys.where": "Avaimet luetaan yhdestä tiedostosta tällä koneella, eivätkä ne kulje minnekään muualle:",
+  "flow.keys.copy": "Kopioi polku",
+  "flow.keys.open": "Avaa kansio",
+  "flow.keys.copied": "Polku kopioitu.",
+  "flow.keys.opened": "Kansio on auki.",
+  "flow.keys.openFailed": "Kansiota ei voitu avata; polku on yllä.",
   "flow.routeExists": "Ulkoinen reitti olemassa",
   "flow.guard": "Lähtevän datan suoja",
   "flow.strict": "tiukka",
@@ -1314,5 +1320,14 @@
   "live.msg.src.link.waiting": "Yhdistetty osoitteeseen {url}. Odotetaan uusia rivejä (tarkistus joka sekunti).",
   "live.msg.src.link.checked": "Yhdistetty osoitteeseen {url}. Viimeisin tarkistus {time}.",
   "live.msg.src.watching": "Seurataan tiedostoa {path} uusien rivien varalta.",
-  "live.msg.src.stopped": "Operaattori pysäytti datalähteen."
+  "live.msg.src.stopped": "Operaattori pysäytti datalähteen.",
+  "flow.keys.title": "Avaimet täyteen kokemukseen",
+  "flow.keys.introAll": "Kaikki {total} avainta ovat tällä koneella: molemmat ulkoiset profiilit ja raportin lähetys sähköpostilla voidaan kokeilla.",
+  "flow.keys.introMissing": "{n}/{total} avainta puuttuu. Mikään ei hajoa - sovellus toimii alusta loppuun tällä koneella - mutta alla olevat osat pysyvät pois päältä.",
+  "flow.keys.forProfile": "profiili {profile} — {model} palvelussa {host}",
+  "flow.keys.forEmail": "raportin lähettäminen sähköpostilla ({provider})",
+  "flow.keys.with": "yhdessä muuttujien kanssa",
+  "flow.keys.optional": "valinnainen",
+  "flow.keys.get": "hanki avain",
+  "flow.keys.after": "Lisää puuttuvat rivit tiedostoon, tallenna se ja käynnistä sovellus uudelleen."
 }

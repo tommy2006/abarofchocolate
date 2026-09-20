@@ -291,3 +291,49 @@ def test_missing_artifacts_are_graceful(client, tmp_path):
         assert r.status_code == 200 and r.json()["answer"]["message"]
         assert c.post("/api/runs/empty_run/stream/replay", json={}).status_code == 409
         assert c.get("/api/runs/empty_run/report", params={"lang": "en"}).status_code in (200, 500, 501)
+
+
+def test_settings_say_where_this_computer_keeps_its_keys(client):
+    """Nobody should have to be told the path out loud: the app names the file it reads keys from, the variable the
+    active profile needs, and whether the file is there."""
+    d = client.get("/api/settings").json()
+    assert d["keys_file"].endswith(".env") and isinstance(d["keys_file_exists"], bool)
+    assert d["key_variable"], "the active profile's key variable is named"
+    from tpm.config import keys_file
+
+    assert d["keys_file"] == str(keys_file())
+
+
+def test_the_keys_folder_opens_only_from_this_computer(client, monkeypatch):
+    """The button opens the folder for the person sitting at the machine; a request from anywhere else is refused and
+    the key file itself is never read or sent."""
+    from starlette.testclient import TestClient
+
+    from tpm.config import keys_file
+
+    opened = []
+    monkeypatch.setattr("os.startfile", lambda p: opened.append(p), raising=False)
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: opened.append(a), raising=False)
+    here = TestClient(client.app, client=("127.0.0.1", 40404))
+    r = here.post("/api/keys-folder/open", json={})
+    assert r.status_code == 200 and r.json()["ok"]
+    assert r.json() == {"ok": True, "folder": str(keys_file().parent)}, "only the folder comes back, never the file"
+    assert opened, "the folder was handed to the file manager"
+    elsewhere = TestClient(client.app, client=("10.0.0.7", 40404))
+    assert elsewhere.post("/api/keys-folder/open", json={}).status_code == 403
+
+
+def test_every_key_the_app_can_use_is_named_with_where_to_get_it(client, monkeypatch):
+    """A judge who wants the full experience must not have to guess: the app names every key it can use, the variable
+    it reads it from, whether it is there, and where one comes from - and never the value itself."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret-value-of-mine")
+    monkeypatch.delenv("TPM_EU_API_KEY", raising=False)
+    monkeypatch.delenv("TPM_SMTP_HOST", raising=False)
+    keys = client.get("/api/settings").json()["keys"]
+    by_var = {k["variable"]: k for k in keys}
+    assert {"ANTHROPIC_API_KEY", "TPM_EU_API_KEY", "TPM_SMTP_PASSWORD"} <= set(by_var), "both external routes and e-mail"
+    assert by_var["ANTHROPIC_API_KEY"]["set"] is True and by_var["TPM_EU_API_KEY"]["set"] is False
+    assert by_var["TPM_SMTP_PASSWORD"]["set"] is False, "e-mail needs a server as well as a key"
+    for k in keys:
+        assert k["url"].startswith("https://"), f"{k['variable']} says where a key comes from"
+    assert "sk-secret-value-of-mine" not in json.dumps(keys), "presence is reported, never the value"

@@ -143,3 +143,15 @@
 .net-rel h3 { margin: 0 0 6px; font-size: 15px; }
 .net-rel p { margin: 0 0 6px; }
 .net-rel .row { flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+/* where this computer keeps the key of the active profile (Data flow page) */
+.keys-box { margin-top: 10px; border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: var(--radius); padding: 8px 12px; background: var(--bg-3); max-width: 100ch; }
+.keys-box.missing { border-left-color: var(--warn); }
+.keys-box code { overflow-wrap: anywhere; }
+
+/* one line per key the app can use (Data flow page) */
+.key-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.key-row { display: flex; gap: 8px; align-items: baseline; }
+.key-row .key-mark { color: var(--ok); font-weight: 700; }
+.key-row.missing .key-mark { color: var(--warn); }
+.key-row code { overflow-wrap: anywhere; }

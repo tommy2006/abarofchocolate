@@ -8,6 +8,29 @@ one-time dependency install.
 in the top bar) to see the app as a busy operator would - only the essentials - and **Engineer** to see everything.
 Every problem is shown as *Problem -> Reason -> What to do*; **A-/A+** changes the text size.
 
+## Keys: none needed, three for everything
+
+The app analyses, explains, judges and reports **with no key at all** - that is the point of the default `no-egress`
+profile. Three keys unlock the parts that reach outside; add all three for the full experience:
+
+| Put this in the file below | Unlocks | Where a key comes from |
+|---|---|---|
+| `ANTHROPIC_API_KEY` (and `ANTHROPIC_WORKSPACE_ID` only for an organisation key) | the **hybrid** profile: Claude Sonnet 5 writes the narratives and answers the chat, on aggregates the guard has cleared | https://console.anthropic.com/settings/keys |
+| `TPM_EU_API_KEY` | the **eu-hosted** profile: Mistral Large 3 on Verda's GPU containers in Finland - the same routing without leaving the EU | the hackathon organisers, or your own at https://console.verda.com |
+| `TPM_SMTP_PASSWORD` (with `TPM_SMTP_HOST`, `TPM_SMTP_USER`, `TPM_SMTP_FROM`) | **e-mailing** the report and the deck from the Report page | https://resend.com/api-keys (`smtp.resend.com`, port 465, user `resend`) |
+
+All of them live in one plain-text file on the machine, and travel nowhere else:
+
+- **installed Windows app:** `%LOCALAPPDATA%\NorrinTPM\.env` - in File Explorer, paste `%LOCALAPPDATA%\NorrinTPM`
+  into the address bar; it is `C:\Users\<you>\AppData\Local\NorrinTPM`, the folder Windows gives the app for its
+  own settings (the same folder holds `settings.yaml`, `logs` and `workspace`)
+- **from a clone:** the `.env` beside `run.bat` (copy `.env.example` to `.env`)
+
+The app shows that path itself, with **Copy the path** and **Open the folder**, in *7 Data flow & privacy > Show
+technical analyses > Keys for the full experience*, and a tick beside every key it can already see. Add the lines,
+save the file, start the app again. Without them nothing breaks: the run, the checks, the diagnoses, the assessor,
+the report and the chat all keep working on the local model.
+
 ## 0. Start (1 minute of typing, a few minutes of installing)
 
 ```
