@@ -49,7 +49,7 @@ config key or a clearly bounded module so it can be flipped without a rewrite.
 | 40 | Assessor evaluates any natural-language action but recommends only when evidence supports it; nothing applied without approval. | assessor + agent |
 | 41 | Precompute at training + on-demand bounded experiments. | assessor |
 | 42 | Advise + apply with approval, logged. | assessor + decision log |
-| 43 | Custom UI: FastAPI + hand-built modern frontend (no Streamlit / no build step), following `docs/skills/frontend-design.md`. | `tpm/api/static` |
+| 43 | Custom UI: FastAPI + hand-built modern frontend (no Streamlit / no build step), following `docs/FRONTEND_DESIGN.md`. | `tpm/api/static` |
 | 44 | Roles: operator / engineer / reviewer with role-dependent views. | UI |
 | 45 | Overrides feed back into later stages and are logged. | decision log + stages |
 | 46 | SQLite log with hash chain + JSONL export; HTML report; EN/FI/SV; email. | `tpm/log`, `tpm/report` |

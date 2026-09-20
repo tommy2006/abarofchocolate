@@ -389,10 +389,13 @@ tpm/
   live/                       live sensor monitor: engine (four checks), monitor (sources, loop, AI-chosen sensitivity), /api/live routes
   log/                        hash-chained decision log, exports
   report/                     HTML report (Jinja2, inline SVG), PDF (pdf.py), PowerPoint (pptx_export.py), i18n EN/FI/SV, e-mail
-config/settings.yaml          all tunables and profiles;  config/rules.example.md  example rules
-samples/                      small synthetic demo files (scripts/make_samples.py)
-docs/                         DECISIONS, ARCHITECTURE, DATAFLOW, ADAPTABILITY, EVALUATION, JUDGES_GUIDE, worklog/
-tests/                        pytest (tests/fixtures/synth.py is the shared synthetic generator)
+config/                       settings.yaml (all tunables and profiles), failure_signatures.yaml (known failure
+                              types for the live monitor), rules.example.md
+samples/                      small synthetic demo files, one per domain (samples/README.md)
+scripts/                      generators for the samples, the local-model bakeoff, a model check
+packaging/windows/            PyInstaller spec, setup program, icon (build.ps1 makes dist\NorrinTPM-Setup.exe)
+docs/                         everything written down; docs/README.md is the table of contents
+tests/                        pytest, ~650 tests (tests/fixtures/synth.py is the shared synthetic generator)
 workspace/<run_id>/           every artifact of a run (git-ignored)
 ```
 

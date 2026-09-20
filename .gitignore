@@ -20,3 +20,7 @@ Thumbs.db
 # Windows packaging output (packaging/windows/build.ps1); the setup file is published as a release asset
 build/
 dist/
+
+# local working folders (exports people make while demonstrating)
+reports/
+message.txt

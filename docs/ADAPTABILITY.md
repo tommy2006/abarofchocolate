@@ -80,7 +80,7 @@ from "broken process", and every claim links to evidence IDs.
 
 ### C. Log / free-text records (third domain - implemented and run)
 
-`samples/demo_log.csv` (made by `samples/make_demo_log.py`, truth in `samples/demo_log_truth.json`) is a web-service
+`samples/demo_log.csv` (made by `scripts/make_demo_log.py`, truth in `samples/demo_log_truth.json`) is a web-service
 event log: timestamp, service, level, status code, latency, bytes, user id and a free-text message, with four planted
 problems (a database incident, a logging bug that writes latency 0, 100 rows written twice, a slow memory leak).
 
