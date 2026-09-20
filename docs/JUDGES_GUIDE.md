@@ -47,6 +47,12 @@ To use your own file instead: drop it on the **Runs** page (or `python -m tpm ru
 nothing needs to be labelled. No Python? Install the Windows app from the
 latest release: https://github.com/tommy2006/abarofchocolate/releases/latest (see the README).
 
+**On a Mac** there is no installer; the same run is one command from this repository:
+`git clone https://github.com/tommy2006/abarofchocolate.git && cd abarofchocolate && chmod +x run.sh && ./run.sh --demo`
+(Python 3.10+; the launcher makes the environment, analyses a synthetic dataset and opens the UI). If LightGBM
+complains about OpenMP, either `brew install libomp` or ignore it - the app falls back to logistic regression for
+pattern reliability and says so.
+
 Then, on the finished run, let the app demonstrate the parts that need a person or a rule:
 
 ```

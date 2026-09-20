@@ -52,6 +52,27 @@ Your analyses and settings are kept in `%LOCALAPPDATA%\NorrinTPM`; the program i
 
 ---
 
+## On a Mac (or Linux): one command, from source
+
+There is no Mac build - the installer above is Windows only - so the app is run from this repository:
+
+```
+git clone https://github.com/tommy2006/abarofchocolate.git
+cd abarofchocolate && chmod +x run.sh && ./run.sh --demo
+```
+
+That needs **Python 3.10+** (3.12 recommended) and nothing else: the launcher makes a `.venv`, installs the
+requirements, generates a synthetic dataset, runs the whole pipeline on it and opens the UI at
+**http://127.0.0.1:8000**. Without `git`, take *Source code (zip)* from the
+[latest release](https://github.com/tommy2006/abarofchocolate/releases/latest) - it is the code the Windows
+installer was built from. `./run.sh --doctor` prints what is missing if anything is.
+
+One macOS wrinkle worth knowing: LightGBM needs OpenMP, which usually means `brew install libomp`. Without it the
+import fails and the app **keeps working** - pattern reliability is then scored with logistic regression instead,
+and the page says which method it used. Nothing else in the dependency list is platform-specific.
+
+---
+
 ## 60-second start
 
 Requirements: **Python 3.10+** (3.12 recommended), ~2 GB free disk. No Docker, no API key, no account.
